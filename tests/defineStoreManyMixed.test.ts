@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
+import { createDekHandle } from "./testKeyHandle.ts";
 import {
   configureSecureStore,
   defineStore,
@@ -25,10 +25,10 @@ function mixedMemoryAdapter(): StorageAdapter & {
     `${collection}:${userId}:${id}`;
   return {
     rows,
-    async getOne() {
+    async get() {
       return null;
     },
-    async putOne() {},
+    async put() {},
     async list(collection, userId, _plainColumns) {
       const prefix = `${collection}:${userId}:`;
       const out: Array<{

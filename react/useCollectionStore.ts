@@ -1,15 +1,23 @@
 /**
  * React binding for `many` (`CollectionStore`) — same gating/cache/optimistic-write
  * pattern as `useStore`/`useKeyedStore`, but the cache slot holds the WHOLE list
- * (`Array<{ id, data }>`), since `many` has no single "current value" — `create`/
- * `update`/`remove` each read-modify-write that array optimistically.
+ * (`Array<{ id, data, hash }>`), since `many` has no single "current value" —
+ * `create`/`update`/`remove` each read-modify-write that array optimistically.
+ *
+ * `update()` transparently uses `updateIfMatch` when the store has
+ * `optimisticLock: true`, threading each row's own hash from the cached list — a
+ * conflict throws `OptimisticLockConflictError`. `create`/`remove` don't need it:
+ * there's no prior state to protect (a new id can't conflict; delete is idempotent
+ * at the framework level, "already gone" isn't a data-loss risk the way a silently
+ * overwritten edit is).
  */
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { getSecureStoreConfig } from "../core/config.ts";
 import type { CollectionStore } from "../core/store.ts";
+import { OptimisticLockConflictError } from "./errors.ts";
 
 export interface UseCollectionStoreResult<T> {
-  items: Array<{ id: string; data: T }>;
+  items: Array<{ id: string; data: T; hash: string | null }>;
   loading: boolean;
   locked: boolean;
   error: Error | null;
@@ -33,7 +41,7 @@ export function useCollectionStore<T>(
     );
   }
 
-  type Items = Array<{ id: string; data: T }>;
+  type Items = Array<{ id: string; data: T; hash: string | null }>;
 
   const dek = useSyncExternalStore(keys.subscribe, keys.getDek);
   const userId = useSyncExternalStore(keys.subscribe, keys.getUserId);
@@ -85,7 +93,7 @@ export function useCollectionStore<T>(
       const previous = cache.getQueryData<Items>(cacheKey) ?? [];
       try {
         const id = await store.create(userId, dek, data);
-        cache.setQueryData(cacheKey, [...previous, { id, data }]);
+        cache.setQueryData(cacheKey, [...previous, { id, data, hash: null }]);
         return id;
       } catch (e) {
         cache.setQueryData(cacheKey, previous);
@@ -99,12 +107,38 @@ export function useCollectionStore<T>(
     async (id: string, data: T): Promise<void> => {
       const { dek, userId } = requireUnlocked("update");
       const previous = cache.getQueryData<Items>(cacheKey) ?? [];
+      const currentHash = previous.find((item) => item.id === id)?.hash ?? null;
       cache.setQueryData(
         cacheKey,
-        previous.map((item) => (item.id === id ? { id, data } : item)),
+        previous.map((item) =>
+          item.id === id ? { id, data, hash: currentHash } : item,
+        ),
       );
       try {
-        await store.update(userId, dek, id, data);
+        if (store.updateIfMatch) {
+          const result = await store.updateIfMatch(
+            userId,
+            dek,
+            id,
+            data,
+            currentHash,
+          );
+          if (!result.ok) throw new OptimisticLockConflictError(store.name);
+          cache.setQueryData(
+            cacheKey,
+            previous.map((item) =>
+              item.id === id ? { id, data, hash: result.hash } : item,
+            ),
+          );
+        } else {
+          await store.update(userId, dek, id, data);
+          cache.setQueryData(
+            cacheKey,
+            previous.map((item) =>
+              item.id === id ? { id, data, hash: null } : item,
+            ),
+          );
+        }
       } catch (e) {
         cache.setQueryData(cacheKey, previous);
         throw e;

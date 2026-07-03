@@ -3,8 +3,8 @@ import { cleanup, renderHook, act, waitFor } from "@testing-library/react";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
-import type { DekHandle } from "@crypto/field-crypto";
+import { createDekHandle } from "./testKeyHandle.ts";
+import type { CryptoHandle } from "@datacloak";
 import {
   configureSecureStore,
   __resetSecureStoreConfig,
@@ -16,6 +16,7 @@ import {
   type CacheAdapter,
 } from "../index.ts";
 import { useCollectionStore } from "../react/useCollectionStore.ts";
+import { OptimisticLockConflictError } from "../react/errors.ts";
 
 function collectionMemoryStorage(): StorageAdapter & {
   rows: Map<string, BlobRecord>;
@@ -24,10 +25,10 @@ function collectionMemoryStorage(): StorageAdapter & {
   const keyOf = (c: string, u: string, id: string) => `${c}:${u}:${id}`;
   return {
     rows,
-    async getOne() {
+    async get() {
       return null;
     },
-    async putOne() {},
+    async put() {},
     async list(collection, userId) {
       const prefix = `${collection}:${userId}:`;
       const out: Array<{
@@ -53,7 +54,65 @@ function collectionMemoryStorage(): StorageAdapter & {
   };
 }
 
-function fakeKeys(initial: DekHandle | null) {
+function conditionalCollectionStorage(): StorageAdapter & {
+  rows: Map<string, { record: BlobRecord; plain: Record<string, unknown> }>;
+} {
+  const rows = new Map<
+    string,
+    { record: BlobRecord; plain: Record<string, unknown> }
+  >();
+  const keyOf = (c: string, u: string, id: string) => `${c}:${u}:${id}`;
+  return {
+    rows,
+    async get() {
+      return null;
+    },
+    async put() {},
+    async list(collection, userId) {
+      const prefix = `${collection}:${userId}:`;
+      const out: Array<{
+        id: string;
+        record: BlobRecord;
+        plain: Record<string, unknown>;
+      }> = [];
+      for (const [k, { record, plain }] of rows) {
+        if (k.startsWith(prefix))
+          out.push({ id: k.slice(prefix.length), record, plain });
+      }
+      return out;
+    },
+    async insert(collection, userId, id, record, plain) {
+      rows.set(keyOf(collection, userId, id), { record, plain });
+    },
+    async updateById(collection, userId, id, record, plain) {
+      rows.set(keyOf(collection, userId, id), { record, plain });
+    },
+    async updateByIdIfMatch(
+      collection,
+      userId,
+      id,
+      record,
+      plain,
+      expectedHash,
+    ) {
+      const key = keyOf(collection, userId, id);
+      const current = rows.get(key) ?? null;
+      if (expectedHash === null) {
+        if (current) return false;
+        rows.set(key, { record, plain });
+        return true;
+      }
+      if (!current || current.record.contentHash !== expectedHash) return false;
+      rows.set(key, { record, plain });
+      return true;
+    },
+    async deleteById(collection, userId, id) {
+      rows.delete(keyOf(collection, userId, id));
+    },
+  };
+}
+
+function fakeKeys(initial: CryptoHandle | null) {
   let dek = initial;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
@@ -66,7 +125,7 @@ function fakeKeys(initial: DekHandle | null) {
   };
   return {
     provider,
-    setDek: (n: DekHandle | null) => {
+    setDek: (n: CryptoHandle | null) => {
       dek = n;
       for (const cb of subs) cb();
     },
@@ -152,7 +211,7 @@ describe("useCollectionStore", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     expect(result.current.items).toEqual([
-      { id, data: { name: "sim-1", addedLiquidity: 100 } },
+      { id, data: { name: "sim-1", addedLiquidity: 100 }, hash: null },
     ]);
   });
 
@@ -182,7 +241,7 @@ describe("useCollectionStore", () => {
     });
 
     expect(result.current.items).toEqual([
-      { id: newId, data: { name: "sim-1", addedLiquidity: 50 } },
+      { id: newId, data: { name: "sim-1", addedLiquidity: 50 }, hash: null },
     ]);
     assertRowPersisted(storage, newId);
   });
@@ -192,10 +251,10 @@ describe("useCollectionStore", () => {
     const { provider } = fakeKeys(dek);
     let shouldFail = false;
     const storage: StorageAdapter = {
-      async getOne() {
+      async get() {
         return null;
       },
-      async putOne() {},
+      async put() {},
       async list() {
         return [];
       },
@@ -229,7 +288,7 @@ describe("useCollectionStore", () => {
     const { result } = renderHook(() => useCollectionStore(store));
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.items).toEqual([
-      { id, data: { name: "v1", addedLiquidity: 1 } },
+      { id, data: { name: "v1", addedLiquidity: 1 }, hash: null },
     ]);
 
     shouldFail = true;
@@ -240,7 +299,7 @@ describe("useCollectionStore", () => {
     });
 
     expect(result.current.items).toEqual([
-      { id, data: { name: "v1", addedLiquidity: 1 } },
+      { id, data: { name: "v1", addedLiquidity: 1 }, hash: null },
     ]);
   });
 
@@ -268,6 +327,84 @@ describe("useCollectionStore", () => {
 
     expect(result.current.items).toEqual([]);
     expect(storage.rows.has(`rebalance_simulations:u1:${id}`)).toBe(false);
+  });
+
+  it("optimisticLock: update() threads each row's hash automatically", async () => {
+    const storage = conditionalCollectionStorage();
+    const dek = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(dek);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "rebalance_simulations",
+      identity: "many",
+      encrypt: "all",
+      schema: Sim,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Sim, "all"),
+      contentHash: true,
+      optimisticLock: true,
+    });
+    const id = await store.create("u1", dek, { name: "v1", addedLiquidity: 1 });
+
+    const { result } = renderHook(() => useCollectionStore(store));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.update(id, { name: "v2", addedLiquidity: 2 });
+    });
+    await act(async () => {
+      await result.current.update(id, { name: "v3", addedLiquidity: 3 });
+    });
+
+    expect(result.current.items).toEqual([
+      { id, data: { name: "v3", addedLiquidity: 3 }, hash: expect.any(String) },
+    ]);
+  });
+
+  it("optimisticLock: a conflicting concurrent update makes update() throw and roll back only that row", async () => {
+    const storage = conditionalCollectionStorage();
+    const dek = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(dek);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "rebalance_simulations",
+      identity: "many",
+      encrypt: "all",
+      schema: Sim,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Sim, "all"),
+      contentHash: true,
+      optimisticLock: true,
+    });
+    const id = await store.create("u1", dek, { name: "v1", addedLiquidity: 1 });
+
+    const { result } = renderHook(() => useCollectionStore(store));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    // A "concurrent tab" updates the same row directly through the store.
+    const [{ hash }] = await store.list("u1", dek);
+    await store.updateIfMatch!(
+      "u1",
+      dek,
+      id,
+      { name: "concurrent", addedLiquidity: 99 },
+      hash,
+    );
+
+    await act(async () => {
+      await expect(
+        result.current.update(id, { name: "mine", addedLiquidity: 2 }),
+      ).rejects.toThrow(OptimisticLockConflictError);
+    });
+
+    // Rolled back to what the hook believed was current, not silently overwritten.
+    expect(result.current.items).toEqual([
+      {
+        id,
+        data: { name: "v1", addedLiquidity: 1 },
+        hash: expect.any(String),
+      },
+    ]);
   });
 });
 

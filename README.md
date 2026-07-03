@@ -133,14 +133,64 @@ the one injectable bit (defaults to `"table_name"`, EW's convention) — whateve
 identifies _which_ dictionary a row belongs to is a naming decision that belongs to the
 consuming app's schema, not to DataCloak.
 
-## Legacy AAD migration — `migrateLegacyAAD`
+## Porting a table with a different historical AAD — `legacyAAD`
 
-For consumers porting an existing table onto DataCloak: if the table's historical AAD
-convention differs from DataCloak's canonical one (a different `field` name is the usual
-culprit), old blobs won't decrypt under the new convention. `migrateLegacyAAD` is the
-one-shot fix — pure decrypt-under-old → re-encrypt-under-new mechanics; **the old AAD
-shape is always supplied by the caller**, DataCloak never guesses at historical
-conventions:
+**For porting an existing table only — omit entirely for a brand-new store** (the vast
+majority of stores never set this). DataCloak's canonical AAD is
+`{ userId: pid, table: name, field: "data", rowId }`. A table already encrypted by
+hand-rolled code before the port often used a different convention — a different `field`
+string (`"snapshot"`, `"transactions"`, `"blob"`, …), sometimes a different `rowId` too
+(e.g. a table that pinned `rowId: pid` for what is now modeled as a `perKey` store).
+Without matching it, old ciphertext won't decrypt (GCM auth tag mismatch) — the AAD is an
+input to decryption, not metadata.
+
+`legacyAAD` is a function returning the **entire old AAD**, not just a piece of it — the
+framework never guesses at historical conventions, the caller supplies the full shape:
+
+```ts
+defineStore({
+  name: "account_snapshot_blobs",
+  identity: { perKey: "year_month" },
+  encrypt: "all",
+  schema: SnapshotSchema,
+  version: 1,
+  legacyAAD: (dek, key) => ({
+    userId: dek.pid,
+    table: "account_snapshot_blobs",
+    field: "snapshot", // the OLD service's field value
+    rowId: key, // here it happens to match the canonical rowId too
+  }),
+  schemaFingerprint: "…",
+});
+```
+
+**Read-old-if-needed, always-write-canonical** — the same pattern already used for
+`version`/migrators, applied to AAD:
+
+- On every read, the canonical AAD is tried **first**. If it decrypts, that's the only
+  attempt — the common case (new data, or a row already migrated) costs exactly one
+  decrypt, forever.
+- Only if the canonical attempt **fails** does the store retry under `legacyAAD`. A
+  successful legacy decrypt is immediately re-encrypted and persisted under the canonical
+  AAD — that one row converges permanently; every future read of it costs one decrypt
+  again. No live migration script, no big-bang rewrite: rows convert lazily, one at a
+  time, exactly when touched. A row nobody ever reads simply stays under the old
+  convention until someone does.
+- **Every write** (`save`/`create`/`update`) **always** uses the canonical AAD — a store
+  never has two ways to write, only (optionally) two ways to read.
+- If **both** the canonical and legacy attempts fail, the canonical error propagates
+  (never masked by the legacy attempt's own failure) — real corruption or a wrong DEK
+  still surfaces clearly.
+
+`rowKey` passed to `legacyAAD` is `dek.pid` for `perUser`, the domain key for `perKey`,
+the row id for `many` — whatever the store's own "row address" is.
+
+## The underlying primitive — `migrateLegacyAAD`
+
+`legacyAAD` (above) is built on top of `migrateLegacyAAD`, which stays exported for
+one-shot scripts outside the `defineStore` read path (e.g. a deliberate backfill job) —
+pure decrypt-under-old → re-encrypt-under-new mechanics, old AAD always supplied by the
+caller:
 
 ```ts
 import { migrateLegacyAAD } from "@datacloak";
@@ -180,6 +230,85 @@ if (migrated)
 `migrated: false` (no throw) only for a genuinely missing record — a row that exists with
 a missing/malformed blob throws explicitly, never silently reported the same as "nothing
 to migrate".
+
+## `content_hash` — `contentHash: true`
+
+If a table has a `content_hash` column, set `contentHash: true` and DataCloak computes it
+for you (SHA-256 hex of the plaintext envelope, before encryption) on every write:
+
+```ts
+defineStore({
+  name: "asset_blobs",
+  schema: AssetSchema,
+  version: 1,
+  contentHash: true, // table has a content_hash column
+  schemaFingerprint: "…",
+});
+```
+
+Unlike `StorageAdapter`/`KeyProvider` (which genuinely need an app-supplied
+implementation), hashing a JSON payload requires zero app-specific knowledge — so this is
+a boolean, not an injected function. DataCloak owns the hash implementation internally
+(`core/contentHash.ts`); the app only declares whether the column exists. Omit (or
+`false`) for tables without the column — writing a hash the schema has no column for
+would fail at the storage layer.
+
+`content_hash` unlocks two independent capabilities. Only one is built:
+
+- **Optimistic locking** (`optimisticLock: true`, below) — **built.** Prevents a tab from
+  silently overwriting another tab's write.
+- **Skip-fetch caching** ("don't re-download the blob if the hash hasn't changed") — **not
+  built.** Needs a persisted cross-session cache to compare against (today's `CacheAdapter`
+  — e.g. `tanstackAdapter` — is in-memory only, wiped on reload), a separate, larger piece
+  of work with no consumer yet.
+
+## Optimistic locking — `optimisticLock: true`
+
+Requires `contentHash: true`. Enables a conditional write that **rejects instead of
+silently overwriting** a row that changed since you last read it — the concrete problem
+this solves: two browser tabs open on the same record, both editing; without this, the
+second save silently clobbers the first one's changes with no error, no warning.
+
+```ts
+const store = defineStore({
+  name: "asset_blobs",
+  schema: AssetSchema,
+  version: 1,
+  contentHash: true,
+  optimisticLock: true, // requires contentHash: true — guardrail throws otherwise
+  schemaFingerprint: "…",
+});
+
+const { data, hash } = await store.loadWithHash!(userId, dek);
+// ... user edits `data` ...
+const result = await store.saveIfMatch!(userId, dek, data, hash);
+if (!result.ok) {
+  // someone else saved first — reload and show a conflict, never retry blindly
+} else {
+  // result.hash is the NEW current hash — feed it into the next saveIfMatch,
+  // no extra fetch needed to learn it (the framework already computed it
+  // client-side, before the write, as part of encoding the blob)
+}
+```
+
+`expectedHash: null` means "I believe no row exists yet" (a plain insert; someone else's
+concurrent insert is a conflict, not an error). A non-`null` hash means "only write if
+the row's current `content_hash` still matches this" (`UPDATE ... WHERE content_hash =
+expected`, an INSERT/UPDATE-with-guard the adapter implements). **A conflict is always
+`{ok:false}`, never thrown** — an expected, recoverable outcome, not a bug.
+
+Available on all 3 cardinalities: `Store.saveIfMatch` (perUser), `KeyedStore.saveIfMatch`
+(perKey, independent lock per key), `CollectionStore.updateIfMatch` (many, independent
+lock per row — a conflict on one row never affects another). `StorageAdapter.putIfMatch`/
+`updateByIdIfMatch` are the underlying capability (optional — an adapter without them
+makes `defineStore` throw an explicit error at the first conditional write, not silently
+fall back to an unconditional one). Both shipped adapters (`supabaseStorageAdapter`,
+`pgStorageAdapter`) implement it.
+
+**The React hooks thread the hash automatically** — see "React binding" below. App code
+using `useStore`/`useKeyedStore`/`useCollectionStore` never touches `saveIfMatch`/
+`expectedHash` directly; only code calling `Store`/`KeyedStore`/`CollectionStore` raw
+(outside React, or inside a custom binding) needs the pattern above.
 
 ## Guardrail: encryption always explicit
 
@@ -247,6 +376,59 @@ update `schemaFingerprint` — that's the moment, reading the message, where you
 whether a `version` bump + migrator is also needed, or whether it's a safe change. Zod's
 reactive check (on old data, at read time) remains a second safety net, not the only check.
 
+**Precision on "safe change" — it is still a different shape, just a backward-compatible
+one.** A field added with `.default()` genuinely produces a new blob shape (the fingerprint
+changing proves that). "Safe" doesn't mean "not a version" — it means Zod can absorb old
+ciphertext into the new shape at parse time, with no data loss and no explicit migrator
+needed, so the guardrail doesn't _require_ a `version` bump for it. It does not _forbid_
+one either: if your team wants to track every shape change as an explicit version — for a
+stricter audit trail, or because you don't trust "backward-compatible" judgment calls —
+nothing stops you from bumping `version` and writing an identity migrator (`(d) => d`) for
+every change, safe or not. The guardrail's job is to make you decide consciously each
+time; it deliberately doesn't pick a house style for how strict that decision has to be.
+
+**IMPORTANT — never compute `schemaFingerprint` inline at the call site**, e.g.
+`schemaFingerprint: fingerprintSchema(MySchema, "all")` in the same `defineStore()` call
+that uses `MySchema`. That makes the guardrail compare the schema against itself — a
+tautology that can never fail, no matter how much the shape drifts later. Always a frozen
+string literal, computed once, committed to git:
+
+```ts
+const store = defineStore({
+  name: "portfolio_blobs",
+  schema: PortfolioDataSchema,
+  version: 1,
+  // Frozen literal — NOT fingerprintSchema(PortfolioDataSchema, ...) inline (see above).
+  // Regenerate with `npm run datacloak:sync-fingerprints -- path/to/this/file.ts`.
+  schemaFingerprint: "da2584b4",
+});
+```
+
+### Fixing a `schemaFingerprint` guardrail error
+
+Once you've decided (per the message above) whether the change needs a `version`
+bump + migrator or is safe as-is, run:
+
+```
+npm run datacloak:sync-fingerprints -- path/to/yourBlobService.ts
+```
+
+It re-imports the file, catches the guardrail's own thrown error, extracts the correct
+value from the message, and writes it into the `schemaFingerprint` field for you — same
+idea as `eslint --fix`, just for this one guardrail. It assumes one `defineStore()` call
+per file (today's convention across every ported service); a file with more than one
+needs a manual fix.
+
+**Deliberately NOT wired into the pre-commit hook.** Auto-fixing on every commit would
+silently remove the "stop and consciously decide: does this need a migrator or not?"
+moment that is the entire reason this guardrail exists. Run the command yourself, after
+you've made that decision — not before, and not automatically.
+
+If you forget to run it (or fix it manually): nothing bad happens beyond friction —
+`defineStore()` keeps throwing on every `npm test` / `npm run dev` / `npm run build`
+until it's fixed. It cannot be silently skipped; there is no environment where the
+guardrail doesn't run, because it fires the moment the module is imported.
+
 ## Mixed plaintext fields (`enc()`) — only with `identity: "many"`
 
 ```ts
@@ -268,6 +450,14 @@ Fields **not** marked `enc()` become real plaintext columns (queryable server-si
 marked ones end up in a single blob per row. **Only `identity: "many"` supports this mix
 in v1** — `perUser`/`perKey` remain bound to `encrypt: "all"` (no real consumer needs them
 yet; `defineStore` throws an explicit error if you try).
+
+**The plaintext field names must literally equal the DB column names.** `supabaseStorageAdapter`/`pgStorageAdapter` pass them through as-is — `portfolioId` in the schema above means DataCloak will write/read a column literally called `portfolioId`, NOT `portfolio_id`. There is no camelCase↔snake_case mapping layer. If your table uses snake_case (the common SQL convention), name the schema fields snake_case too (`portfolio_id: z.string()`) and translate to your app's own camelCase domain type in the service, outside `defineStore` — that translation is domain-shaping, not DataCloak's job.
+
+## DataCloak does not own your schema/DDL — and is not tied to Postgres
+
+**The table/collection must already exist, with the right shape, before `defineStore` touches it.** DataCloak never runs `CREATE TABLE`, never generates a migration, and never checks that your actual DB schema matches what a store's Zod fields expect. Keeping them in sync (id/user*id/blob/schema_version columns for every store, PLUS the plaintext columns above for a mixed `many` store) is manual developer discipline — the same discipline any ORM/ODM requires of you, just without a migration generator. Get it wrong and you won't find out until a read/write actually fails at runtime; there's no compile-time or definition-time check for this (unlike `schemaFingerprint`, which only validates the \_shape of the plaintext data*, never the physical DB schema).
+
+**`StorageAdapter` (`core/types.ts`) is deliberately backend-neutral** — its methods (`getOne`, `putOne`, `getByKey`, `list`, `insert`, ...) are plain async functions moving opaque `BlobRecord` objects around; nothing about the interface assumes SQL, tables, or Postgres specifically. Two implementations exist today, both relational (`supabaseStorageAdapter` via PostgREST, `pgStorageAdapter` via raw SQL) — but a document store like MongoDB could implement the exact same interface (a collection instead of a table, a document instead of a row; the plaintext-column passthrough above maps naturally onto document fields). Nothing in `defineStore`, the crypto, or the guardrails would need to change — only a new adapter file, same shape as the two that exist. That adapter would still need the target collection/table to physically exist with a matching shape; DataCloak's neutrality is about _how_ to talk to storage, not about _whether_ you still have to set that storage up yourself.
 
 ## React binding — one hook per cardinality
 
@@ -299,6 +489,29 @@ underlying persist fails (`useCollectionStore` rolls back the whole list on `upd
 `remove` failure — read-modify-write, not per-field patching). Wipe-on-lock is centralized
 once in `configureSecureStore` (not per hook call) — see `core/config.ts`.
 
+**If the store has `optimisticLock: true`, the hash is threaded automatically — no
+`expectedHash`/`saveIfMatch` in sight.** Each hook's cache slot holds `{data, hash}`
+internally (`useCollectionStore`'s `items` exposes `hash` per row, since a consumer may
+want it for a "someone else edited this" hint); `save`/`update` use `saveIfMatch`/
+`updateIfMatch` transparently when available, reading the hash from the cache and writing
+the new one back on success — the same `save(data)`/`update(id, data)` call site works
+whether or not the store has the lock configured. On conflict, the hook rolls back the
+optimistic update and throws `OptimisticLockConflictError` (from `@datacloak/react`) —
+catch it separately from a generic save failure to show "someone else edited this, reload"
+instead of a generic error:
+
+```tsx
+try {
+  await save(newData);
+} catch (e) {
+  if (e instanceof OptimisticLockConflictError) {
+    // reload and let the user re-apply their change, don't just retry blindly
+  } else {
+    // generic save failure (network, validation, ...)
+  }
+}
+```
+
 Requires `keys` (a `KeyProvider`) and `cache` (a `CacheAdapter`) in
 `configureSecureStore`:
 
@@ -309,7 +522,7 @@ configureSecureStore({
   storage: supabaseStorageAdapter(getSupabaseClient),
   cache: tanstackAdapter(queryClient),     // reference CacheAdapter, real TanStack Query
   keys: {                                  // KeyProvider: plain subscribable snapshot,
-    getDek: () => /* your app's current DekHandle | null */,
+    getDek: () => /* your app's current key handle | null — only needs to satisfy CryptoHandle: { pid, encryptJson, decryptJson } */,
     getUserId: () => /* your app's current userId | null */,
     subscribe: (cb) => /* subscribe to changes, return an unsubscribe fn */,
   },
@@ -339,11 +552,13 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   real consumer needs them today.
 - **Hub-and-spoke storage** (plaintext columns + ref on one backend, blob on another,
   e.g. low-cost object storage) — planned capability, not implemented yet.
-- **React Native**: the crypto engine (`@noble/*`) is already isomorphic, but
-  `crypto/passkey-prf.ts` (key derivation) uses **WebAuthn**, browser-only — RN needs a
-  different `KeyProvider` _implementation_ (native passkey/biometrics) — the port itself
-  (plain get/subscribe, no hooks) already doesn't assume a browser. Not written yet.
-  Details in the plan, "Compatibilità React Native" section.
+- **Skip-fetch caching** (don't re-download a blob if `content_hash` hasn't changed) —
+  needs a persisted cross-session cache, no consumer yet. See "`content_hash`" above.
+- **React Native**: the crypto engine (`@noble/*`) and `core/keyDerivation.ts` are
+  already isomorphic — `webauthnKeyProvider` (`adapters/webauthnKeyProvider.ts`) is the
+  **web** adapter (uses `navigator.credentials`, browser-only). RN needs its own adapter
+  (native passkey/biometrics) calling the same `deriveKey`/`createKeyHandle` — not
+  written yet, but the split already isolates exactly what would need to change.
 
 ## Extending `StorageAdapter`
 
@@ -354,11 +569,16 @@ in-memory adapter in the test (`datacloak/tests/*.test.ts`, see `defineStoreMany
 for the pattern). `defineStore` must throw an explicit, descriptive error if the
 configured adapter doesn't support the requested capability — never a silent fallback.
 
-## Architecture: the 4 ports
+## Architecture: the ports
 
-`PersistenceAdapter` (today: blob-oriented `StorageAdapter`) · `CacheAdapter` (TanStack,
-not wired yet) · `KeyProvider` (today: passkey/WebAuthn) · `saltNamespace` (config, not a
-port). Extending DataCloak = implementing an adapter, never touching the core.
+`StorageAdapter` (persistence — Supabase/Postgres today) · `KeyProvider` (where the app's
+current key handle + userId live — the host app's implementation bridges WebAuthn/passkey,
+but the port itself doesn't require that) · `CacheAdapter` (React binding's cache — a real
+`tanstackAdapter(queryClient)` ships today) · `CryptoHandle` (the minimal shape a key
+handle must have — `{ pid, encryptJson, decryptJson }` — see `core/types.ts`; an app
+derives its key however it wants, WebAuthn/passkey, password KDF, hardware token, as long
+as the resulting object structurally satisfies this). Extending DataCloak = implementing
+an adapter or supplying a conforming object, never touching the core.
 
 **`StorageAdapter` implementations shipped today:**
 

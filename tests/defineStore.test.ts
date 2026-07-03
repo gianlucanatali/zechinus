@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
+import { createDekHandle } from "./testKeyHandle.ts";
 import {
   configureSecureStore,
   __resetSecureStoreConfig,
@@ -18,10 +18,10 @@ function memoryAdapter(): StorageAdapter & { rows: Map<string, BlobRecord> } {
   const rows = new Map<string, BlobRecord>();
   return {
     rows,
-    async getOne(collection, userId) {
+    async get(collection, userId) {
       return rows.get(`${collection}:${userId}`) ?? null;
     },
-    async putOne(collection, userId, record) {
+    async put(collection, userId, _extraKeys, record) {
       rows.set(`${collection}:${userId}`, record);
     },
   };

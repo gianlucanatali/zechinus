@@ -14,10 +14,10 @@
  * belongs to the consuming app's schema, not to DataCloak.
  */
 import { z } from "zod";
-import type { DekHandle } from "@crypto/field-crypto";
 import { defineStore } from "./store.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
 import type { BlobMigrator } from "./versioning.ts";
+import type { CryptoHandle } from "./types.ts";
 
 const DictSchema = z.record(z.string(), z.string());
 const DICT_FINGERPRINT = fingerprintSchema(DictSchema, "all");
@@ -34,26 +34,26 @@ export interface LabelDictDef {
 export interface LabelDict {
   getLabel(
     userId: string,
-    dek: DekHandle,
+    dek: CryptoHandle,
     dictKey: string,
     entityId: string,
   ): Promise<string | undefined>;
   setLabel(
     userId: string,
-    dek: DekHandle,
+    dek: CryptoHandle,
     dictKey: string,
     entityId: string,
     label: string,
   ): Promise<void>;
   deleteLabel(
     userId: string,
-    dek: DekHandle,
+    dek: CryptoHandle,
     dictKey: string,
     entityId: string,
   ): Promise<void>;
   getAll(
     userId: string,
-    dek: DekHandle,
+    dek: CryptoHandle,
     dictKey: string,
   ): Promise<Record<string, string>>;
 }

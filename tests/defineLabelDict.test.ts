@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
+import { createDekHandle } from "./testKeyHandle.ts";
 import { configureSecureStore } from "../core/config.ts";
 import { defineLabelDict } from "../core/defineLabelDict.ts";
 import type { BlobRecord, StorageAdapter } from "../core/types.ts";
@@ -13,15 +13,11 @@ function keyedMemoryAdapter(): StorageAdapter & {
   const rows = new Map<string, BlobRecord>();
   return {
     rows,
-    async getOne() {
-      return null;
+    async get(collection, userId, extraKeys) {
+      return rows.get(`${collection}:${userId}:${extraKeys[0]?.value}`) ?? null;
     },
-    async putOne() {},
-    async getByKey(collection, userId, _keyColumn, keyValue) {
-      return rows.get(`${collection}:${userId}:${keyValue}`) ?? null;
-    },
-    async putByKey(collection, userId, _keyColumn, keyValue, record) {
-      rows.set(`${collection}:${userId}:${keyValue}`, record);
+    async put(collection, userId, extraKeys, record) {
+      rows.set(`${collection}:${userId}:${extraKeys[0]?.value}`, record);
     },
   };
 }
@@ -108,16 +104,12 @@ test("defineLabelDict: different dict keys (e.g. 'accounts' vs 'categories') are
 test("defineLabelDict: keyColumn is an injectable extension point (defaults to 'table_name')", async () => {
   const adapter: StorageAdapter & { calls: string[] } = {
     calls: [],
-    async getOne() {
+    async get(_c, _u, extraKeys) {
+      adapter.calls.push(`get:${extraKeys[0]?.column}`);
       return null;
     },
-    async putOne() {},
-    async getByKey(_c, _u, keyColumn) {
-      adapter.calls.push(`getByKey:${keyColumn}`);
-      return null;
-    },
-    async putByKey(_c, _u, keyColumn) {
-      adapter.calls.push(`putByKey:${keyColumn}`);
+    async put(_c, _u, extraKeys) {
+      adapter.calls.push(`put:${extraKeys[0]?.column}`);
     },
   };
   configureSecureStore({ storage: adapter });
@@ -125,14 +117,14 @@ test("defineLabelDict: keyColumn is an injectable extension point (defaults to '
 
   const defaultLabels = defineLabelDict({ name: "user_label_dicts" });
   await defaultLabels.getLabel("u1", dek, "accounts", "acc-1");
-  assert.equal(adapter.calls[0], "getByKey:table_name");
+  assert.equal(adapter.calls[0], "get:table_name");
 
   const customLabels = defineLabelDict({
     name: "other_dicts",
     keyColumn: "dict_key",
   });
   await customLabels.setLabel("u1", dek, "accounts", "acc-1", "x");
-  // setLabel does a load (getByKey) then a save (putByKey) — both under the custom column
-  assert.equal(adapter.calls[1], "getByKey:dict_key");
-  assert.equal(adapter.calls[2], "putByKey:dict_key");
+  // setLabel does a load (get) then a save (put) — both under the custom column
+  assert.equal(adapter.calls[1], "get:dict_key");
+  assert.equal(adapter.calls[2], "put:dict_key");
 });

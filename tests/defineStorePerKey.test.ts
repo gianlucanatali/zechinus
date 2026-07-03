@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
+import { createDekHandle } from "./testKeyHandle.ts";
 import {
   configureSecureStore,
   defineStore,
@@ -19,17 +19,11 @@ function keyedMemoryAdapter(): StorageAdapter & {
   const rows = new Map<string, BlobRecord>();
   return {
     rows,
-    async getOne() {
-      return null;
+    async get(collection, userId, extraKeys) {
+      return rows.get(`${collection}:${userId}:${extraKeys[0]?.value}`) ?? null;
     },
-    async putOne() {
-      /* perUser not used in these tests */
-    },
-    async getByKey(collection, userId, _keyColumn, keyValue) {
-      return rows.get(`${collection}:${userId}:${keyValue}`) ?? null;
-    },
-    async putByKey(collection, userId, _keyColumn, keyValue, record) {
-      rows.set(`${collection}:${userId}:${keyValue}`, record);
+    async put(collection, userId, extraKeys, record) {
+      rows.set(`${collection}:${userId}:${extraKeys[0]?.value}`, record);
     },
     async listByKeyRange(collection, userId, _keyColumn, from, to) {
       const prefix = `${collection}:${userId}:`;
@@ -41,16 +35,6 @@ function keyedMemoryAdapter(): StorageAdapter & {
       }
       return out.sort((a, b) => a.key.localeCompare(b.key));
     },
-  };
-}
-
-// perUser-only adapter (no getByKey/putByKey) to test the explicit error.
-function perUserOnlyAdapter(): StorageAdapter {
-  return {
-    async getOne() {
-      return null;
-    },
-    async putOne() {},
   };
 }
 
@@ -114,25 +98,6 @@ test("defineStore perKey: the AAD is bound to the key (ciphertext isn't movable)
     adapter.rows.get("transaction_blobs:u1:2026-06")!,
   );
   await assert.rejects(() => store.load("u1", dek, "2026-07"));
-});
-
-test("defineStore perKey: adapter without getByKey → explicit error", async () => {
-  configureSecureStore({ storage: perUserOnlyAdapter() });
-  const dek = createDekHandle(randomBytes(32));
-
-  const store = defineStore({
-    name: "transaction_blobs",
-    identity: { perKey: "year_month" },
-    encrypt: "all",
-    schema: Batch,
-    version: 1,
-    schemaFingerprint: fingerprintSchema(Batch, "all"),
-  });
-
-  await assert.rejects(
-    () => store.load("u1", dek, "2026-06"),
-    /doesn't support perKey \(getByKey missing\)/,
-  );
 });
 
 test("defineStore perKey: Zod validation on write rejects non-conforming data", async () => {
@@ -211,14 +176,10 @@ test("defineStore perKey: list() range-query still enforces per-key AAD", async 
 
 test("defineStore perKey: adapter without listByKeyRange → explicit error", async () => {
   const adapter: StorageAdapter = {
-    async getOne() {
+    async get() {
       return null;
     },
-    async putOne() {},
-    async getByKey() {
-      return null;
-    },
-    async putByKey() {},
+    async put() {},
   };
   configureSecureStore({ storage: adapter });
   const dek = createDekHandle(randomBytes(32));

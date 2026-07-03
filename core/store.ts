@@ -24,14 +24,16 @@
  */
 
 import { z } from "zod";
-import type { DekHandle, FieldAAD } from "@crypto/field-crypto";
 import { defineBlobStore } from "./blobStore.ts";
-import { encodeBlob, decodeBlob } from "./blobCodec.ts";
+import { loadRow, saveRow, saveRowIfMatch } from "./rowStore.ts";
+import { encodeBlob } from "./blobCodec.ts";
+import { decodeWithLegacyFallback } from "./legacyFallback.ts";
 import { getSecureStoreConfig } from "./config.ts";
 import { randomId } from "./randomId.ts";
 import type { BlobMigrator } from "./versioning.ts";
 import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
+import type { CryptoHandle, FieldAAD } from "./types.ts";
 
 /** Store cardinality: how many records per user, and how they're addressed. */
 export type Identity = "perUser" | "many" | { perKey: string };
@@ -62,41 +64,124 @@ export interface StoreDef<S extends z.ZodType> {
   schemaFingerprint?: string;
   /** Value returned when the record doesn't exist. If absent, derived from the schema's defaults. */
   empty?: z.infer<S>;
+  /**
+   * For PORTING an existing table only — omit entirely for a brand-new store (the
+   * vast majority of stores never set this). A function reconstructing the OLD
+   * (pre-DataCloak) AAD shape for a given row — `rowKey` is `dek.pid` for `perUser`,
+   * the domain key for `perKey`, the row id for `many`.
+   *
+   * On read, the canonical AAD (`field:"data"`) is always tried FIRST; only if that
+   * fails to decrypt does the store retry under this legacy AAD. A successful legacy
+   * decrypt is immediately re-encrypted and persisted under the canonical AAD — every
+   * touched row converges permanently, one row at a time, no live migration script.
+   * ALL writes (save/create/update) ALWAYS use the canonical AAD, never this one — a
+   * store never has two ways to write. If both the canonical and legacy attempts
+   * fail, the canonical error propagates (never masked by the legacy attempt).
+   */
+  legacyAAD?: (dek: CryptoHandle, rowKey: string) => FieldAAD;
   migrators?: BlobMigrator[];
-  /** If present, computes the envelope's content_hash (e.g. @shared's hashContent). */
-  hashContent?: (envelope: unknown) => Promise<string>;
+  /**
+   * Set `true` if this table has a `content_hash` column — DataCloak computes it
+   * internally (SHA-256 of the plaintext envelope, see `core/contentHash.ts`), no
+   * app-supplied function needed: hashing JSON is fully generic, unlike
+   * `StorageAdapter`/`KeyProvider` which genuinely need app-specific knowledge.
+   * Omit (or `false`) for tables without the column.
+   */
+  contentHash?: boolean;
+  /**
+   * Requires `contentHash: true`. Enables `saveIfMatch`/`updateIfMatch` — a
+   * conditional write that rejects (returns `{ok:false}`, never throws) instead of
+   * silently overwriting a row that changed since it was last read. See README's
+   * "Optimistic locking" section for the multi-tab conflict this prevents.
+   */
+  optimisticLock?: boolean;
 }
 
 /** `perUser`-cardinality store: one blob per user. */
 export interface Store<T> {
   readonly name: string;
   readonly version: number;
-  load(userId: string, dek: DekHandle): Promise<T>;
-  save(userId: string, dek: DekHandle, data: T): Promise<void>;
+  load(userId: string, dek: CryptoHandle): Promise<T>;
+  save(userId: string, dek: CryptoHandle, data: T): Promise<void>;
+  /** Present only when the store declares `contentHash: true`. */
+  loadWithHash?(
+    userId: string,
+    dek: CryptoHandle,
+  ): Promise<{ data: T; hash: string | null }>;
+  /**
+   * Present only when the store declares `optimisticLock: true`. See `StoreDef.optimisticLock`.
+   * On success, `hash` is the new content_hash — pass it straight into the next
+   * `saveIfMatch` call, no extra fetch needed. `null` on conflict (`ok:false`).
+   */
+  saveIfMatch?(
+    userId: string,
+    dek: CryptoHandle,
+    data: T,
+    expectedHash: string | null,
+  ): Promise<{ ok: boolean; hash: string | null }>;
 }
 
 /** `perKey`-cardinality store: one blob per `(user, domain key)`. */
 export interface KeyedStore<T> {
   readonly name: string;
   readonly version: number;
-  load(userId: string, dek: DekHandle, key: string): Promise<T>;
-  save(userId: string, dek: DekHandle, key: string, data: T): Promise<void>;
+  load(userId: string, dek: CryptoHandle, key: string): Promise<T>;
+  save(userId: string, dek: CryptoHandle, key: string, data: T): Promise<void>;
   /** Range query over sortable keys (e.g. `year_month`) — needs `listByKeyRange` on the adapter. */
   list(
     userId: string,
-    dek: DekHandle,
+    dek: CryptoHandle,
     range: { from: string; to: string },
   ): Promise<Array<{ key: string; data: T }>>;
+  /** Present only when the store declares `contentHash: true`. */
+  loadWithHash?(
+    userId: string,
+    dek: CryptoHandle,
+    key: string,
+  ): Promise<{ data: T; hash: string | null }>;
+  /**
+   * Present only when the store declares `optimisticLock: true`. See `StoreDef.optimisticLock`.
+   * On success, `hash` is the new content_hash — pass it straight into the next
+   * `saveIfMatch` call, no extra fetch needed. `null` on conflict (`ok:false`).
+   */
+  saveIfMatch?(
+    userId: string,
+    dek: CryptoHandle,
+    key: string,
+    data: T,
+    expectedHash: string | null,
+  ): Promise<{ ok: boolean; hash: string | null }>;
 }
 
 /** `identity: "many"` — a collection with a framework-generated id, one encrypted blob per row. */
 export interface CollectionStore<T> {
   readonly name: string;
   readonly version: number;
-  list(userId: string, dek: DekHandle): Promise<Array<{ id: string; data: T }>>;
-  create(userId: string, dek: DekHandle, data: T): Promise<string>;
-  update(userId: string, dek: DekHandle, id: string, data: T): Promise<void>;
-  remove(userId: string, dek: DekHandle, id: string): Promise<void>;
+  /**
+   * `hash` is `null` unless the store declares `contentHash: true` — pass it
+   * straight into `updateIfMatch` as `expectedHash`, no separate lookup needed.
+   */
+  list(
+    userId: string,
+    dek: CryptoHandle,
+  ): Promise<Array<{ id: string; data: T; hash: string | null }>>;
+  create(userId: string, dek: CryptoHandle, data: T): Promise<string>;
+  update(userId: string, dek: CryptoHandle, id: string, data: T): Promise<void>;
+  remove(userId: string, dek: CryptoHandle, id: string): Promise<void>;
+  /**
+   * Present only when the store declares `optimisticLock: true`. `expectedHash`
+   * comes from the `hash` field returned alongside each row in `list()` — see
+   * README's "Optimistic locking" section. On success, `hash` is the row's new
+   * content_hash — pass it into the next `updateIfMatch` call, no extra fetch
+   * needed. `null` on conflict (`ok:false`).
+   */
+  updateIfMatch?(
+    userId: string,
+    dek: CryptoHandle,
+    id: string,
+    data: T,
+    expectedHash: string | null,
+  ): Promise<{ ok: boolean; hash: string | null }>;
 }
 
 /** `defineStore`'s return type based on cardinality: perKey → KeyedStore, many → CollectionStore, else Store. */
@@ -197,6 +282,13 @@ export function defineStore<
     );
   }
 
+  // ── Guardrail: optimisticLock requires contentHash ───────────────────────────────
+  if (def.optimisticLock && !def.contentHash) {
+    throw new Error(
+      `defineStore(${def.name}): optimisticLock requires contentHash: true — the lock compares against that column.`,
+    );
+  }
+
   // `empty` (the default when nothing has ever been saved) is only required for
   // perUser/perKey — 'many' has no "empty value" concept (list() just returns []
   // on its own); we compute it lazily, only where needed, so a 'many' schema with
@@ -226,7 +318,7 @@ export function defineStore<
   if (typeof identity === "object" && "perKey" in identity) {
     const empty = resolveEmpty(def);
     const keyColumn = identity.perKey;
-    const aadFor = (dek: DekHandle, key: string): FieldAAD => ({
+    const canonicalAADFor = (dek: CryptoHandle, key: string): FieldAAD => ({
       userId: dek.pid,
       table: def.name,
       field: "data",
@@ -235,55 +327,66 @@ export function defineStore<
 
     const keyedSave = async (
       userId: string,
-      dek: DekHandle,
+      dek: CryptoHandle,
       key: string,
       data: T,
     ): Promise<void> => {
       const valid = validateWrite(data, `save(key=${key})`);
       const { storage } = getSecureStoreConfig();
-      if (!storage.putByKey) {
-        throw new Error(
-          `defineStore(${def.name}): the configured adapter doesn't support perKey (putByKey missing).`,
-        );
-      }
-      const record = await encodeBlob(
+      await saveRow(
         dek,
-        aadFor(dek, key),
+        (record) =>
+          storage.put(
+            def.name,
+            userId,
+            [{ column: keyColumn, value: key }],
+            record,
+          ),
+        canonicalAADFor(dek, key),
         valid,
         def.version,
-        def.hashContent,
+        def.contentHash,
       );
-      await storage.putByKey(def.name, userId, keyColumn, key, record);
+    };
+
+    const keyedLoadInternal = async (
+      userId: string,
+      dek: CryptoHandle,
+      key: string,
+    ): Promise<{ data: T; hash: string | null }> => {
+      const { storage } = getSecureStoreConfig();
+      const { data, hash } = await loadRow(
+        dek,
+        {
+          get: () =>
+            storage.get(def.name, userId, [{ column: keyColumn, value: key }]),
+          put: (record) =>
+            storage.put(
+              def.name,
+              userId,
+              [{ column: keyColumn, value: key }],
+              record,
+            ),
+        },
+        canonicalAADFor(dek, key),
+        {
+          storeName: def.name,
+          rowLabel: "perKey ",
+          version: def.version,
+          migrators,
+          empty,
+          legacyAAD: def.legacyAAD?.(dek, key),
+        },
+        (upgradedData) => keyedSave(userId, dek, key, upgradedData),
+      );
+      return { data: validateRead(data, `load(key=${key})`), hash };
     };
 
     const keyed: KeyedStore<T> = {
       name: def.name,
       version: def.version,
       async load(userId, dek, key) {
-        const { storage } = getSecureStoreConfig();
-        if (!storage.getByKey) {
-          throw new Error(
-            `defineStore(${def.name}): the configured adapter doesn't support perKey (getByKey missing).`,
-          );
-        }
-        const record = await storage.getByKey(def.name, userId, keyColumn, key);
-        const { data, upgraded } = await decodeBlob<T>(
-          dek,
-          aadFor(dek, key),
-          record,
-          def.version,
-          migrators,
-          empty,
-        );
-        if (upgraded) {
-          keyedSave(userId, dek, key, data).catch((e) =>
-            console.error(
-              `secure-store(${def.name}): perKey lazy upgrade failed:`,
-              e,
-            ),
-          );
-        }
-        return validateRead(data, `load(key=${key})`);
+        return (await keyedLoadInternal(userId, dek, key)).data;
       },
       save: keyedSave,
       async list(userId, dek, range) {
@@ -302,14 +405,22 @@ export function defineStore<
         );
         const results: Array<{ key: string; data: T }> = [];
         for (const { key, record } of rows) {
-          const { data, upgraded } = await decodeBlob<T>(
+          const { data, upgraded } = await decodeWithLegacyFallback<T>({
             dek,
-            aadFor(dek, key),
             record,
-            def.version,
+            canonicalAAD: canonicalAADFor(dek, key),
+            legacyAAD: def.legacyAAD?.(dek, key),
+            version: def.version,
             migrators,
             empty,
-          );
+            persistMigrated: (migratedRecord) =>
+              storage.put(
+                def.name,
+                userId,
+                [{ column: keyColumn, value: key }],
+                migratedRecord,
+              ),
+          });
           if (upgraded) {
             keyedSave(userId, dek, key, data).catch((e) =>
               console.error(
@@ -323,6 +434,36 @@ export function defineStore<
         return results;
       },
     };
+
+    if (def.contentHash) {
+      keyed.loadWithHash = keyedLoadInternal;
+    }
+
+    if (def.optimisticLock) {
+      keyed.saveIfMatch = async (userId, dek, key, data, expectedHash) => {
+        const { storage } = getSecureStoreConfig();
+        const valid = validateWrite(data, `saveIfMatch(key=${key})`);
+        return saveRowIfMatch(
+          dek,
+          storage.putIfMatch
+            ? (record, hash) =>
+                storage.putIfMatch!(
+                  def.name,
+                  userId,
+                  [{ column: keyColumn, value: key }],
+                  record,
+                  hash,
+                )
+            : undefined,
+          canonicalAADFor(dek, key),
+          valid,
+          def.version,
+          expectedHash,
+          `defineStore(${def.name}): the configured adapter doesn't support optimistic locking (putIfMatch missing).`,
+        );
+      };
+    }
+
     return keyed as StoreApi<S, Id>;
   }
 
@@ -332,7 +473,7 @@ export function defineStore<
   // plaintextKeys = [] → degenerates into the previous behavior (everything in the
   // blob, no extra columns).
   if (identity === "many") {
-    const aadFor = (dek: DekHandle, id: string): FieldAAD => ({
+    const canonicalAADFor = (dek: CryptoHandle, id: string): FieldAAD => ({
       userId: dek.pid,
       table: def.name,
       field: "data",
@@ -357,7 +498,7 @@ export function defineStore<
 
     const manyUpdate = async (
       userId: string,
-      dek: DekHandle,
+      dek: CryptoHandle,
       id: string,
       data: T,
     ): Promise<void> => {
@@ -371,10 +512,10 @@ export function defineStore<
       const { plain, encPart } = splitWrite(valid);
       const record = await encodeBlob(
         dek,
-        aadFor(dek, id),
+        canonicalAADFor(dek, id),
         encPart,
         def.version,
-        def.hashContent,
+        def.contentHash,
       );
       await storage.updateById(def.name, userId, id, record, plain);
     };
@@ -390,11 +531,34 @@ export function defineStore<
           );
         }
         const rows = await storage.list(def.name, userId, plaintextKeys);
-        const results: Array<{ id: string; data: T }> = [];
+        const results: Array<{ id: string; data: T; hash: string | null }> = [];
         for (const { id, record, plain } of rows) {
-          const { data: encPart, upgraded } = await decodeBlob<
+          const { data: encPart, upgraded } = await decodeWithLegacyFallback<
             Record<string, unknown>
-          >(dek, aadFor(dek, id), record, def.version, migrators, emptyEncPart);
+          >({
+            dek,
+            record,
+            canonicalAAD: canonicalAADFor(dek, id),
+            legacyAAD: def.legacyAAD?.(dek, id),
+            version: def.version,
+            migrators,
+            empty: emptyEncPart,
+            persistMigrated: (migratedRecord) => {
+              if (!storage.updateById) {
+                throw new Error(
+                  `defineStore(${def.name}): legacyAAD migration for id=${id} succeeded, but the ` +
+                    `configured adapter doesn't support 'many' (updateById missing) — can't persist it.`,
+                );
+              }
+              return storage.updateById(
+                def.name,
+                userId,
+                id,
+                migratedRecord,
+                plain,
+              );
+            },
+          });
           const merged = mergeRead(plain, encPart);
           if (upgraded) {
             manyUpdate(userId, dek, id, merged as T).catch((e) =>
@@ -404,7 +568,11 @@ export function defineStore<
               ),
             );
           }
-          results.push({ id, data: validateRead(merged, `list(id=${id})`) });
+          results.push({
+            id,
+            data: validateRead(merged, `list(id=${id})`),
+            hash: record?.contentHash ?? null,
+          });
         }
         return results;
       },
@@ -420,10 +588,10 @@ export function defineStore<
         const { plain, encPart } = splitWrite(valid);
         const record = await encodeBlob(
           dek,
-          aadFor(dek, id),
+          canonicalAADFor(dek, id),
           encPart,
           def.version,
-          def.hashContent,
+          def.contentHash,
         );
         await storage.insert(def.name, userId, id, record, plain);
         return id;
@@ -439,6 +607,42 @@ export function defineStore<
         await storage.deleteById(def.name, userId, id);
       },
     };
+
+    if (def.optimisticLock) {
+      collection.updateIfMatch = async (
+        userId,
+        dek,
+        id,
+        data,
+        expectedHash,
+      ) => {
+        const { storage } = getSecureStoreConfig();
+        if (!storage.updateByIdIfMatch) {
+          throw new Error(
+            `defineStore(${def.name}): the configured adapter doesn't support optimistic locking (updateByIdIfMatch missing).`,
+          );
+        }
+        const valid = validateWrite(data, `updateIfMatch(id=${id})`);
+        const { plain, encPart } = splitWrite(valid);
+        const record = await encodeBlob(
+          dek,
+          canonicalAADFor(dek, id),
+          encPart,
+          def.version,
+          true,
+        );
+        const ok = await storage.updateByIdIfMatch(
+          def.name,
+          userId,
+          id,
+          record,
+          plain,
+          expectedHash,
+        );
+        return { ok, hash: ok ? (record.contentHash ?? null) : null };
+      };
+    }
+
     return collection as StoreApi<S, Id>;
   }
 
@@ -449,7 +653,11 @@ export function defineStore<
     version: def.version,
     empty,
     migrators: def.migrators,
-    hashContent: def.hashContent,
+    contentHash: def.contentHash,
+    optimisticLock: def.optimisticLock,
+    legacyAAD: def.legacyAAD
+      ? (dek) => def.legacyAAD!(dek, dek.pid)
+      : undefined,
   });
   const store: Store<T> = {
     name: def.name,
@@ -461,6 +669,25 @@ export function defineStore<
       await inner.save(userId, dek, validateWrite(data, "save"));
     },
   };
+
+  if (def.contentHash) {
+    store.loadWithHash = async (userId, dek) => {
+      const { data, hash } = await inner.loadWithHash!(userId, dek);
+      return { data: validateRead(data, "loadWithHash"), hash };
+    };
+  }
+
+  if (def.optimisticLock) {
+    store.saveIfMatch = async (userId, dek, data, expectedHash) => {
+      return inner.saveIfMatch!(
+        userId,
+        dek,
+        validateWrite(data, "saveIfMatch"),
+        expectedHash,
+      );
+    };
+  }
+
   return store as StoreApi<S, Id>;
 }
 

@@ -59,6 +59,9 @@ export type {
   BlobRecord,
   KeyProvider,
   CacheAdapter,
+  CryptoHandle,
+  FieldAAD,
+  EncryptedField,
 } from "./core/types.ts";
 
 export {
@@ -70,8 +73,51 @@ export {
   type VersionedEnvelope,
 } from "./core/versioning.ts";
 
+export {
+  ENC_PREFIX,
+  isEncryptedField,
+  serializeEncField,
+  parseEncField,
+} from "./core/wireFormat.ts";
+
+export {
+  encryptField,
+  decryptField,
+  encryptNumber,
+  decryptNumber,
+  encryptJson,
+  decryptJson,
+} from "./core/crypto.ts";
+
+export {
+  deriveKey,
+  derivePID,
+  wrapKey,
+  unwrapKey,
+  createKeyHandle,
+  type KeyHandle,
+  type WrappedKey,
+} from "./core/keyDerivation.ts";
+
 export { supabaseStorageAdapter } from "./adapters/supabaseStorageAdapter.ts";
 export {
   pgStorageAdapter,
   type PgClient,
 } from "./adapters/pgStorageAdapter.ts";
+export {
+  webauthnKeyProvider,
+  type WebauthnKeyProvider,
+  type WebauthnKeyProviderConfig,
+  type PasskeyInfo,
+} from "./adapters/webauthnKeyProvider.ts";
+export {
+  mnemonicRecovery,
+  type MnemonicRecovery,
+  type MnemonicRecoveryConfig,
+} from "./adapters/mnemonicRecovery.ts";
+export {
+  createWorkerKeyHandle,
+  handleKeyHandleMessages,
+  type WorkerLike,
+  type WorkerContext,
+} from "./adapters/workerKeyHandle.ts";

@@ -6,8 +6,8 @@ import { cleanup, renderHook, act, waitFor } from "@testing-library/react";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
-import type { DekHandle } from "@crypto/field-crypto";
+import { createDekHandle } from "./testKeyHandle.ts";
+import type { CryptoHandle } from "@datacloak";
 import {
   configureSecureStore,
   __resetSecureStoreConfig,
@@ -19,6 +19,7 @@ import {
   type CacheAdapter,
 } from "../index.ts";
 import { useKeyedStore } from "../react/useKeyedStore.ts";
+import { OptimisticLockConflictError } from "../react/errors.ts";
 
 function keyedMemoryStorage(): StorageAdapter & {
   rows: Map<string, BlobRecord>;
@@ -26,20 +27,43 @@ function keyedMemoryStorage(): StorageAdapter & {
   const rows = new Map<string, BlobRecord>();
   return {
     rows,
-    async getOne() {
-      return null;
+    async get(collection, userId, extraKeys) {
+      return rows.get(`${collection}:${userId}:${extraKeys[0]?.value}`) ?? null;
     },
-    async putOne() {},
-    async getByKey(collection, userId, _keyColumn, keyValue) {
-      return rows.get(`${collection}:${userId}:${keyValue}`) ?? null;
-    },
-    async putByKey(collection, userId, _keyColumn, keyValue, record) {
-      rows.set(`${collection}:${userId}:${keyValue}`, record);
+    async put(collection, userId, extraKeys, record) {
+      rows.set(`${collection}:${userId}:${extraKeys[0]?.value}`, record);
     },
   };
 }
 
-function fakeKeys(initial: DekHandle | null) {
+function conditionalKeyedStorage(): StorageAdapter & {
+  rows: Map<string, BlobRecord>;
+} {
+  const rows = new Map<string, BlobRecord>();
+  return {
+    rows,
+    async get(collection, userId, extraKeys) {
+      return rows.get(`${collection}:${userId}:${extraKeys[0]?.value}`) ?? null;
+    },
+    async put(collection, userId, extraKeys, record) {
+      rows.set(`${collection}:${userId}:${extraKeys[0]?.value}`, record);
+    },
+    async putIfMatch(collection, userId, extraKeys, record, expectedHash) {
+      const key = `${collection}:${userId}:${extraKeys[0]?.value}`;
+      const current = rows.get(key) ?? null;
+      if (expectedHash === null) {
+        if (current) return false;
+        rows.set(key, record);
+        return true;
+      }
+      if (!current || current.contentHash !== expectedHash) return false;
+      rows.set(key, record);
+      return true;
+    },
+  };
+}
+
+function fakeKeys(initial: CryptoHandle | null) {
   let dek = initial;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
@@ -52,7 +76,7 @@ function fakeKeys(initial: DekHandle | null) {
   };
   return {
     provider,
-    setDek(next: DekHandle | null) {
+    setDek(next: CryptoHandle | null) {
       dek = next;
       for (const cb of subs) cb();
     },
@@ -143,14 +167,10 @@ describe("useKeyedStore", () => {
     const { provider } = fakeKeys(dek);
     let shouldFail = false;
     const storage: StorageAdapter = {
-      async getOne() {
+      async get() {
         return null;
       },
-      async putOne() {},
-      async getByKey() {
-        return null;
-      },
-      async putByKey() {
+      async put() {
         if (shouldFail) throw new Error("simulated failure");
       },
     };
@@ -179,5 +199,73 @@ describe("useKeyedStore", () => {
       ).rejects.toThrow(/simulated failure/);
     });
     expect(result.current.data).toEqual({ transactions: ["ok"] });
+  });
+
+  it("optimisticLock: save() threads the hash automatically per key, independently across keys", async () => {
+    const storage = conditionalKeyedStorage();
+    const dek = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(dek);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "transaction_blobs",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+      contentHash: true,
+      optimisticLock: true,
+    });
+
+    const { result } = renderHook(() => useKeyedStore(store, "2026-06"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.save({ transactions: ["june-1"] });
+    });
+    await act(async () => {
+      await result.current.save({ transactions: ["june-1", "june-2"] });
+    });
+    expect(result.current.data).toEqual({ transactions: ["june-1", "june-2"] });
+  });
+
+  it("optimisticLock: a conflicting concurrent write on the same key makes save() throw and roll back", async () => {
+    const storage = conditionalKeyedStorage();
+    const dek = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(dek);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "transaction_blobs",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+      contentHash: true,
+      optimisticLock: true,
+    });
+
+    const { result } = renderHook(() => useKeyedStore(store, "2026-06"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.save({ transactions: ["mine"] });
+    });
+
+    const { hash } = await store.loadWithHash!("u1", dek, "2026-06");
+    await store.saveIfMatch!(
+      "u1",
+      dek,
+      "2026-06",
+      { transactions: ["concurrent"] },
+      hash,
+    );
+
+    await act(async () => {
+      await expect(
+        result.current.save({ transactions: ["mine-again"] }),
+      ).rejects.toThrow(OptimisticLockConflictError);
+    });
+    expect(result.current.data).toEqual({ transactions: ["mine"] });
   });
 });

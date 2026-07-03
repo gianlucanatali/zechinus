@@ -9,3 +9,4 @@ export {
   type UseCollectionStoreResult,
 } from "./useCollectionStore.ts";
 export { tanstackAdapter } from "../adapters/tanstackAdapter.ts";
+export { OptimisticLockConflictError } from "./errors.ts";

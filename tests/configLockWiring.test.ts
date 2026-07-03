@@ -9,21 +9,23 @@ import type {
   KeyProvider,
   StorageAdapter,
 } from "../core/types.ts";
-import type { DekHandle } from "@crypto/field-crypto";
+import type { CryptoHandle } from "@datacloak";
 
 function fakeStorage(): StorageAdapter {
   return {
-    async getOne() {
+    async get() {
       return null;
     },
-    async putOne() {},
+    async put() {
+      /* noop */
+    },
   };
 }
 
 // Only presence/absence of the dek matters for these tests, never its crypto methods —
-// a minimal `{ pid }` stand-in cast to DekHandle is safe here (no encrypt/decrypt call).
+// a minimal `{ pid }` stand-in cast to CryptoHandle is safe here (no encrypt/decrypt call).
 function fakeKeys(initialDek: { pid: string } | null) {
-  let dek = initialDek as DekHandle | null;
+  let dek = initialDek as CryptoHandle | null;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
     getDek: () => dek,
@@ -36,7 +38,7 @@ function fakeKeys(initialDek: { pid: string } | null) {
   return {
     provider,
     setDek(next: { pid: string } | null) {
-      dek = next as DekHandle | null;
+      dek = next as CryptoHandle | null;
       for (const cb of subs) cb();
     },
   };

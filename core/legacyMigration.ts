@@ -15,13 +15,12 @@
  * corruption, and it throws explicitly rather than being reported identically to the
  * legitimate empty case.
  */
-import type { DekHandle, FieldAAD } from "@crypto/field-crypto";
 import {
   parseEncField,
   isEncryptedField,
   serializeEncField,
-} from "@crypto/field-crypto";
-import type { BlobRecord } from "./types.ts";
+} from "./wireFormat.ts";
+import type { BlobRecord, CryptoHandle, FieldAAD } from "./types.ts";
 
 export interface LegacyMigrationResult {
   migrated: boolean;
@@ -30,7 +29,7 @@ export interface LegacyMigrationResult {
 }
 
 export async function migrateLegacyAAD(
-  dek: DekHandle,
+  dek: CryptoHandle,
   record: BlobRecord | null,
   oldAAD: FieldAAD,
   newAAD: FieldAAD,
@@ -64,7 +63,7 @@ export async function migrateLegacyAAD(
     record: {
       schemaVersion: record.schemaVersion,
       blob: serializeEncField(reEncrypted),
-      // content_hash hashes the plaintext envelope only (see shared/utils/hashContent) —
+      // content_hash hashes the plaintext envelope only (see core/contentHash.ts) —
       // AAD never enters that computation, so it's invariant under this operation and
       // carried over unchanged rather than recomputed.
       contentHash: record.contentHash,

@@ -27,11 +27,11 @@ function fakeClient(rows: Record<string, unknown>[] = []) {
   return { client, calls };
 }
 
-test("pgStorageAdapter.getOne: selects by user_id, returns null on empty result", async () => {
+test("pgStorageAdapter.get: selects by user_id, returns null on empty result", async () => {
   const { client, calls } = fakeClient([]);
   const adapter = pgStorageAdapter(() => client);
 
-  const result = await adapter.getOne("portfolio_blobs", "u1");
+  const result = await adapter.get("portfolio_blobs", "u1", []);
 
   assert.equal(result, null);
   assert.match(
@@ -41,16 +41,16 @@ test("pgStorageAdapter.getOne: selects by user_id, returns null on empty result"
   assert.deepEqual(calls[0].params, ["u1"]);
 });
 
-test("pgStorageAdapter.getOne: maps a found row", async () => {
+test("pgStorageAdapter.get: maps a found row", async () => {
   const { client } = fakeClient([{ schema_version: 2, blob: "enc:x" }]);
   const adapter = pgStorageAdapter(() => client);
 
-  const result = await adapter.getOne("portfolio_blobs", "u1");
+  const result = await adapter.get("portfolio_blobs", "u1", []);
 
   assert.deepEqual(result, { schemaVersion: 2, blob: "enc:x" });
 });
 
-test("pgStorageAdapter.putOne: upserts on user_id, includes content_hash only when present", async () => {
+test("pgStorageAdapter.put: upserts on user_id, includes content_hash only when present", async () => {
   const { client, calls } = fakeClient();
   const adapter = pgStorageAdapter(() => client);
   const record: BlobRecord = {
@@ -59,7 +59,7 @@ test("pgStorageAdapter.putOne: upserts on user_id, includes content_hash only wh
     contentHash: "abc",
   };
 
-  await adapter.putOne("portfolio_blobs", "u1", record);
+  await adapter.put("portfolio_blobs", "u1", [], record);
 
   const { text, params } = calls[0];
   assert.match(text, /INSERT INTO "portfolio_blobs"/);
@@ -68,11 +68,11 @@ test("pgStorageAdapter.putOne: upserts on user_id, includes content_hash only wh
   assert.deepEqual(params, ["u1", "enc:y", 1, params[3], "abc"]);
 });
 
-test("pgStorageAdapter.putOne: omits content_hash entirely when not provided", async () => {
+test("pgStorageAdapter.put: omits content_hash entirely when not provided", async () => {
   const { client, calls } = fakeClient();
   const adapter = pgStorageAdapter(() => client);
 
-  await adapter.putOne("portfolio_blobs", "u1", {
+  await adapter.put("portfolio_blobs", "u1", [], {
     schemaVersion: 1,
     blob: "enc:y",
   });
@@ -81,18 +81,22 @@ test("pgStorageAdapter.putOne: omits content_hash entirely when not provided", a
   assert.ok(!calls[0].text.includes("content_hash"));
 });
 
-test("pgStorageAdapter.getByKey / putByKey: quote the dynamic key column, upsert on (user_id, key)", async () => {
+test("pgStorageAdapter.get / put with extraKeys: quote the dynamic key column, upsert on (user_id, key)", async () => {
   const { client, calls } = fakeClient();
   const adapter = pgStorageAdapter(() => client);
 
-  await adapter.getByKey!("transaction_blobs", "u1", "year_month", "2026-07");
+  await adapter.get("transaction_blobs", "u1", [
+    { column: "year_month", value: "2026-07" },
+  ]);
   assert.match(calls[0].text, /AND "year_month" = \$2/);
   assert.deepEqual(calls[0].params, ["u1", "2026-07"]);
 
-  await adapter.putByKey!("transaction_blobs", "u1", "year_month", "2026-07", {
-    schemaVersion: 1,
-    blob: "enc:z",
-  });
+  await adapter.put(
+    "transaction_blobs",
+    "u1",
+    [{ column: "year_month", value: "2026-07" }],
+    { schemaVersion: 1, blob: "enc:z" },
+  );
   assert.match(
     calls[1].text,
     /ON CONFLICT \(user_id, "year_month"\) DO UPDATE SET/,
@@ -221,7 +225,223 @@ test("pgStorageAdapter: quotes identifiers defensively (embedded double quote do
   const { client, calls } = fakeClient([]);
   const adapter = pgStorageAdapter(() => client);
 
-  await adapter.getOne('weird"table', "u1");
+  await adapter.get('weird"table', "u1", []);
 
   assert.match(calls[0].text, /FROM "weird""table"/);
 });
+
+test("pgStorageAdapter.putIfMatch: expectedHash null → plain INSERT (no ON CONFLICT)", async () => {
+  const { client, calls } = fakeClient();
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.putIfMatch!(
+    "portfolio_blobs",
+    "u1",
+    [],
+    { schemaVersion: 1, blob: "enc:y", contentHash: "h1" },
+    null,
+  );
+
+  assert.equal(ok, true);
+  assert.match(calls[0].text, /INSERT INTO "portfolio_blobs"/);
+  assert.ok(!calls[0].text.includes("ON CONFLICT"));
+  assert.deepEqual(calls[0].params, [
+    "u1",
+    "enc:y",
+    1,
+    params0Timestamp(calls),
+    "h1",
+  ]);
+});
+
+test("pgStorageAdapter.putIfMatch: expectedHash null + unique violation (code 23505) → false, not thrown", async () => {
+  const client: PgClient = {
+    async query() {
+      throw { code: "23505", message: "duplicate key" };
+    },
+  };
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.putIfMatch!(
+    "portfolio_blobs",
+    "u1",
+    [],
+    { schemaVersion: 1, blob: "enc:y" },
+    null,
+  );
+
+  assert.equal(ok, false);
+});
+
+test("pgStorageAdapter.putIfMatch: expectedHash null + a genuine different error → rethrown", async () => {
+  const client: PgClient = {
+    async query() {
+      const err = new Error("syntax error");
+      (err as Error & { code: string }).code = "42601";
+      throw err;
+    },
+  };
+  const adapter = pgStorageAdapter(() => client);
+
+  await assert.rejects(
+    () =>
+      adapter.putIfMatch!(
+        "portfolio_blobs",
+        "u1",
+        [],
+        { schemaVersion: 1, blob: "enc:y" },
+        null,
+      ),
+    /syntax error/,
+  );
+});
+
+test("pgStorageAdapter.putIfMatch: expectedHash non-null → conditional UPDATE, true when a row matches", async () => {
+  const { client, calls } = fakeClient([{ user_id: "u1" }]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.putIfMatch!(
+    "portfolio_blobs",
+    "u1",
+    [],
+    { schemaVersion: 1, blob: "enc:y2", contentHash: "h2" },
+    "h1",
+  );
+
+  assert.equal(ok, true);
+  assert.match(calls[0].text, /UPDATE "portfolio_blobs" SET/);
+  assert.match(calls[0].text, /WHERE user_id = \$\d+ AND content_hash = \$\d+/);
+  assert.match(calls[0].text, /RETURNING/);
+  assert.ok(calls[0].params.includes("h1"));
+});
+
+test("pgStorageAdapter.putIfMatch: expectedHash non-null → false (no throw) when zero rows match", async () => {
+  const { client } = fakeClient([]); // UPDATE ... RETURNING matched nothing
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.putIfMatch!(
+    "portfolio_blobs",
+    "u1",
+    [],
+    { schemaVersion: 1, blob: "enc:y2" },
+    "stale-hash",
+  );
+
+  assert.equal(ok, false);
+});
+
+test("pgStorageAdapter.putIfMatch: with an extra key (perKey), scopes both the INSERT and the UPDATE WHERE", async () => {
+  const { client: insertClient, calls: insertCalls } = fakeClient();
+  const insertAdapter = pgStorageAdapter(() => insertClient);
+  await insertAdapter.putIfMatch!(
+    "transaction_blobs",
+    "u1",
+    [{ column: "year_month", value: "2026-07" }],
+    { schemaVersion: 1, blob: "enc:z" },
+    null,
+  );
+  assert.match(
+    insertCalls[0].text,
+    /INSERT INTO "transaction_blobs" \("user_id", "year_month", "blob"/,
+  );
+  assert.deepEqual(insertCalls[0].params.slice(0, 2), ["u1", "2026-07"]);
+
+  const { client: updateClient, calls: updateCalls } = fakeClient([
+    { user_id: "u1" },
+  ]);
+  const updateAdapter = pgStorageAdapter(() => updateClient);
+  await updateAdapter.putIfMatch!(
+    "transaction_blobs",
+    "u1",
+    [{ column: "year_month", value: "2026-07" }],
+    { schemaVersion: 1, blob: "enc:z2" },
+    "h1",
+  );
+  assert.match(
+    updateCalls[0].text,
+    /WHERE user_id = \$\d+ AND "year_month" = \$\d+ AND content_hash = \$\d+/,
+  );
+});
+
+test("pgStorageAdapter.updateByIdIfMatch: expectedHash null → plain INSERT with the given id", async () => {
+  const { client, calls } = fakeClient();
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.updateByIdIfMatch!(
+    "rebalance_simulations",
+    "u1",
+    "row-1",
+    { schemaVersion: 1, blob: "enc:a", contentHash: "h1" },
+    { portfolio_id: "pf-1" },
+    null,
+  );
+
+  assert.equal(ok, true);
+  assert.match(
+    calls[0].text,
+    /INSERT INTO "rebalance_simulations" \("id", "user_id"/,
+  );
+  assert.deepEqual(calls[0].params.slice(0, 2), ["row-1", "u1"]);
+});
+
+test("pgStorageAdapter.updateByIdIfMatch: expectedHash null + unique violation (code 23505) → false, not thrown", async () => {
+  const client: PgClient = {
+    async query() {
+      throw { code: "23505", message: "duplicate key" };
+    },
+  };
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.updateByIdIfMatch!(
+    "rebalance_simulations",
+    "u1",
+    "row-1",
+    { schemaVersion: 1, blob: "enc:a" },
+    {},
+    null,
+  );
+
+  assert.equal(ok, false);
+});
+
+test("pgStorageAdapter.updateByIdIfMatch: conditional UPDATE scoped to user_id + id + content_hash", async () => {
+  const { client, calls } = fakeClient([{ id: "row-1" }]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.updateByIdIfMatch!(
+    "rebalance_simulations",
+    "u1",
+    "row-1",
+    { schemaVersion: 1, blob: "enc:b", contentHash: "h2" },
+    { portfolio_id: "pf-1", status: "executed" },
+    "h1",
+  );
+
+  assert.equal(ok, true);
+  assert.match(calls[0].text, /UPDATE "rebalance_simulations" SET/);
+  assert.match(
+    calls[0].text,
+    /WHERE user_id = \$\d+ AND id = \$\d+ AND content_hash = \$\d+/,
+  );
+  assert.ok(calls[0].params.includes("h1"));
+});
+
+test("pgStorageAdapter.updateByIdIfMatch: false (no throw) when zero rows match (stale hash or wrong id)", async () => {
+  const { client } = fakeClient([]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const ok = await adapter.updateByIdIfMatch!(
+    "rebalance_simulations",
+    "u1",
+    "row-1",
+    { schemaVersion: 1, blob: "enc:b" },
+    { portfolio_id: "pf-1" },
+    "stale-hash",
+  );
+
+  assert.equal(ok, false);
+});
+
+function params0Timestamp(calls: Array<{ params: unknown[] }>): unknown {
+  return calls[0].params[3];
+}

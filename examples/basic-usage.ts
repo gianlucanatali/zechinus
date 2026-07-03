@@ -10,32 +10,53 @@
 
 import { z } from "zod";
 import { randomBytes } from "@noble/ciphers/utils.js";
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
 import {
   configureSecureStore,
   defineStore,
   fingerprintSchema,
+  createKeyHandle,
   type StorageAdapter,
   type BlobRecord,
 } from "../index.ts";
 
-/** Minimal in-memory adapter, supports all 3 cardinalities. Examples/tests only. */
+// A real app derives its DEK from a `KeyProvider` adapter (WebAuthn, password KDF,
+// hardware token, ...) and picks its own salt/info for `createKeyHandle` — these
+// example values are illustrative only, not meant to be reused verbatim.
+const EXAMPLE_PID_SALT = new Uint8Array(32).fill(7);
+const createDekHandle = (rawBytes: Uint8Array) =>
+  createKeyHandle(rawBytes, EXAMPLE_PID_SALT, "example-pid-info");
+
+/**
+ * Minimal in-memory adapter, supports all 3 cardinalities. Examples/tests only.
+ * `get`/`put` cover BOTH perUser (`extraKeys: []`) and perKey (`extraKeys: [key]`)
+ * — same row-address, one map, keyed by however many extra columns were given.
+ */
 export function memoryAdapter(): StorageAdapter {
-  const perUser = new Map<string, BlobRecord>();
-  const perKey = new Map<string, BlobRecord>();
+  const rows = new Map<string, BlobRecord>();
   const many = new Map<string, BlobRecord>();
+  const rowKey = (
+    collection: string,
+    userId: string,
+    extraKeys: { value: string }[],
+  ) => [collection, userId, ...extraKeys.map((k) => k.value)].join(":");
   return {
-    async getOne(collection, userId) {
-      return perUser.get(`${collection}:${userId}`) ?? null;
+    async get(collection, userId, extraKeys) {
+      return rows.get(rowKey(collection, userId, extraKeys)) ?? null;
     },
-    async putOne(collection, userId, record) {
-      perUser.set(`${collection}:${userId}`, record);
+    async put(collection, userId, extraKeys, record) {
+      rows.set(rowKey(collection, userId, extraKeys), record);
     },
-    async getByKey(collection, userId, _keyColumn, keyValue) {
-      return perKey.get(`${collection}:${userId}:${keyValue}`) ?? null;
-    },
-    async putByKey(collection, userId, _keyColumn, keyValue, record) {
-      perKey.set(`${collection}:${userId}:${keyValue}`, record);
+    async putIfMatch(collection, userId, extraKeys, record, expectedHash) {
+      const key = rowKey(collection, userId, extraKeys);
+      const current = rows.get(key) ?? null;
+      if (expectedHash === null) {
+        if (current) return false; // row already exists — caller's belief was stale
+        rows.set(key, record);
+        return true;
+      }
+      if (!current || current.contentHash !== expectedHash) return false;
+      rows.set(key, record);
+      return true;
     },
     async list(collection, userId) {
       const prefix = `${collection}:${userId}:`;
@@ -124,4 +145,40 @@ export async function manyExample() {
     addedLiquidity: 500,
   });
   return simulationStore.list("u1", dek);
+}
+
+// ── 4. optimisticLock — reject a write if the row changed since it was last read ───
+export async function optimisticLockExample() {
+  configureSecureStore({ storage: memoryAdapter() });
+  const dek = freshDek();
+
+  const Asset = z.object({ label: z.string().default("") });
+  const assetStore = defineStore({
+    name: "asset_blobs",
+    encrypt: "all",
+    schema: Asset,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Asset, "all"),
+    contentHash: true, // required by optimisticLock
+    optimisticLock: true,
+  });
+
+  const first = await assetStore.saveIfMatch!("u1", dek, { label: "v1" }, null);
+  const second = await assetStore.saveIfMatch!(
+    "u1",
+    dek,
+    { label: "v2" },
+    first.hash, // the hash saveIfMatch just returned — no extra fetch needed
+  );
+
+  // A write using a now-stale hash (as if another tab had already saved) is
+  // rejected — `{ ok: false }`, never thrown.
+  const conflict = await assetStore.saveIfMatch!(
+    "u1",
+    dek,
+    { label: "v3-conflicting" },
+    first.hash, // stale: "second" already moved the row past this hash
+  );
+
+  return { first, second, conflict };
 }

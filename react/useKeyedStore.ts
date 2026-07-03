@@ -2,10 +2,20 @@
  * React binding for `perKey` stores — mirrors `useStore` exactly, plus the domain
  * key as an explicit argument (each key is an independent cache slot, e.g. one
  * `useKeyedStore(store, "2026-06")` per month rendered).
+ *
+ * Same hash-threading as `useStore`: when the store has `optimisticLock: true`,
+ * `save()` transparently uses `saveIfMatch`, and a conflict throws
+ * `OptimisticLockConflictError`.
  */
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { getSecureStoreConfig } from "../core/config.ts";
 import type { KeyedStore } from "../core/store.ts";
+import { OptimisticLockConflictError } from "./errors.ts";
+
+interface CacheEntry<T> {
+  data: T;
+  hash: string | null;
+}
 
 export interface UseKeyedStoreResult<T> {
   data: T | undefined;
@@ -40,7 +50,7 @@ export function useKeyedStore<T>(
     [cache, cacheKey],
   );
   const cached = useSyncExternalStore(subscribeToKey, () =>
-    cache.getQueryData<T>(cacheKey),
+    cache.getQueryData<CacheEntry<T>>(cacheKey),
   );
 
   const [error, setError] = useState<Error | null>(null);
@@ -48,12 +58,14 @@ export function useKeyedStore<T>(
   useEffect(() => {
     setError(null);
     if (!dek || !userId) return;
-    if (cache.getQueryData<T>(cacheKey) !== undefined) return;
+    if (cache.getQueryData<CacheEntry<T>>(cacheKey) !== undefined) return;
     let cancelled = false;
-    store
-      .load(userId, dek, key)
-      .then((data) => {
-        if (!cancelled) cache.setQueryData(cacheKey, data);
+    const fetch = store.loadWithHash
+      ? store.loadWithHash(userId, dek, key)
+      : store.load(userId, dek, key).then((data) => ({ data, hash: null }));
+    fetch
+      .then((entry) => {
+        if (!cancelled) cache.setQueryData(cacheKey, entry);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e : new Error(String(e)));
@@ -70,12 +82,25 @@ export function useKeyedStore<T>(
           `${store.name}.use().save(): called while locked (no dek/userId)`,
         );
       }
-      const previous = cache.getQueryData<T>(cacheKey);
-      cache.setQueryData(cacheKey, data);
+      const previous = cache.getQueryData<CacheEntry<T>>(cacheKey);
+      cache.setQueryData(cacheKey, { data, hash: previous?.hash ?? null });
       try {
-        await store.save(userId, dek, key, data);
+        if (store.saveIfMatch) {
+          const result = await store.saveIfMatch(
+            userId,
+            dek,
+            key,
+            data,
+            previous?.hash ?? null,
+          );
+          if (!result.ok) throw new OptimisticLockConflictError(store.name);
+          cache.setQueryData(cacheKey, { data, hash: result.hash });
+        } else {
+          await store.save(userId, dek, key, data);
+          cache.setQueryData(cacheKey, { data, hash: null });
+        }
       } catch (e) {
-        cache.setQueryData(cacheKey, previous as T);
+        if (previous !== undefined) cache.setQueryData(cacheKey, previous);
         throw e;
       }
     },
@@ -83,7 +108,7 @@ export function useKeyedStore<T>(
   );
 
   return {
-    data: cached,
+    data: cached?.data,
     loading: !!dek && !!userId && cached === undefined && error === null,
     locked: !dek || !userId,
     error,

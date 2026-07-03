@@ -8,27 +8,32 @@
  * No knowledge of Supabase/TanStack: uses only the crypto core and framework types.
  */
 
-import type { DekHandle, EncryptedField, FieldAAD } from "@crypto/field-crypto";
 import {
   serializeEncField,
   parseEncField,
   isEncryptedField,
-} from "@crypto/field-crypto";
+} from "./wireFormat.ts";
 import {
   toEnvelope,
   fromEnvelope,
   runMigrations,
   type BlobMigrator,
 } from "./versioning.ts";
-import type { BlobRecord } from "./types.ts";
+import { hashContent } from "./contentHash.ts";
+import type {
+  BlobRecord,
+  CryptoHandle,
+  EncryptedField,
+  FieldAAD,
+} from "./types.ts";
 
 /** Encrypts `data` (versioned envelope) under the given AAD → `BlobRecord` ready for storage. */
 export async function encodeBlob<T>(
-  dek: DekHandle,
+  dek: CryptoHandle,
   aad: FieldAAD,
   data: T,
   version: number,
-  hashContent?: (envelope: unknown) => Promise<string>,
+  computeContentHash?: boolean,
 ): Promise<BlobRecord> {
   const envelope = toEnvelope(data, version);
   const enc = await dek.encryptJson(envelope, aad);
@@ -36,7 +41,7 @@ export async function encodeBlob<T>(
     schemaVersion: version,
     blob: serializeEncField(enc),
   };
-  if (hashContent) record.contentHash = await hashContent(envelope);
+  if (computeContentHash) record.contentHash = await hashContent(envelope);
   return record;
 }
 
@@ -53,7 +58,7 @@ export interface DecodeResult<T> {
  * to a different slot).
  */
 export async function decodeBlob<T>(
-  dek: DekHandle,
+  dek: CryptoHandle,
   aad: FieldAAD,
   record: BlobRecord | null,
   version: number,

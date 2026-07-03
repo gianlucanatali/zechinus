@@ -9,6 +9,7 @@ import {
   perUserExample,
   perKeyExample,
   manyExample,
+  optimisticLockExample,
 } from "../examples/basic-usage.ts";
 
 test("example: perUser roundtrip", async () => {
@@ -23,4 +24,13 @@ test("example: many roundtrip", async () => {
   const rows = await manyExample();
   assert.equal(rows.length, 1);
   assert.deepEqual(rows[0].data, { name: "sim-1", addedLiquidity: 500 });
+});
+
+test("example: optimisticLock — success, chained hash, rejected stale write", async () => {
+  const { first, second, conflict } = await optimisticLockExample();
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  assert.notEqual(second.hash, first.hash);
+  assert.equal(conflict.ok, false);
+  assert.equal(conflict.hash, null);
 });

@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
-import type { FieldAAD } from "@crypto/field-crypto";
-
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
+import { createDekHandle } from "./testKeyHandle.ts";
 import { encodeBlob, decodeBlob } from "../core/blobCodec.ts";
 import { migrateLegacyAAD } from "../core/legacyMigration.ts";
-import type { BlobRecord } from "../core/types.ts";
+import type { BlobRecord, FieldAAD } from "../core/types.ts";
 
 function oldAAD(userId: string, yearMonth: string): FieldAAD {
   // Historical convention this table used before it was ported to DataCloak.
@@ -86,7 +84,7 @@ test("migrateLegacyAAD: preserves schemaVersion and contentHash from the source 
     oldAAD(dek.pid, "2026-06"),
     { transactions: [] },
     3,
-    async () => "precomputed-hash",
+    true,
   );
 
   const result = await migrateLegacyAAD(
@@ -97,7 +95,8 @@ test("migrateLegacyAAD: preserves schemaVersion and contentHash from the source 
   );
 
   assert.equal(result.record!.schemaVersion, 3);
-  assert.equal(result.record!.contentHash, "precomputed-hash");
+  assert.ok(result.record!.contentHash, "contentHash present");
+  assert.equal(result.record!.contentHash, legacyRecord.contentHash);
 });
 
 test("migrateLegacyAAD: wrong old-AAD guess → propagates the decrypt failure, never swallowed", async () => {
@@ -160,6 +159,6 @@ async function decodeBlobStrict(
   aad: FieldAAD,
   record: BlobRecord,
 ): Promise<unknown> {
-  const { parseEncField } = await import("@crypto/field-crypto");
+  const { parseEncField } = await import("../core/wireFormat.ts");
   return dek.decryptJson(parseEncField(record.blob), aad);
 }

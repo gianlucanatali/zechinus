@@ -31,99 +31,126 @@ function paramList(start: number, count: number): string {
   return Array.from({ length: count }, (_, i) => `$${start + i}`).join(", ");
 }
 
+/** node-postgres error shape for a unique-constraint violation (SQLSTATE 23505). */
+function isUniqueViolation(e: unknown): boolean {
+  return (e as { code?: string } | null)?.code === "23505";
+}
+
 export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
   return {
-    async getOne(collection, userId): Promise<BlobRecord | null> {
+    async get(collection, userId, extraKeys): Promise<BlobRecord | null> {
+      const extra = extraKeys
+        .map((k, i) => ` AND ${quoteIdent(k.column)} = $${i + 2}`)
+        .join("");
       const { rows } = await getClient().query<{
         schema_version: number | null;
         blob: string;
       }>(
-        `SELECT schema_version, blob FROM ${quoteIdent(collection)} WHERE user_id = $1 LIMIT 1`,
-        [userId],
+        `SELECT schema_version, blob FROM ${quoteIdent(collection)} WHERE user_id = $1${extra} LIMIT 1`,
+        [userId, ...extraKeys.map((k) => k.value)],
       );
       const row = rows[0];
       if (!row) return null;
       return { schemaVersion: row.schema_version ?? 1, blob: row.blob };
     },
 
-    async putOne(collection, userId, record): Promise<void> {
-      const columns = ["user_id", "blob", "schema_version", "updated_at"];
-      const values: unknown[] = [
-        userId,
-        record.blob,
-        record.schemaVersion,
-        new Date().toISOString(),
-      ];
+    async put(collection, userId, extraKeys, record): Promise<void> {
+      const columns = ["user_id", ...extraKeys.map((k) => k.column)];
+      const values: unknown[] = [userId, ...extraKeys.map((k) => k.value)];
+      columns.push("blob", "schema_version", "updated_at");
+      values.push(record.blob, record.schemaVersion, new Date().toISOString());
       if (record.contentHash !== undefined) {
         columns.push("content_hash");
         values.push(record.contentHash);
       }
+      const keyColumns = extraKeys.map((k) => k.column);
+      const conflictClause = ["user_id", ...keyColumns]
+        .map((c, i) => (i === 0 ? c : quoteIdent(c)))
+        .join(", ");
       const updates = columns
-        .filter((c) => c !== "user_id")
+        .filter((c) => c !== "user_id" && !keyColumns.includes(c))
         .map((c) => `${quoteIdent(c)} = excluded.${quoteIdent(c)}`)
         .join(", ");
       await getClient().query(
         `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
           `VALUES (${paramList(1, columns.length)}) ` +
-          `ON CONFLICT (user_id) DO UPDATE SET ${updates}`,
+          `ON CONFLICT (${conflictClause}) DO UPDATE SET ${updates}`,
         values,
       );
     },
 
-    async getByKey(
+    /**
+     * `expectedHash: null` → plain INSERT; a unique-constraint violation (row already
+     * exists) is a conflict → `false`, never thrown. `expectedHash` set → `UPDATE ...
+     * WHERE ... AND content_hash = expected RETURNING` — zero rows back means either
+     * the hash didn't match or the row is gone → `false`, same non-throwing contract.
+     */
+    async putIfMatch(
       collection,
       userId,
-      keyColumn,
-      keyValue,
-    ): Promise<BlobRecord | null> {
-      const { rows } = await getClient().query<{
-        schema_version: number | null;
-        blob: string;
-      }>(
-        `SELECT schema_version, blob FROM ${quoteIdent(collection)} ` +
-          `WHERE user_id = $1 AND ${quoteIdent(keyColumn)} = $2 LIMIT 1`,
-        [userId, keyValue],
-      );
-      const row = rows[0];
-      if (!row) return null;
-      return { schemaVersion: row.schema_version ?? 1, blob: row.blob };
-    },
-
-    async putByKey(
-      collection,
-      userId,
-      keyColumn,
-      keyValue,
+      extraKeys,
       record,
-    ): Promise<void> {
-      const columns = [
-        "user_id",
-        keyColumn,
-        "blob",
-        "schema_version",
-        "updated_at",
-      ];
-      const values: unknown[] = [
-        userId,
-        keyValue,
+      expectedHash,
+    ): Promise<boolean> {
+      const client = getClient();
+      if (expectedHash === null) {
+        const columns = ["user_id", ...extraKeys.map((k) => k.column)];
+        const values: unknown[] = [userId, ...extraKeys.map((k) => k.value)];
+        columns.push("blob", "schema_version", "updated_at");
+        values.push(
+          record.blob,
+          record.schemaVersion,
+          new Date().toISOString(),
+        );
+        if (record.contentHash !== undefined) {
+          columns.push("content_hash");
+          values.push(record.contentHash);
+        }
+        try {
+          await client.query(
+            `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
+              `VALUES (${paramList(1, columns.length)})`,
+            values,
+          );
+          return true;
+        } catch (e) {
+          if (isUniqueViolation(e)) return false;
+          throw e;
+        }
+      }
+      const setColumns = ["blob", "schema_version", "updated_at"];
+      const setValues: unknown[] = [
         record.blob,
         record.schemaVersion,
         new Date().toISOString(),
       ];
       if (record.contentHash !== undefined) {
-        columns.push("content_hash");
-        values.push(record.contentHash);
+        setColumns.push("content_hash");
+        setValues.push(record.contentHash);
       }
-      const updates = columns
-        .filter((c) => c !== "user_id" && c !== keyColumn)
-        .map((c) => `${quoteIdent(c)} = excluded.${quoteIdent(c)}`)
+      const setClause = setColumns
+        .map((c, i) => `${quoteIdent(c)} = $${i + 1}`)
         .join(", ");
-      await getClient().query(
-        `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
-          `VALUES (${paramList(1, columns.length)}) ` +
-          `ON CONFLICT (user_id, ${quoteIdent(keyColumn)}) DO UPDATE SET ${updates}`,
+      const base = setValues.length;
+      const whereParts = [
+        `user_id = $${base + 1}`,
+        ...extraKeys.map(
+          (k, i) => `${quoteIdent(k.column)} = $${base + 2 + i}`,
+        ),
+        `content_hash = $${base + 2 + extraKeys.length}`,
+      ];
+      const values = [
+        ...setValues,
+        userId,
+        ...extraKeys.map((k) => k.value),
+        expectedHash,
+      ];
+      const { rows } = await client.query(
+        `UPDATE ${quoteIdent(collection)} SET ${setClause} ` +
+          `WHERE ${whereParts.join(" AND ")} RETURNING user_id`,
         values,
       );
+      return rows.length > 0;
     },
 
     async listByKeyRange(
@@ -215,6 +242,75 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
           `WHERE user_id = $${userIdParam} AND id = $${idParam}`,
         values,
       );
+    },
+
+    /** Conditional variant of `updateById` — same null/hash semantics as `putIfMatch`. */
+    async updateByIdIfMatch(
+      collection,
+      userId,
+      id,
+      record,
+      plain,
+      expectedHash,
+    ): Promise<boolean> {
+      const client = getClient();
+      const plainCols = Object.keys(plain);
+      if (expectedHash === null) {
+        const columns = [
+          "id",
+          "user_id",
+          "blob",
+          "schema_version",
+          ...plainCols,
+        ];
+        const values: unknown[] = [
+          id,
+          userId,
+          record.blob,
+          record.schemaVersion,
+        ];
+        if (record.contentHash !== undefined) {
+          columns.splice(4, 0, "content_hash");
+          values.push(record.contentHash);
+        }
+        for (const col of plainCols) values.push(plain[col]);
+        try {
+          await client.query(
+            `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
+              `VALUES (${paramList(1, columns.length)})`,
+            values,
+          );
+          return true;
+        } catch (e) {
+          if (isUniqueViolation(e)) return false;
+          throw e;
+        }
+      }
+      const setColumns = ["blob", "schema_version", "updated_at", ...plainCols];
+      const values: unknown[] = [
+        record.blob,
+        record.schemaVersion,
+        new Date().toISOString(),
+      ];
+      if (record.contentHash !== undefined) {
+        setColumns.splice(3, 0, "content_hash");
+        values.push(record.contentHash);
+      }
+      for (const col of plainCols) values.push(plain[col]);
+      const setClause = setColumns
+        .map((c, i) => `${quoteIdent(c)} = $${i + 1}`)
+        .join(", ");
+      const userIdParam = values.length + 1;
+      const idParam = values.length + 2;
+      const hashParam = values.length + 3;
+      values.push(userId, id, expectedHash);
+      const { rows } = await client.query(
+        `UPDATE ${quoteIdent(collection)} SET ${setClause} ` +
+          `WHERE user_id = $${userIdParam} AND id = $${idParam} AND content_hash = $${hashParam} ` +
+          `RETURNING id`,
+        values,
+      );
+      return rows.length > 0;
     },
 
     async deleteById(collection, userId, id): Promise<void> {

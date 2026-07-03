@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
+import { createDekHandle } from "./testKeyHandle.ts";
 import {
   configureSecureStore,
   defineStore,
@@ -21,10 +21,10 @@ function collectionMemoryAdapter(): StorageAdapter & {
     `${collection}:${userId}:${id}`;
   return {
     rows,
-    async getOne() {
+    async get() {
       return null;
     },
-    async putOne() {
+    async put() {
       /* perUser not used in these tests */
     },
     async list(collection, userId) {
@@ -55,10 +55,10 @@ function collectionMemoryAdapter(): StorageAdapter & {
 // Adapter with no 'many' support, to test the explicit error.
 function noManyAdapter(): StorageAdapter {
   return {
-    async getOne() {
+    async get() {
       return null;
     },
-    async putOne() {},
+    async put() {},
   };
 }
 

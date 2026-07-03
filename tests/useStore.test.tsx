@@ -8,8 +8,8 @@ import { cleanup, renderHook, act, waitFor } from "@testing-library/react";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
-import { createDekHandle } from "../../crypto/passkey-prf.ts";
-import type { DekHandle } from "@crypto/field-crypto";
+import { createDekHandle } from "./testKeyHandle.ts";
+import type { CryptoHandle } from "@datacloak";
 import {
   configureSecureStore,
   __resetSecureStoreConfig,
@@ -21,21 +21,49 @@ import {
   type CacheAdapter,
 } from "../index.ts";
 import { useStore } from "../react/useStore.ts";
+import { OptimisticLockConflictError } from "../react/errors.ts";
 
 function memoryStorage(): StorageAdapter & { rows: Map<string, BlobRecord> } {
   const rows = new Map<string, BlobRecord>();
   return {
     rows,
-    async getOne(collection, userId) {
+    async get(collection, userId) {
       return rows.get(`${collection}:${userId}`) ?? null;
     },
-    async putOne(collection, userId, record) {
+    async put(collection, userId, _extraKeys, record) {
       rows.set(`${collection}:${userId}`, record);
     },
   };
 }
 
-function fakeKeys(initial: DekHandle | null) {
+function conditionalMemoryStorage(): StorageAdapter & {
+  rows: Map<string, BlobRecord>;
+} {
+  const rows = new Map<string, BlobRecord>();
+  return {
+    rows,
+    async get(collection, userId) {
+      return rows.get(`${collection}:${userId}`) ?? null;
+    },
+    async put(collection, userId, _extraKeys, record) {
+      rows.set(`${collection}:${userId}`, record);
+    },
+    async putIfMatch(collection, userId, _extraKeys, record, expectedHash) {
+      const key = `${collection}:${userId}`;
+      const current = rows.get(key) ?? null;
+      if (expectedHash === null) {
+        if (current) return false;
+        rows.set(key, record);
+        return true;
+      }
+      if (!current || current.contentHash !== expectedHash) return false;
+      rows.set(key, record);
+      return true;
+    },
+  };
+}
+
+function fakeKeys(initial: CryptoHandle | null) {
   let dek = initial;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
@@ -48,7 +76,7 @@ function fakeKeys(initial: DekHandle | null) {
   };
   return {
     provider,
-    setDek(next: DekHandle | null) {
+    setDek(next: CryptoHandle | null) {
       dek = next;
       for (const cb of subs) cb();
     },
@@ -162,10 +190,10 @@ describe("useStore", () => {
     const { provider } = fakeKeys(dek);
     const cache = memoryCache();
     const failingStorage: StorageAdapter = {
-      async getOne() {
+      async get() {
         return null;
       },
-      async putOne() {
+      async put() {
         throw new Error("simulated write failure");
       },
     };
@@ -216,5 +244,81 @@ describe("useStore", () => {
 
     expect(result.current.locked).toBe(true);
     expect(result.current.data).toBeUndefined();
+  });
+
+  it("optimisticLock: save() threads the hash automatically — caller never passes one", async () => {
+    const storage = conditionalMemoryStorage();
+    const dek = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(dek);
+    const cache = memoryCache();
+    configureSecureStore({ storage, keys: provider, cache });
+
+    const store = defineStore({
+      name: "portfolio_blobs",
+      encrypt: "all",
+      schema: Portfolio,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+      contentHash: true,
+      optimisticLock: true,
+    });
+
+    const { result } = renderHook(() => useStore(store));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.save({ positions: ["AAPL"] });
+    });
+    expect(result.current.data).toEqual({ positions: ["AAPL"] });
+
+    // A second save with no manual hash handling must still succeed — the hook
+    // already knows the hash from the first save's result.
+    await act(async () => {
+      await result.current.save({ positions: ["AAPL", "MSFT"] });
+    });
+    expect(result.current.data).toEqual({ positions: ["AAPL", "MSFT"] });
+  });
+
+  it("optimisticLock: a conflicting concurrent write makes the next save() throw OptimisticLockConflictError and roll back", async () => {
+    const storage = conditionalMemoryStorage();
+    const dek = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(dek);
+    const cache = memoryCache();
+    configureSecureStore({ storage, keys: provider, cache });
+
+    const store = defineStore({
+      name: "portfolio_blobs",
+      encrypt: "all",
+      schema: Portfolio,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+      contentHash: true,
+      optimisticLock: true,
+    });
+
+    const { result } = renderHook(() => useStore(store));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.save({ positions: ["AAPL"] });
+    });
+
+    // A "concurrent tab" writes directly through the store, bypassing this hook's cache.
+    const { hash } = await store.loadWithHash!("u1", dek);
+    await store.saveIfMatch!(
+      "u1",
+      dek,
+      { positions: ["concurrent-write"] },
+      hash,
+    );
+
+    await act(async () => {
+      await expect(
+        result.current.save({ positions: ["mine"] }),
+      ).rejects.toThrow(OptimisticLockConflictError);
+    });
+
+    // Rolled back to what the hook believed was current, not silently overwritten.
+    expect(result.current.data).toEqual({ positions: ["AAPL"] });
   });
 });
