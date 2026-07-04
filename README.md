@@ -593,6 +593,38 @@ rows }`, matching node-postgres's shape) — no hard dependency on `pg` or any s
 Both implement the exact same `StorageAdapter` interface (`core/types.ts`) — swapping one
 for the other requires no changes to `defineStore` calls, only to `configureSecureStore`.
 
+## Package boundary — import adapters from their own path, never the bare barrel
+
+`datacloak/package.json` declares the real dependency split: `zod`/`@noble/ciphers`/
+`@noble/hashes` are hard `dependencies` (the core needs them unconditionally);
+`@supabase/supabase-js`, `react`, `@tanstack/react-query` are `peerDependencies`, all
+marked `optional: true` in `peerDependenciesMeta` — a consumer using only
+`pgStorageAdapter` needs none of them installed (`pgStorageAdapter` itself has zero
+package dependency at all, not even `pg` — see above).
+
+To make that real, **`@datacloak` (the bare barrel, `index.ts`) exports ONLY `core/` —
+zero adapters.** Importing `@datacloak` for `defineStore` must never pull Supabase,
+TanStack, or the WebAuthn browser API into the module graph. Import an adapter from its
+own file instead:
+
+```ts
+import { supabaseStorageAdapter } from "@datacloak/adapters/supabaseStorageAdapter.ts";
+import { pgStorageAdapter } from "@datacloak/adapters/pgStorageAdapter.ts";
+import { webauthnKeyProvider } from "@datacloak/adapters/webauthnKeyProvider.ts";
+import { mnemonicRecovery } from "@datacloak/adapters/mnemonicRecovery.ts";
+import { createWorkerKeyHandle } from "@datacloak/adapters/workerKeyHandle.ts";
+import { tanstackAdapter } from "@datacloak/react"; // React binding only, not the bare barrel
+```
+
+**`datacloak/tsconfig.json`** is a second, standalone compiler config with no `paths` —
+no `@datacloak` alias, no reliance on the host app's `tsconfig.json`. It's the actual
+self-containment check: if `datacloak/`'s own code (including its tests) only imports
+itself via relative paths (`../core/...`, `./testKeyHandle.ts`, ...) — never the alias —
+this passes. Run it with `npm run datacloak:typecheck`. Any file inside `datacloak/`
+that imports `@datacloak`/`@datacloak/*` (the alias, only resolvable inside the
+the host app host app) instead of a relative path breaks this check — that's the signal a
+boundary was crossed by accident.
+
 ## How these docs stay in sync
 
 Project convention: **examples are real code, not prose.** `datacloak/examples/*.ts` is

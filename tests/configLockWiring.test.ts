@@ -9,7 +9,7 @@ import type {
   KeyProvider,
   StorageAdapter,
 } from "../core/types.ts";
-import type { CryptoHandle } from "@datacloak";
+import type { CryptoHandle } from "../index.ts";
 
 function fakeStorage(): StorageAdapter {
   return {

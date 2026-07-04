@@ -15,8 +15,6 @@ export interface SecureStoreConfig {
   keys?: KeyProvider;
   /** Required only to use the React binding (`store.use()`). */
   cache?: CacheAdapter;
-  /** Salt namespacing per app (reserved for later phases: key lifecycle). */
-  saltNamespace?: string;
 }
 
 let current: SecureStoreConfig | null = null;

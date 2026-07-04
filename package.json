@@ -1,0 +1,36 @@
+{
+  "name": "datacloak",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end encryption as an adapter layer, for apps that already own their backend. See README.md.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.ts",
+    "./react": "./react/index.ts",
+    "./adapters/*": "./adapters/*.ts",
+    "./core/*": "./core/*.ts"
+  },
+  "sideEffects": false,
+  "dependencies": {
+    "zod": "^4.4.3",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/hashes": "^2.2.0"
+  },
+  "peerDependencies": {
+    "@supabase/supabase-js": "^2.103.0",
+    "@tanstack/react-query": "^5.101.1",
+    "react": "^18.3.1"
+  },
+  "peerDependenciesMeta": {
+    "@supabase/supabase-js": {
+      "optional": true
+    },
+    "@tanstack/react-query": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  }
+}

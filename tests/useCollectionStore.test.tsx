@@ -4,12 +4,12 @@ import { randomBytes } from "@noble/ciphers/utils.js";
 import { z } from "zod";
 
 import { createDekHandle } from "./testKeyHandle.ts";
-import type { CryptoHandle } from "@datacloak";
 import {
   configureSecureStore,
   __resetSecureStoreConfig,
   defineStore,
   fingerprintSchema,
+  type CryptoHandle,
   type StorageAdapter,
   type BlobRecord,
   type KeyProvider,

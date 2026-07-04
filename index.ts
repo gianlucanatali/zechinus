@@ -1,5 +1,5 @@
 /**
- * DataCloak secure-store framework — public entry point (initial slice).
+ * DataCloak secure-store framework — public entry point.
  *
  * This barrel is React-free by design — the React binding lives at `@datacloak/react`
  * (`react/index.ts`), a separate sub-entry, so importing `@datacloak` in a non-React
@@ -7,10 +7,18 @@
  * module graph. `KeyProvider`/`CacheAdapter` are plain interfaces (no React types),
  * so they stay exported here.
  *
- * Status: blob mode + IoC config + StorageAdapter (Supabase + plain Postgres adapters) +
- * versioning (migrator count + schema fingerprint guardrails) + React binding
- * (`@datacloak/react`, perUser only so far). Coming: hub-and-spoke adapter, perKey/many
- * bindings, key lifecycle (passkey/PRF + recovery). See README.md.
+ * See README.md for current status and scope (the "What DataCloak doesn't do yet"
+ * section is the single source of truth for gaps — this file header used to
+ * duplicate it and drifted out of sync, so it no longer tries to).
+ *
+ * This barrel exports ONLY `core/` — zero adapters. Every adapter (`supabaseStorageAdapter`,
+ * `pgStorageAdapter`, `webauthnKeyProvider`, `mnemonicRecovery`, `workerKeyHandle`,
+ * `tanstackAdapter`) is optional and pulls in its own dependency (Supabase, a Postgres
+ * driver, the WebAuthn browser API, TanStack Query) — importing `@datacloak` for just
+ * `defineStore` must never drag those into the module graph. Import an adapter from its
+ * own file: `@datacloak/adapters/supabaseStorageAdapter.ts`,
+ * `@datacloak/adapters/pgStorageAdapter.ts`, etc. See README's "Architecture: the ports"
+ * section.
  */
 
 export {
@@ -100,26 +108,3 @@ export {
   type KeyHandle,
   type WrappedKey,
 } from "./core/keyDerivation.ts";
-
-export { supabaseStorageAdapter } from "./adapters/supabaseStorageAdapter.ts";
-export {
-  pgStorageAdapter,
-  type PgClient,
-} from "./adapters/pgStorageAdapter.ts";
-export {
-  webauthnKeyProvider,
-  type WebauthnKeyProvider,
-  type WebauthnKeyProviderConfig,
-  type PasskeyInfo,
-} from "./adapters/webauthnKeyProvider.ts";
-export {
-  mnemonicRecovery,
-  type MnemonicRecovery,
-  type MnemonicRecoveryConfig,
-} from "./adapters/mnemonicRecovery.ts";
-export {
-  createWorkerKeyHandle,
-  handleKeyHandleMessages,
-  type WorkerLike,
-  type WorkerContext,
-} from "./adapters/workerKeyHandle.ts";
