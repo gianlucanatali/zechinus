@@ -85,7 +85,7 @@ test("createWorkerKeyHandle: encryptJson/decryptJson roundtrip through the worke
   assert.deepEqual(dec, { hello: "world" });
 });
 
-test("createWorkerKeyHandle: encryptField/decryptField and encryptNumber/decryptNumber roundtrip", async () => {
+test("createWorkerKeyHandle: encryptField/decryptField roundtrip", async () => {
   const { worker, workerCtx } = fakeWorkerPair();
   handleKeyHandleMessages(
     (rawBytes) =>
@@ -101,9 +101,6 @@ test("createWorkerKeyHandle: encryptField/decryptField and encryptNumber/decrypt
 
   const encF = await handle.encryptField("plain text", aad);
   assert.equal(await handle.decryptField(encF, aad), "plain text");
-
-  const encN = await handle.encryptNumber(42.5, aad);
-  assert.equal(await handle.decryptNumber(encN, aad), 42.5);
 });
 
 test("createWorkerKeyHandle: wrapWithKek proxies through to the worker's handle", async () => {

@@ -47,8 +47,8 @@ function fakeKeys(initialDek: { pid: string } | null) {
 function fakeCache() {
   let cleared = 0;
   const cache: CacheAdapter = {
-    getQueryData: () => undefined,
-    setQueryData: () => {},
+    get: () => undefined,
+    set: () => {},
     subscribe: () => () => {},
     clear: () => {
       cleared++;

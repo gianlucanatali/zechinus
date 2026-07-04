@@ -50,7 +50,7 @@ export function useKeyedStore<T>(
     [cache, cacheKey],
   );
   const cached = useSyncExternalStore(subscribeToKey, () =>
-    cache.getQueryData<CacheEntry<T>>(cacheKey),
+    cache.get<CacheEntry<T>>(cacheKey),
   );
 
   const [error, setError] = useState<Error | null>(null);
@@ -58,14 +58,14 @@ export function useKeyedStore<T>(
   useEffect(() => {
     setError(null);
     if (!dek || !userId) return;
-    if (cache.getQueryData<CacheEntry<T>>(cacheKey) !== undefined) return;
+    if (cache.get<CacheEntry<T>>(cacheKey) !== undefined) return;
     let cancelled = false;
     const fetch = store.loadWithHash
       ? store.loadWithHash(userId, dek, key)
       : store.load(userId, dek, key).then((data) => ({ data, hash: null }));
     fetch
       .then((entry) => {
-        if (!cancelled) cache.setQueryData(cacheKey, entry);
+        if (!cancelled) cache.set(cacheKey, entry);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e : new Error(String(e)));
@@ -82,8 +82,8 @@ export function useKeyedStore<T>(
           `${store.name}.use().save(): called while locked (no dek/userId)`,
         );
       }
-      const previous = cache.getQueryData<CacheEntry<T>>(cacheKey);
-      cache.setQueryData(cacheKey, { data, hash: previous?.hash ?? null });
+      const previous = cache.get<CacheEntry<T>>(cacheKey);
+      cache.set(cacheKey, { data, hash: previous?.hash ?? null });
       try {
         if (store.saveIfMatch) {
           const result = await store.saveIfMatch(
@@ -94,13 +94,13 @@ export function useKeyedStore<T>(
             previous?.hash ?? null,
           );
           if (!result.ok) throw new OptimisticLockConflictError(store.name);
-          cache.setQueryData(cacheKey, { data, hash: result.hash });
+          cache.set(cacheKey, { data, hash: result.hash });
         } else {
           await store.save(userId, dek, key, data);
-          cache.setQueryData(cacheKey, { data, hash: null });
+          cache.set(cacheKey, { data, hash: null });
         }
       } catch (e) {
-        if (previous !== undefined) cache.setQueryData(cacheKey, previous);
+        if (previous !== undefined) cache.set(cacheKey, previous);
         throw e;
       }
     },

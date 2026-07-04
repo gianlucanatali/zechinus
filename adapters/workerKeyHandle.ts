@@ -74,10 +74,6 @@ export async function createWorkerKeyHandle(
       send("encryptJson", { value, aad }) as Promise<EncryptedField>,
     decryptJson: <T>(enc: EncryptedField, aad: FieldAAD) =>
       send("decryptJson", { enc, aad }) as Promise<T>,
-    encryptNumber: (value, aad) =>
-      send("encryptNumber", { value, aad }) as Promise<EncryptedField>,
-    decryptNumber: (enc, aad) =>
-      send("decryptNumber", { enc, aad }) as Promise<number>,
     wrapWithKek: (kek) => send("wrapWithKek", { kek }) as Promise<WrappedKey>,
     destroy() {
       worker.postMessage({ id: nextId++, type: "destroy" });
@@ -131,18 +127,6 @@ export function handleKeyHandleMessages(
           break;
         case "decryptJson":
           result = await dek!.decryptJson(
-            args.enc as EncryptedField,
-            args.aad as FieldAAD,
-          );
-          break;
-        case "encryptNumber":
-          result = await dek!.encryptNumber(
-            args.value as number,
-            args.aad as FieldAAD,
-          );
-          break;
-        case "decryptNumber":
-          result = await dek!.decryptNumber(
             args.enc as EncryptedField,
             args.aad as FieldAAD,
           );

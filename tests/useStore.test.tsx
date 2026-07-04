@@ -87,8 +87,8 @@ function memoryCache(): CacheAdapter {
   const data = new Map<string, unknown>();
   const subs = new Map<string, Set<() => void>>();
   return {
-    getQueryData: (key) => data.get(key) as never,
-    setQueryData: (key, value) => {
+    get: (key) => data.get(key) as never,
+    set: (key, value) => {
       data.set(key, value);
       for (const cb of subs.get(key) ?? []) cb();
     },

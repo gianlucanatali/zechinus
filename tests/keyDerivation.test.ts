@@ -133,7 +133,7 @@ test("createKeyHandle: encryptJson/decryptJson roundtrip, AAD-bound", async () =
   );
 });
 
-test("createKeyHandle: encryptField/decryptField and encryptNumber/decryptNumber roundtrip", async () => {
+test("createKeyHandle: encryptField/decryptField roundtrip", async () => {
   const key = bytesFromRange(32, (i) => i);
   const handle = createKeyHandle(
     key,
@@ -144,9 +144,6 @@ test("createKeyHandle: encryptField/decryptField and encryptNumber/decryptNumber
 
   const encF = await handle.encryptField("plain text value", aad);
   assert.equal(await handle.decryptField(encF, aad), "plain text value");
-
-  const encN = await handle.encryptNumber(123.456, aad);
-  assert.equal(await handle.decryptNumber(encN, aad), 123.456);
 });
 
 test("createKeyHandle: wrapWithKek produces a wrapped key unwrappable by wrapKey/unwrapKey", async () => {

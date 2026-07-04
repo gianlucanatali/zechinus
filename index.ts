@@ -93,8 +93,6 @@ export {
 export {
   encryptField,
   decryptField,
-  encryptNumber,
-  decryptNumber,
   encryptJson,
   decryptJson,
 } from "./core/crypto.ts";

@@ -171,8 +171,8 @@ export interface KeyProvider {
  * whatever its backing cache needs.
  */
 export interface CacheAdapter {
-  getQueryData<T>(key: string): T | undefined;
-  setQueryData<T>(key: string, data: T): void;
+  get<T>(key: string): T | undefined;
+  set<T>(key: string, data: T): void;
   subscribe(key: string, callback: () => void): () => void;
   /** Wipes everything this adapter holds — called automatically on lock (dek → null). */
   clear(): void;

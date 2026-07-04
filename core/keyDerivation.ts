@@ -16,8 +16,6 @@ import {
   decryptField,
   encryptJson,
   decryptJson,
-  encryptNumber,
-  decryptNumber,
 } from "./crypto.ts";
 import type { CryptoHandle, FieldAAD, EncryptedField } from "./types.ts";
 
@@ -90,8 +88,6 @@ export function unwrapKey(kek: Uint8Array, wrapped: WrappedKey): Uint8Array {
 export interface KeyHandle extends CryptoHandle {
   encryptField(plaintext: string, aad: FieldAAD): Promise<EncryptedField>;
   decryptField(enc: EncryptedField, aad: FieldAAD): Promise<string>;
-  encryptNumber(value: number, aad: FieldAAD): Promise<EncryptedField>;
-  decryptNumber(enc: EncryptedField, aad: FieldAAD): Promise<number>;
   /** Wraps this handle's key with a KEK, without ever exposing the raw bytes. */
   wrapWithKek(kek: Uint8Array): Promise<WrappedKey>;
   /** Zeroes the internal key bytes — call on lock/logout. */
@@ -116,8 +112,6 @@ export function createKeyHandle(
     encryptJson: <T>(value: T, aad: FieldAAD) => encryptJson(key, value, aad),
     decryptJson: <T>(enc: EncryptedField, aad: FieldAAD) =>
       decryptJson<T>(key, enc, aad),
-    encryptNumber: (value, aad) => encryptNumber(key, value, aad),
-    decryptNumber: (enc, aad) => decryptNumber(key, enc, aad),
     wrapWithKek: (kek) => Promise.resolve(wrapKey(kek, key)),
     destroy() {
       clean(key);

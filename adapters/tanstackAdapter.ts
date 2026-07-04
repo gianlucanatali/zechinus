@@ -10,16 +10,16 @@ import type { CacheAdapter } from "../core/types.ts";
 
 export function tanstackAdapter(queryClient: QueryClient): CacheAdapter {
   return {
-    getQueryData<T>(key: string): T | undefined {
+    get<T>(key: string): T | undefined {
       return queryClient.getQueryData<T>([key]);
     },
-    setQueryData<T>(key: string, data: T): void {
+    set<T>(key: string, data: T): void {
       queryClient.setQueryData<T>([key], data);
     },
     subscribe(key: string, callback: () => void): () => void {
       return queryClient.getQueryCache().subscribe((event) => {
         // A brand-new key fires both 'added' (query created) and 'updated' (data set)
-        // for the same setQueryData() call — filter to 'updated' so the callback fires
+        // for the same set() call — filter to 'updated' so the callback fires
         // once per logical write, not twice on first write.
         if (event.type !== "updated") return;
         const queryKey = event.query.queryKey;

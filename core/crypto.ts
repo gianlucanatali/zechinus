@@ -86,31 +86,6 @@ export async function decryptField(
   return DECODER.decode(raw);
 }
 
-/** Encrypts a numeric value (amount, quantity). Serialized as a decimal string, preserving precision. */
-export async function encryptNumber(
-  dek: Uint8Array,
-  value: number,
-  aad: FieldAAD,
-): Promise<EncryptedField> {
-  return encryptField(dek, String(value), aad);
-}
-
-/** Decrypts a numeric field. */
-export async function decryptNumber(
-  dek: Uint8Array,
-  enc: EncryptedField,
-  aad: FieldAAD,
-): Promise<number> {
-  const str = await decryptField(dek, enc, aad);
-  const n = Number(str);
-  if (!Number.isFinite(n)) {
-    throw new Error(
-      `core/crypto.decryptNumber: decrypted value is not numeric: ${str}`,
-    );
-  }
-  return n;
-}
-
 /** Encrypts an arbitrary JSON value. Always gzips — JSON is always compressible. */
 export async function encryptJson<T>(
   dek: Uint8Array,

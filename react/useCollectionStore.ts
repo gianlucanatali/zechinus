@@ -52,7 +52,7 @@ export function useCollectionStore<T>(
     [cache, cacheKey],
   );
   const cached = useSyncExternalStore(subscribeToKey, () =>
-    cache.getQueryData<Items>(cacheKey),
+    cache.get<Items>(cacheKey),
   );
 
   const [error, setError] = useState<Error | null>(null);
@@ -60,12 +60,12 @@ export function useCollectionStore<T>(
   useEffect(() => {
     setError(null);
     if (!dek || !userId) return;
-    if (cache.getQueryData<Items>(cacheKey) !== undefined) return;
+    if (cache.get<Items>(cacheKey) !== undefined) return;
     let cancelled = false;
     store
       .list(userId, dek)
       .then((items) => {
-        if (!cancelled) cache.setQueryData(cacheKey, items);
+        if (!cancelled) cache.set(cacheKey, items);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e : new Error(String(e)));
@@ -90,13 +90,13 @@ export function useCollectionStore<T>(
   const create = useCallback(
     async (data: T): Promise<string> => {
       const { dek, userId } = requireUnlocked("create");
-      const previous = cache.getQueryData<Items>(cacheKey) ?? [];
+      const previous = cache.get<Items>(cacheKey) ?? [];
       try {
         const id = await store.create(userId, dek, data);
-        cache.setQueryData(cacheKey, [...previous, { id, data, hash: null }]);
+        cache.set(cacheKey, [...previous, { id, data, hash: null }]);
         return id;
       } catch (e) {
-        cache.setQueryData(cacheKey, previous);
+        cache.set(cacheKey, previous);
         throw e;
       }
     },
@@ -106,9 +106,9 @@ export function useCollectionStore<T>(
   const update = useCallback(
     async (id: string, data: T): Promise<void> => {
       const { dek, userId } = requireUnlocked("update");
-      const previous = cache.getQueryData<Items>(cacheKey) ?? [];
+      const previous = cache.get<Items>(cacheKey) ?? [];
       const currentHash = previous.find((item) => item.id === id)?.hash ?? null;
-      cache.setQueryData(
+      cache.set(
         cacheKey,
         previous.map((item) =>
           item.id === id ? { id, data, hash: currentHash } : item,
@@ -124,7 +124,7 @@ export function useCollectionStore<T>(
             currentHash,
           );
           if (!result.ok) throw new OptimisticLockConflictError(store.name);
-          cache.setQueryData(
+          cache.set(
             cacheKey,
             previous.map((item) =>
               item.id === id ? { id, data, hash: result.hash } : item,
@@ -132,7 +132,7 @@ export function useCollectionStore<T>(
           );
         } else {
           await store.update(userId, dek, id, data);
-          cache.setQueryData(
+          cache.set(
             cacheKey,
             previous.map((item) =>
               item.id === id ? { id, data, hash: null } : item,
@@ -140,7 +140,7 @@ export function useCollectionStore<T>(
           );
         }
       } catch (e) {
-        cache.setQueryData(cacheKey, previous);
+        cache.set(cacheKey, previous);
         throw e;
       }
     },
@@ -150,15 +150,15 @@ export function useCollectionStore<T>(
   const remove = useCallback(
     async (id: string): Promise<void> => {
       const { dek, userId } = requireUnlocked("remove");
-      const previous = cache.getQueryData<Items>(cacheKey) ?? [];
-      cache.setQueryData(
+      const previous = cache.get<Items>(cacheKey) ?? [];
+      cache.set(
         cacheKey,
         previous.filter((item) => item.id !== id),
       );
       try {
         await store.remove(userId, dek, id);
       } catch (e) {
-        cache.setQueryData(cacheKey, previous);
+        cache.set(cacheKey, previous);
         throw e;
       }
     },
