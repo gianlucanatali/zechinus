@@ -43,6 +43,8 @@ export {
 
 export { fingerprintSchema } from "./core/schemaFingerprint.ts";
 
+export { canonicalAAD } from "./core/rowStore.ts";
+
 export {
   migrateLegacyAAD,
   type LegacyMigrationResult,

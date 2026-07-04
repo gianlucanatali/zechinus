@@ -18,6 +18,23 @@ export interface RowReadIO {
   put(record: BlobRecord): Promise<void>;
 }
 
+/**
+ * The one AAD shape every store cardinality converges on: `field` is always
+ * "data" (the canonical, non-legacy field name), `rowId` addresses the row
+ * (the user's own pid for `perUser`, the key for `perKey`, the row id for
+ * `many`). Exported so app tests that need to write a row directly with
+ * `encodeBlob` (bypassing a store's own schema validation — e.g. to simulate
+ * data from before a field existed) don't have to reconstruct this shape by
+ * hand.
+ */
+export function canonicalAAD(
+  dek: CryptoHandle,
+  table: string,
+  rowId: string = dek.pid,
+): FieldAAD {
+  return { userId: dek.pid, table, field: "data", rowId };
+}
+
 export interface LoadRowOpts<T> {
   storeName: string;
   /** Prefixes the lazy-upgrade failure log — "" for perUser, "perKey " for perKey. */

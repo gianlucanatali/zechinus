@@ -12,7 +12,7 @@
  */
 
 import { type BlobMigrator } from "./versioning.ts";
-import { loadRow, saveRow, saveRowIfMatch } from "./rowStore.ts";
+import { loadRow, saveRow, saveRowIfMatch, canonicalAAD } from "./rowStore.ts";
 import { getSecureStoreConfig } from "./config.ts";
 import type { CryptoHandle, FieldAAD } from "./types.ts";
 
@@ -71,10 +71,6 @@ export interface BlobStoreDef<T> {
    * "Optimistic locking" section for the multi-tab conflict this prevents.
    */
   optimisticLock?: boolean;
-}
-
-function canonicalAAD(dek: CryptoHandle, name: string): FieldAAD {
-  return { userId: dek.pid, table: name, field: "data", rowId: dek.pid };
 }
 
 export function defineBlobStore<T>(def: BlobStoreDef<T>): BlobStore<T> {

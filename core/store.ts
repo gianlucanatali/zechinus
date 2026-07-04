@@ -25,7 +25,7 @@
 
 import { z } from "zod";
 import { defineBlobStore } from "./blobStore.ts";
-import { loadRow, saveRow, saveRowIfMatch } from "./rowStore.ts";
+import { loadRow, saveRow, saveRowIfMatch, canonicalAAD } from "./rowStore.ts";
 import { encodeBlob } from "./blobCodec.ts";
 import { decodeWithLegacyFallback } from "./legacyFallback.ts";
 import { getSecureStoreConfig } from "./config.ts";
@@ -318,12 +318,8 @@ export function defineStore<
   if (typeof identity === "object" && "perKey" in identity) {
     const empty = resolveEmpty(def);
     const keyColumn = identity.perKey;
-    const canonicalAADFor = (dek: CryptoHandle, key: string): FieldAAD => ({
-      userId: dek.pid,
-      table: def.name,
-      field: "data",
-      rowId: key,
-    });
+    const canonicalAADFor = (dek: CryptoHandle, key: string): FieldAAD =>
+      canonicalAAD(dek, def.name, key);
 
     const keyedSave = async (
       userId: string,
@@ -473,12 +469,8 @@ export function defineStore<
   // plaintextKeys = [] → degenerates into the previous behavior (everything in the
   // blob, no extra columns).
   if (identity === "many") {
-    const canonicalAADFor = (dek: CryptoHandle, id: string): FieldAAD => ({
-      userId: dek.pid,
-      table: def.name,
-      field: "data",
-      rowId: id,
-    });
+    const canonicalAADFor = (dek: CryptoHandle, id: string): FieldAAD =>
+      canonicalAAD(dek, def.name, id);
     // Fallback for a row with a missing/corrupt blob: {} (never a genuinely valid
     // record, but `many` has no domain-level "empty value" — validateRead will
     // reject it with an explicit Zod error instead of failing the store's
