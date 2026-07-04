@@ -89,6 +89,15 @@ sortable keys (needs `listByKeyRange` on the adapter). For the recurring "dictio
 labels" shape on top of `perKey`, use `defineLabelDict` instead of hand-rolling
 load-mutate-save — see README.
 
+`identity: "many"`'s row id generator is pluggable (`idGenerator?: () => string` on
+`StoreDef`, defaults to UUIDv4) — see README's Cardinality section.
+
+Each cardinality is its own standalone builder (`buildKeyedStore`/`buildCollectionStore`/
+`buildPerUserStore` in `core/store.ts`), taking a shared `BuildContext` (def, migrators,
+validateRead/Write) rather than closing over `defineStore`'s whole body. Adding a 4th
+cardinality means writing one more `buildXyzStore` function + one dispatch branch in
+`defineStore` — never growing the existing branches.
+
 ## Porting an existing table (legacy AAD)
 
 For porting an existing table only — omit entirely for a brand-new store. If a table

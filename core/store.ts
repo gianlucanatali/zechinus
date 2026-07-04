@@ -95,6 +95,14 @@ export interface StoreDef<S extends z.ZodType> {
    * "Optimistic locking" section for the multi-tab conflict this prevents.
    */
   optimisticLock?: boolean;
+  /**
+   * Only relevant for `identity: "many"`. Overrides the default row id generator
+   * (`core/randomId.ts`, RFC4122 UUIDv4). A consumer wanting sortable ids (ULID,
+   * a timestamp-prefixed scheme, ...) supplies its own `() => string` — DataCloak
+   * only needs the result to be unique per (userId, collection), it never inspects
+   * the id's shape.
+   */
+  idGenerator?: () => string;
 }
 
 /** `perUser`-cardinality store: one blob per user. */
@@ -314,193 +322,304 @@ export function defineStore<
     return parsed.data as T;
   };
 
-  // ── perKey: one blob per (user, key); AAD.rowId = key ────────────────────────────
+  // Dispatch to the cardinality-specific builder. Each one is a standalone
+  // function taking exactly the shared context it needs (never the whole
+  // `defineStore` closure) — adding a 4th cardinality means writing one more
+  // `buildXyzStore` function + one more branch here, not editing inside an
+  // ever-growing function body.
+  const ctx: BuildContext<S> = { def, migrators, validateRead, validateWrite };
   if (typeof identity === "object" && "perKey" in identity) {
-    const empty = resolveEmpty(def);
-    const keyColumn = identity.perKey;
-    const canonicalAADFor = (dek: CryptoHandle, key: string): FieldAAD =>
-      canonicalAAD(dek, def.name, key);
+    return buildKeyedStore(ctx, identity.perKey) as StoreApi<S, Id>;
+  }
+  if (identity === "many") {
+    return buildCollectionStore(ctx, encryptedKeys, plaintextKeys) as StoreApi<
+      S,
+      Id
+    >;
+  }
+  return buildPerUserStore(ctx) as StoreApi<S, Id>;
+}
 
-    const keyedSave = async (
-      userId: string,
-      dek: CryptoHandle,
-      key: string,
-      data: T,
-    ): Promise<void> => {
-      const valid = validateWrite(data, `save(key=${key})`);
-      const { storage } = getSecureStoreConfig();
-      await saveRow(
-        dek,
-        (record) =>
+/** Shared context every cardinality-specific builder needs — computed once in `defineStore`. */
+interface BuildContext<S extends z.ZodType> {
+  def: StoreDef<S>;
+  migrators: BlobMigrator[];
+  validateRead: (raw: unknown, where: string) => z.infer<S>;
+  validateWrite: (data: z.infer<S>, where: string) => z.infer<S>;
+}
+
+// ── perKey: one blob per (user, key); AAD.rowId = key ──────────────────────────
+function buildKeyedStore<S extends z.ZodType>(
+  { def, migrators, validateRead, validateWrite }: BuildContext<S>,
+  keyColumn: string,
+): KeyedStore<z.infer<S>> {
+  type T = z.infer<S>;
+  const empty = resolveEmpty(def);
+  const canonicalAADFor = (dek: CryptoHandle, key: string): FieldAAD =>
+    canonicalAAD(dek, def.name, key);
+
+  const keyedSave = async (
+    userId: string,
+    dek: CryptoHandle,
+    key: string,
+    data: T,
+  ): Promise<void> => {
+    const valid = validateWrite(data, `save(key=${key})`);
+    const { storage } = getSecureStoreConfig();
+    await saveRow(
+      dek,
+      (record) =>
+        storage.put(
+          def.name,
+          userId,
+          [{ column: keyColumn, value: key }],
+          record,
+        ),
+      canonicalAADFor(dek, key),
+      valid,
+      def.version,
+      def.contentHash,
+    );
+  };
+
+  const keyedLoadInternal = async (
+    userId: string,
+    dek: CryptoHandle,
+    key: string,
+  ): Promise<{ data: T; hash: string | null }> => {
+    const { storage } = getSecureStoreConfig();
+    const { data, hash } = await loadRow(
+      dek,
+      {
+        get: () =>
+          storage.get(def.name, userId, [{ column: keyColumn, value: key }]),
+        put: (record) =>
           storage.put(
             def.name,
             userId,
             [{ column: keyColumn, value: key }],
             record,
           ),
-        canonicalAADFor(dek, key),
-        valid,
-        def.version,
-        def.contentHash,
-      );
-    };
+      },
+      canonicalAADFor(dek, key),
+      {
+        storeName: def.name,
+        rowLabel: "perKey ",
+        version: def.version,
+        migrators,
+        empty,
+        legacyAAD: def.legacyAAD?.(dek, key),
+      },
+      (upgradedData) => keyedSave(userId, dek, key, upgradedData),
+    );
+    return { data: validateRead(data, `load(key=${key})`), hash };
+  };
 
-    const keyedLoadInternal = async (
-      userId: string,
-      dek: CryptoHandle,
-      key: string,
-    ): Promise<{ data: T; hash: string | null }> => {
+  const keyed: KeyedStore<T> = {
+    name: def.name,
+    version: def.version,
+    async load(userId, dek, key) {
+      return (await keyedLoadInternal(userId, dek, key)).data;
+    },
+    save: keyedSave,
+    async list(userId, dek, range) {
       const { storage } = getSecureStoreConfig();
-      const { data, hash } = await loadRow(
-        dek,
-        {
-          get: () =>
-            storage.get(def.name, userId, [{ column: keyColumn, value: key }]),
-          put: (record) =>
+      if (!storage.listByKeyRange) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support perKey range queries (listByKeyRange missing).`,
+        );
+      }
+      const rows = await storage.listByKeyRange(
+        def.name,
+        userId,
+        keyColumn,
+        range.from,
+        range.to,
+      );
+      const results: Array<{ key: string; data: T }> = [];
+      for (const { key, record } of rows) {
+        const { data, upgraded } = await decodeWithLegacyFallback<T>({
+          dek,
+          record,
+          canonicalAAD: canonicalAADFor(dek, key),
+          legacyAAD: def.legacyAAD?.(dek, key),
+          version: def.version,
+          migrators,
+          empty,
+          persistMigrated: (migratedRecord) =>
             storage.put(
               def.name,
               userId,
               [{ column: keyColumn, value: key }],
-              record,
+              migratedRecord,
             ),
-        },
-        canonicalAADFor(dek, key),
-        {
-          storeName: def.name,
-          rowLabel: "perKey ",
-          version: def.version,
-          migrators,
-          empty,
-          legacyAAD: def.legacyAAD?.(dek, key),
-        },
-        (upgradedData) => keyedSave(userId, dek, key, upgradedData),
-      );
-      return { data: validateRead(data, `load(key=${key})`), hash };
-    };
-
-    const keyed: KeyedStore<T> = {
-      name: def.name,
-      version: def.version,
-      async load(userId, dek, key) {
-        return (await keyedLoadInternal(userId, dek, key)).data;
-      },
-      save: keyedSave,
-      async list(userId, dek, range) {
-        const { storage } = getSecureStoreConfig();
-        if (!storage.listByKeyRange) {
-          throw new Error(
-            `defineStore(${def.name}): the configured adapter doesn't support perKey range queries (listByKeyRange missing).`,
+        });
+        if (upgraded) {
+          keyedSave(userId, dek, key, data).catch((e) =>
+            console.error(
+              `secure-store(${def.name}): perKey lazy upgrade failed:`,
+              e,
+            ),
           );
         }
-        const rows = await storage.listByKeyRange(
-          def.name,
-          userId,
-          keyColumn,
-          range.from,
-          range.to,
-        );
-        const results: Array<{ key: string; data: T }> = [];
-        for (const { key, record } of rows) {
-          const { data, upgraded } = await decodeWithLegacyFallback<T>({
-            dek,
-            record,
-            canonicalAAD: canonicalAADFor(dek, key),
-            legacyAAD: def.legacyAAD?.(dek, key),
-            version: def.version,
-            migrators,
-            empty,
-            persistMigrated: (migratedRecord) =>
-              storage.put(
+        results.push({ key, data: validateRead(data, `list(key=${key})`) });
+      }
+      return results;
+    },
+  };
+
+  if (def.contentHash) {
+    keyed.loadWithHash = keyedLoadInternal;
+  }
+
+  if (def.optimisticLock) {
+    keyed.saveIfMatch = async (userId, dek, key, data, expectedHash) => {
+      const { storage } = getSecureStoreConfig();
+      const valid = validateWrite(data, `saveIfMatch(key=${key})`);
+      return saveRowIfMatch(
+        dek,
+        storage.putIfMatch
+          ? (record, hash) =>
+              storage.putIfMatch!(
                 def.name,
                 userId,
                 [{ column: keyColumn, value: key }],
-                migratedRecord,
-              ),
-          });
-          if (upgraded) {
-            keyedSave(userId, dek, key, data).catch((e) =>
-              console.error(
-                `secure-store(${def.name}): perKey lazy upgrade failed:`,
-                e,
-              ),
-            );
-          }
-          results.push({ key, data: validateRead(data, `list(key=${key})`) });
-        }
-        return results;
-      },
+                record,
+                hash,
+              )
+          : undefined,
+        canonicalAADFor(dek, key),
+        valid,
+        def.version,
+        expectedHash,
+        `defineStore(${def.name}): the configured adapter doesn't support optimistic locking (putIfMatch missing).`,
+      );
     };
-
-    if (def.contentHash) {
-      keyed.loadWithHash = keyedLoadInternal;
-    }
-
-    if (def.optimisticLock) {
-      keyed.saveIfMatch = async (userId, dek, key, data, expectedHash) => {
-        const { storage } = getSecureStoreConfig();
-        const valid = validateWrite(data, `saveIfMatch(key=${key})`);
-        return saveRowIfMatch(
-          dek,
-          storage.putIfMatch
-            ? (record, hash) =>
-                storage.putIfMatch!(
-                  def.name,
-                  userId,
-                  [{ column: keyColumn, value: key }],
-                  record,
-                  hash,
-                )
-            : undefined,
-          canonicalAADFor(dek, key),
-          valid,
-          def.version,
-          expectedHash,
-          `defineStore(${def.name}): the configured adapter doesn't support optimistic locking (putIfMatch missing).`,
-        );
-      };
-    }
-
-    return keyed as StoreApi<S, Id>;
   }
 
-  // ── many: collection, framework-generated id; AAD.rowId = id ────────────────────
-  // Blob = only the encrypted fields (encryptedKeys); plaintextKeys become real
-  // columns, handled by the adapter alongside the blob. With pure encrypt:"all",
-  // plaintextKeys = [] → degenerates into the previous behavior (everything in the
-  // blob, no extra columns).
-  if (identity === "many") {
-    const canonicalAADFor = (dek: CryptoHandle, id: string): FieldAAD =>
-      canonicalAAD(dek, def.name, id);
-    // Fallback for a row with a missing/corrupt blob: {} (never a genuinely valid
-    // record, but `many` has no domain-level "empty value" — validateRead will
-    // reject it with an explicit Zod error instead of failing the store's
-    // definition for a default we'd never actually use, e.g. a required portfolioId).
-    const emptyEncPart: Record<string, unknown> = {};
-    const splitWrite = (data: T) => {
-      const rec = data as Record<string, unknown>;
-      return {
-        plain: pick(rec, plaintextKeys),
-        encPart: pick(rec, encryptedKeys),
-      };
-    };
-    const mergeRead = (
-      plain: Record<string, unknown>,
-      encPart: Record<string, unknown>,
-    ): T => ({ ...encPart, ...plain }) as T;
+  return keyed;
+}
 
-    const manyUpdate = async (
-      userId: string,
-      dek: CryptoHandle,
-      id: string,
-      data: T,
-    ): Promise<void> => {
-      const valid = validateWrite(data, `update(id=${id})`);
+// ── many: collection, framework-generated id; AAD.rowId = id ──────────────────
+// Blob = only the encrypted fields (encryptedKeys); plaintextKeys become real
+// columns, handled by the adapter alongside the blob. With pure encrypt:"all",
+// plaintextKeys = [] → degenerates into the previous behavior (everything in the
+// blob, no extra columns).
+function buildCollectionStore<S extends z.ZodType>(
+  { def, migrators, validateRead, validateWrite }: BuildContext<S>,
+  encryptedKeys: string[],
+  plaintextKeys: string[],
+): CollectionStore<z.infer<S>> {
+  type T = z.infer<S>;
+  const generateId = def.idGenerator ?? randomId;
+  const canonicalAADFor = (dek: CryptoHandle, id: string): FieldAAD =>
+    canonicalAAD(dek, def.name, id);
+  // Fallback for a row with a missing/corrupt blob: {} (never a genuinely valid
+  // record, but `many` has no domain-level "empty value" — validateRead will
+  // reject it with an explicit Zod error instead of failing the store's
+  // definition for a default we'd never actually use, e.g. a required portfolioId).
+  const emptyEncPart: Record<string, unknown> = {};
+  const splitWrite = (data: T) => {
+    const rec = data as Record<string, unknown>;
+    return {
+      plain: pick(rec, plaintextKeys),
+      encPart: pick(rec, encryptedKeys),
+    };
+  };
+  const mergeRead = (
+    plain: Record<string, unknown>,
+    encPart: Record<string, unknown>,
+  ): T => ({ ...encPart, ...plain }) as T;
+
+  const manyUpdate = async (
+    userId: string,
+    dek: CryptoHandle,
+    id: string,
+    data: T,
+  ): Promise<void> => {
+    const valid = validateWrite(data, `update(id=${id})`);
+    const { storage } = getSecureStoreConfig();
+    if (!storage.updateById) {
+      throw new Error(
+        `defineStore(${def.name}): the configured adapter doesn't support 'many' (updateById missing).`,
+      );
+    }
+    const { plain, encPart } = splitWrite(valid);
+    const record = await encodeBlob(
+      dek,
+      canonicalAADFor(dek, id),
+      encPart,
+      def.version,
+      def.contentHash,
+    );
+    await storage.updateById(def.name, userId, id, record, plain);
+  };
+
+  const collection: CollectionStore<T> = {
+    name: def.name,
+    version: def.version,
+    async list(userId, dek) {
       const { storage } = getSecureStoreConfig();
-      if (!storage.updateById) {
+      if (!storage.list) {
         throw new Error(
-          `defineStore(${def.name}): the configured adapter doesn't support 'many' (updateById missing).`,
+          `defineStore(${def.name}): the configured adapter doesn't support 'many' (list missing).`,
         );
       }
+      const rows = await storage.list(def.name, userId, plaintextKeys);
+      const results: Array<{ id: string; data: T; hash: string | null }> = [];
+      for (const { id, record, plain } of rows) {
+        const { data: encPart, upgraded } = await decodeWithLegacyFallback<
+          Record<string, unknown>
+        >({
+          dek,
+          record,
+          canonicalAAD: canonicalAADFor(dek, id),
+          legacyAAD: def.legacyAAD?.(dek, id),
+          version: def.version,
+          migrators,
+          empty: emptyEncPart,
+          persistMigrated: (migratedRecord) => {
+            if (!storage.updateById) {
+              throw new Error(
+                `defineStore(${def.name}): legacyAAD migration for id=${id} succeeded, but the ` +
+                  `configured adapter doesn't support 'many' (updateById missing) — can't persist it.`,
+              );
+            }
+            return storage.updateById(
+              def.name,
+              userId,
+              id,
+              migratedRecord,
+              plain,
+            );
+          },
+        });
+        const merged = mergeRead(plain, encPart);
+        if (upgraded) {
+          manyUpdate(userId, dek, id, merged as T).catch((e) =>
+            console.error(
+              `secure-store(${def.name}): many lazy upgrade failed:`,
+              e,
+            ),
+          );
+        }
+        results.push({
+          id,
+          data: validateRead(merged, `list(id=${id})`),
+          hash: record?.contentHash ?? null,
+        });
+      }
+      return results;
+    },
+    async create(userId, dek, data) {
+      const valid = validateWrite(data, "create");
+      const { storage } = getSecureStoreConfig();
+      if (!storage.insert) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support 'many' (insert missing).`,
+        );
+      }
+      const id = generateId();
       const { plain, encPart } = splitWrite(valid);
       const record = await encodeBlob(
         dek,
@@ -509,136 +628,60 @@ export function defineStore<
         def.version,
         def.contentHash,
       );
-      await storage.updateById(def.name, userId, id, record, plain);
-    };
-
-    const collection: CollectionStore<T> = {
-      name: def.name,
-      version: def.version,
-      async list(userId, dek) {
-        const { storage } = getSecureStoreConfig();
-        if (!storage.list) {
-          throw new Error(
-            `defineStore(${def.name}): the configured adapter doesn't support 'many' (list missing).`,
-          );
-        }
-        const rows = await storage.list(def.name, userId, plaintextKeys);
-        const results: Array<{ id: string; data: T; hash: string | null }> = [];
-        for (const { id, record, plain } of rows) {
-          const { data: encPart, upgraded } = await decodeWithLegacyFallback<
-            Record<string, unknown>
-          >({
-            dek,
-            record,
-            canonicalAAD: canonicalAADFor(dek, id),
-            legacyAAD: def.legacyAAD?.(dek, id),
-            version: def.version,
-            migrators,
-            empty: emptyEncPart,
-            persistMigrated: (migratedRecord) => {
-              if (!storage.updateById) {
-                throw new Error(
-                  `defineStore(${def.name}): legacyAAD migration for id=${id} succeeded, but the ` +
-                    `configured adapter doesn't support 'many' (updateById missing) — can't persist it.`,
-                );
-              }
-              return storage.updateById(
-                def.name,
-                userId,
-                id,
-                migratedRecord,
-                plain,
-              );
-            },
-          });
-          const merged = mergeRead(plain, encPart);
-          if (upgraded) {
-            manyUpdate(userId, dek, id, merged as T).catch((e) =>
-              console.error(
-                `secure-store(${def.name}): many lazy upgrade failed:`,
-                e,
-              ),
-            );
-          }
-          results.push({
-            id,
-            data: validateRead(merged, `list(id=${id})`),
-            hash: record?.contentHash ?? null,
-          });
-        }
-        return results;
-      },
-      async create(userId, dek, data) {
-        const valid = validateWrite(data, "create");
-        const { storage } = getSecureStoreConfig();
-        if (!storage.insert) {
-          throw new Error(
-            `defineStore(${def.name}): the configured adapter doesn't support 'many' (insert missing).`,
-          );
-        }
-        const id = randomId();
-        const { plain, encPart } = splitWrite(valid);
-        const record = await encodeBlob(
-          dek,
-          canonicalAADFor(dek, id),
-          encPart,
-          def.version,
-          def.contentHash,
+      await storage.insert(def.name, userId, id, record, plain);
+      return id;
+    },
+    update: manyUpdate,
+    async remove(userId, dek, id) {
+      const { storage } = getSecureStoreConfig();
+      if (!storage.deleteById) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support 'many' (deleteById missing).`,
         );
-        await storage.insert(def.name, userId, id, record, plain);
-        return id;
-      },
-      update: manyUpdate,
-      async remove(userId, dek, id) {
-        const { storage } = getSecureStoreConfig();
-        if (!storage.deleteById) {
-          throw new Error(
-            `defineStore(${def.name}): the configured adapter doesn't support 'many' (deleteById missing).`,
-          );
-        }
-        await storage.deleteById(def.name, userId, id);
-      },
-    };
+      }
+      await storage.deleteById(def.name, userId, id);
+    },
+  };
 
-    if (def.optimisticLock) {
-      collection.updateIfMatch = async (
-        userId,
+  if (def.optimisticLock) {
+    collection.updateIfMatch = async (userId, dek, id, data, expectedHash) => {
+      const { storage } = getSecureStoreConfig();
+      if (!storage.updateByIdIfMatch) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support optimistic locking (updateByIdIfMatch missing).`,
+        );
+      }
+      const valid = validateWrite(data, `updateIfMatch(id=${id})`);
+      const { plain, encPart } = splitWrite(valid);
+      const record = await encodeBlob(
         dek,
+        canonicalAADFor(dek, id),
+        encPart,
+        def.version,
+        true,
+      );
+      const ok = await storage.updateByIdIfMatch(
+        def.name,
+        userId,
         id,
-        data,
+        record,
+        plain,
         expectedHash,
-      ) => {
-        const { storage } = getSecureStoreConfig();
-        if (!storage.updateByIdIfMatch) {
-          throw new Error(
-            `defineStore(${def.name}): the configured adapter doesn't support optimistic locking (updateByIdIfMatch missing).`,
-          );
-        }
-        const valid = validateWrite(data, `updateIfMatch(id=${id})`);
-        const { plain, encPart } = splitWrite(valid);
-        const record = await encodeBlob(
-          dek,
-          canonicalAADFor(dek, id),
-          encPart,
-          def.version,
-          true,
-        );
-        const ok = await storage.updateByIdIfMatch(
-          def.name,
-          userId,
-          id,
-          record,
-          plain,
-          expectedHash,
-        );
-        return { ok, hash: ok ? (record.contentHash ?? null) : null };
-      };
-    }
-
-    return collection as StoreApi<S, Id>;
+      );
+      return { ok, hash: ok ? (record.contentHash ?? null) : null };
+    };
   }
 
-  // ── perUser: one blob per user (the last remaining cardinality) ─────────────────
+  return collection;
+}
+
+// ── perUser: one blob per user ──────────────────────────────────────────────────
+function buildPerUserStore<S extends z.ZodType>({
+  def,
+  validateRead,
+  validateWrite,
+}: BuildContext<S>): Store<z.infer<S>> {
+  type T = z.infer<S>;
   const empty = resolveEmpty(def);
   const inner = defineBlobStore<T>({
     name: def.name,
@@ -680,7 +723,7 @@ export function defineStore<
     };
   }
 
-  return store as StoreApi<S, Id>;
+  return store;
 }
 
 /** Explicit `empty`, or derived from the schema's defaults (`.default()`). */

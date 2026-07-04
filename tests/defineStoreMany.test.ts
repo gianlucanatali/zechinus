@@ -174,3 +174,25 @@ test("defineStore many: Zod validation on create rejects non-conforming data", a
   );
   assert.equal(adapter.rows.size, 0);
 });
+
+test("defineStore many: idGenerator overrides the default UUIDv4 for row ids", async () => {
+  const adapter = collectionMemoryAdapter();
+  configureSecureStore({ storage: adapter });
+  const dek = createDekHandle(randomBytes(32));
+
+  let counter = 0;
+  const store = defineStore({
+    name: "rebalance_simulations",
+    identity: "many",
+    encrypt: "all",
+    schema: Sim,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Sim, "all"),
+    idGenerator: () => `sim-${++counter}`,
+  });
+
+  const id1 = await store.create("u1", dek, { name: "a", addedLiquidity: 0 });
+  const id2 = await store.create("u1", dek, { name: "b", addedLiquidity: 0 });
+  assert.equal(id1, "sim-1");
+  assert.equal(id2, "sim-2");
+});

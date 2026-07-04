@@ -102,6 +102,11 @@ Full runnable examples (in-memory adapter, no Supabase required):
 Cardinality determines the PK, the AAD (`rowId`), upsert-vs-insert — the author never
 implements this by hand.
 
+**`many`'s row id is pluggable:** `identity: "many"` defaults to an RFC4122 UUIDv4
+(`core/randomId.ts`), but `defineStore({ ..., idGenerator: () => yourId() })` overrides
+it — useful for sortable ids (ULID, a timestamp-prefixed scheme). DataCloak only needs
+the result unique per `(userId, collection)`; it never inspects the id's shape.
+
 **`perKey` range queries:** `keyedStore.list(userId, dek, { from, to })` returns all
 entries whose key falls in `[from, to]` (lexicographic — works for sortable keys like
 `year_month`), decrypted, AAD still enforced per row. Needs `listByKeyRange` on the
