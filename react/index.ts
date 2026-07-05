@@ -3,6 +3,7 @@
  * core (`datacloak`) never pulls React into a non-React consumer's module graph.
  */
 export { useStore, type UseStoreResult } from "./useStore.ts";
+export { useIsUnlocked } from "./useIsUnlocked.ts";
 export { useKeyedStore, type UseKeyedStoreResult } from "./useKeyedStore.ts";
 export {
   useCollectionStore,

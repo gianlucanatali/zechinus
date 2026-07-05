@@ -324,6 +324,9 @@ tests, component tests, build) — not just this package's own test suite.
   ports are plain get/subscribe objects, deliberately not hook-shaped
   (`useSyncExternalStore` reads them inside the hook, not inside the port itself) — don't
   design a new port as `useXyz()`.
+- `useIsUnlocked()` (`react/useIsUnlocked.ts`) is the boolean-only counterpart — needs
+  just `keys`, never `cache`, and never hands the caller a `CryptoHandle`. Use it instead
+  of `useStore`/`usePasskeyDek` whenever a component only needs a lock/unlock gate.
 - `KeyProvider` has two known concrete implementations: the host app's browser one
   (bridging `PasskeyContext`/`UserContext` — see README's React binding section for the
   pointer), and `alsKeyProvider` (`datacloak/node`, `AsyncLocalStorage`-backed, for Node

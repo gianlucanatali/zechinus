@@ -553,6 +553,11 @@ lives in `datacloak/tests/useStore.test.tsx`, `useKeyedStore.test.tsx`,
 `useCollectionStore.test.tsx` — read them before writing a `KeyProvider` for a new
 consumer.
 
+**If a component only needs a boolean lock/unlock gate — never the data or the
+`save()` — use `useIsUnlocked()` instead of one of the three hooks above.** It only
+needs `keys` (no `cache`), and never exposes the `CryptoHandle` to the caller. See
+`datacloak/tests/useIsUnlocked.test.tsx`.
+
 ## What DataCloak doesn't do yet (v1 scope — 2026-07-04)
 
 Explicit error at definition (never a silent stub), with a `FIXME` in the source:
