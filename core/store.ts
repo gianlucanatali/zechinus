@@ -34,6 +34,38 @@ import type { BlobMigrator } from "./versioning.ts";
 import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
 import type { CryptoHandle, FieldAAD } from "./types.ts";
+import { OptimisticLockConflictError } from "./errors.ts";
+
+/**
+ * Resolves the current session's `CryptoHandle` AND userId from the configured
+ * `KeyProvider` — used by `get()`/`mutate()`/`getRange()` so callers never have to
+ * fetch a `CryptoHandle` OR pass a `userId` themselves (it's the same ambient
+ * session identity `getCryptoHandle()` already comes from — `passkeyDekController`
+ * sets/clears both together, synchronously, never one without the other). A caller
+ * needing a DIFFERENT identity (dev/test tooling, scripts) still has `load`/`save`,
+ * which keep taking both explicitly.
+ *
+ * NOT exported from the public barrel: if a service needs this directly, that's
+ * a sign `defineStore` is missing an ambient wrapper for whatever it's doing
+ * (see `getRange` below) — extend the framework, don't reach around it.
+ */
+function resolveAmbientIdentity(storeName: string): {
+  cryptoHandle: CryptoHandle;
+  userId: string;
+} {
+  const { keys } = getSecureStoreConfig();
+  if (!keys) {
+    throw new Error(
+      `${storeName}: no KeyProvider configured — pass 'keys' to configureSecureStore()`,
+    );
+  }
+  const cryptoHandle = keys.getCryptoHandle();
+  const userId = keys.getUserId();
+  if (!cryptoHandle || !userId) {
+    throw new Error(`${storeName}: no active session (locked)`);
+  }
+  return { cryptoHandle, userId };
+}
 
 /** Store cardinality: how many records per user, and how they're addressed. */
 export type Identity = "perUser" | "many" | { perKey: string };
@@ -67,7 +99,7 @@ export interface StoreDef<S extends z.ZodType> {
   /**
    * For PORTING an existing table only — omit entirely for a brand-new store (the
    * vast majority of stores never set this). A function reconstructing the OLD
-   * (pre-DataCloak) AAD shape for a given row — `rowKey` is `dek.pid` for `perUser`,
+   * (pre-DataCloak) AAD shape for a given row — `rowKey` is `cryptoHandle.pid` for `perUser`,
    * the domain key for `perKey`, the row id for `many`.
    *
    * On read, the canonical AAD (`field:"data"`) is always tried FIRST; only if that
@@ -78,7 +110,7 @@ export interface StoreDef<S extends z.ZodType> {
    * store never has two ways to write. If both the canonical and legacy attempts
    * fail, the canonical error propagates (never masked by the legacy attempt).
    */
-  legacyAAD?: (dek: CryptoHandle, rowKey: string) => FieldAAD;
+  legacyAAD?: (cryptoHandle: CryptoHandle, rowKey: string) => FieldAAD;
   migrators?: BlobMigrator[];
   /**
    * Set `true` if this table has a `content_hash` column — DataCloak computes it
@@ -109,12 +141,49 @@ export interface StoreDef<S extends z.ZodType> {
 export interface Store<T> {
   readonly name: string;
   readonly version: number;
-  load(userId: string, dek: CryptoHandle): Promise<T>;
-  save(userId: string, dek: CryptoHandle, data: T): Promise<void>;
+  load(userId: string, cryptoHandle: CryptoHandle): Promise<T>;
+  save(userId: string, cryptoHandle: CryptoHandle, data: T): Promise<void>;
+  /**
+   * Ambient read — no `userId`, no `CryptoHandle`. Both are resolved from the
+   * `KeyProvider` passed to `configureSecureStore()` (the same ambient session
+   * identity `useStore()` already reads) — see `mutate` for the full rationale.
+   */
+  get(): Promise<T>;
+  /**
+   * Ambient blind write — no `userId`/`CryptoHandle`, and unlike `mutate()` no
+   * read either: exactly `save()`'s semantics (unconditional upsert), just with
+   * the identity resolved ambiently. For a caller that already has the final
+   * value (not derived from `get()`), this skips `mutate()`'s wasted
+   * load-then-discard.
+   *
+   * Refuses to run (throws) on a store with `optimisticLock: true` — a blind
+   * overwrite would silently bypass the conflict protection the store owner
+   * asked for. Use `mutate()` there instead.
+   */
+  set(data: T): Promise<void>;
+  /**
+   * Load → transform → save in one call, no `userId`/`CryptoHandle` in sight —
+   * both are resolved from the `KeyProvider` passed to `configureSecureStore()`
+   * (the same ambient session identity `useStore()` already reads: there is
+   * exactly one active (cryptoHandle, userId) pair per session, set/cleared together —
+   * a caller needing a DIFFERENT one — dev/test tooling, scripts — still has
+   * `load`/`save`, which keep taking both explicitly). Business logic that
+   * only needs to transform data never has to know the framework has a cryptoHandle or
+   * an identity at all. Throws if no `KeyProvider` is configured, or if the
+   * session is locked (no active cryptoHandle/userId).
+   *
+   * When the store declares `optimisticLock: true`, `mutate()` transparently
+   * uses `loadWithHash`/`saveIfMatch` internally — same conflict detection
+   * `useStore()` gives React callers, just for plain service code. Single
+   * attempt: throws `OptimisticLockConflictError` on conflict rather than
+   * retrying blindly (a blind retry would re-run `fn` against fresher data
+   * without the caller ever deciding whether that's still valid).
+   */
+  mutate(fn: (current: T) => T | Promise<T>): Promise<T>;
   /** Present only when the store declares `contentHash: true`. */
   loadWithHash?(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
   ): Promise<{ data: T; hash: string | null }>;
   /**
    * Present only when the store declares `optimisticLock: true`. See `StoreDef.optimisticLock`.
@@ -123,7 +192,7 @@ export interface Store<T> {
    */
   saveIfMatch?(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     data: T,
     expectedHash: string | null,
   ): Promise<{ ok: boolean; hash: string | null }>;
@@ -133,18 +202,34 @@ export interface Store<T> {
 export interface KeyedStore<T> {
   readonly name: string;
   readonly version: number;
-  load(userId: string, dek: CryptoHandle, key: string): Promise<T>;
-  save(userId: string, dek: CryptoHandle, key: string, data: T): Promise<void>;
+  load(userId: string, cryptoHandle: CryptoHandle, key: string): Promise<T>;
+  save(
+    userId: string,
+    cryptoHandle: CryptoHandle,
+    key: string,
+    data: T,
+  ): Promise<void>;
+  /** Ambient read for the given key — no `userId`/`CryptoHandle` — see `Store.mutate`. */
+  get(key: string): Promise<T>;
+  /** Ambient blind write for the given key — no `userId`/`CryptoHandle`, no read — see `Store.set`. */
+  set(key: string, data: T): Promise<void>;
+  /** Load → transform → save for the given key, no `userId`/`CryptoHandle` in sight — see `Store.mutate`. */
+  mutate(key: string, fn: (current: T) => T | Promise<T>): Promise<T>;
   /** Range query over sortable keys (e.g. `year_month`) — needs `listByKeyRange` on the adapter. */
   list(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     range: { from: string; to: string },
   ): Promise<Array<{ key: string; data: T }>>;
+  /** Ambient range query — no `userId`/`CryptoHandle` — see `Store.mutate`. */
+  getRange(range: {
+    from: string;
+    to: string;
+  }): Promise<Array<{ key: string; data: T }>>;
   /** Present only when the store declares `contentHash: true`. */
   loadWithHash?(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     key: string,
   ): Promise<{ data: T; hash: string | null }>;
   /**
@@ -154,7 +239,7 @@ export interface KeyedStore<T> {
    */
   saveIfMatch?(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     key: string,
     data: T,
     expectedHash: string | null,
@@ -171,11 +256,20 @@ export interface CollectionStore<T> {
    */
   list(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
   ): Promise<Array<{ id: string; data: T; hash: string | null }>>;
-  create(userId: string, dek: CryptoHandle, data: T): Promise<string>;
-  update(userId: string, dek: CryptoHandle, id: string, data: T): Promise<void>;
-  remove(userId: string, dek: CryptoHandle, id: string): Promise<void>;
+  create(userId: string, cryptoHandle: CryptoHandle, data: T): Promise<string>;
+  update(
+    userId: string,
+    cryptoHandle: CryptoHandle,
+    id: string,
+    data: T,
+  ): Promise<void>;
+  remove(userId: string, cryptoHandle: CryptoHandle, id: string): Promise<void>;
+  /** Ambient read (all rows) — no `userId`/`CryptoHandle` — see `Store.mutate`. */
+  get(): Promise<Array<{ id: string; data: T; hash: string | null }>>;
+  /** Ambient create — no `userId`/`CryptoHandle` — see `Store.mutate`. */
+  add(data: T): Promise<string>;
   /**
    * Present only when the store declares `optimisticLock: true`. `expectedHash`
    * comes from the `hash` field returned alongside each row in `list()` — see
@@ -185,7 +279,7 @@ export interface CollectionStore<T> {
    */
   updateIfMatch?(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     id: string,
     data: T,
     expectedHash: string | null,
@@ -355,19 +449,19 @@ function buildKeyedStore<S extends z.ZodType>(
 ): KeyedStore<z.infer<S>> {
   type T = z.infer<S>;
   const empty = resolveEmpty(def);
-  const canonicalAADFor = (dek: CryptoHandle, key: string): FieldAAD =>
-    canonicalAAD(dek, def.name, key);
+  const canonicalAADFor = (cryptoHandle: CryptoHandle, key: string): FieldAAD =>
+    canonicalAAD(cryptoHandle, def.name, key);
 
   const keyedSave = async (
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     key: string,
     data: T,
   ): Promise<void> => {
     const valid = validateWrite(data, `save(key=${key})`);
     const { storage } = getSecureStoreConfig();
     await saveRow(
-      dek,
+      cryptoHandle,
       (record) =>
         storage.put(
           def.name,
@@ -375,7 +469,7 @@ function buildKeyedStore<S extends z.ZodType>(
           [{ column: keyColumn, value: key }],
           record,
         ),
-      canonicalAADFor(dek, key),
+      canonicalAADFor(cryptoHandle, key),
       valid,
       def.version,
       def.contentHash,
@@ -384,12 +478,12 @@ function buildKeyedStore<S extends z.ZodType>(
 
   const keyedLoadInternal = async (
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     key: string,
   ): Promise<{ data: T; hash: string | null }> => {
     const { storage } = getSecureStoreConfig();
     const { data, hash } = await loadRow(
-      dek,
+      cryptoHandle,
       {
         get: () =>
           storage.get(def.name, userId, [{ column: keyColumn, value: key }]),
@@ -401,16 +495,16 @@ function buildKeyedStore<S extends z.ZodType>(
             record,
           ),
       },
-      canonicalAADFor(dek, key),
+      canonicalAADFor(cryptoHandle, key),
       {
         storeName: def.name,
         rowLabel: "perKey ",
         version: def.version,
         migrators,
         empty,
-        legacyAAD: def.legacyAAD?.(dek, key),
+        legacyAAD: def.legacyAAD?.(cryptoHandle, key),
       },
-      (upgradedData) => keyedSave(userId, dek, key, upgradedData),
+      (upgradedData) => keyedSave(userId, cryptoHandle, key, upgradedData),
     );
     return { data: validateRead(data, `load(key=${key})`), hash };
   };
@@ -418,11 +512,51 @@ function buildKeyedStore<S extends z.ZodType>(
   const keyed: KeyedStore<T> = {
     name: def.name,
     version: def.version,
-    async load(userId, dek, key) {
-      return (await keyedLoadInternal(userId, dek, key)).data;
+    async load(userId, cryptoHandle, key) {
+      return (await keyedLoadInternal(userId, cryptoHandle, key)).data;
     },
     save: keyedSave,
-    async list(userId, dek, range) {
+    async get(key) {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      return (await keyedLoadInternal(userId, cryptoHandle, key)).data;
+    },
+    async set(key, data) {
+      if (def.optimisticLock) {
+        throw new Error(
+          `${def.name}.set(): refuses to run on an optimisticLock store — a blind overwrite ` +
+            `would bypass the conflict protection this store declares. Use mutate() instead.`,
+        );
+      }
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      await keyedSave(userId, cryptoHandle, key, data);
+    },
+    async mutate(key, fn) {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      if (keyed.saveIfMatch) {
+        const { data: current, hash } = await keyedLoadInternal(
+          userId,
+          cryptoHandle,
+          key,
+        );
+        const next = await fn(current);
+        const result = await keyed.saveIfMatch(
+          userId,
+          cryptoHandle,
+          key,
+          next,
+          hash,
+        );
+        if (!result.ok) {
+          throw new OptimisticLockConflictError(def.name);
+        }
+        return next;
+      }
+      const current = (await keyedLoadInternal(userId, cryptoHandle, key)).data;
+      const next = await fn(current);
+      await keyedSave(userId, cryptoHandle, key, next);
+      return next;
+    },
+    async list(userId, cryptoHandle, range) {
       const { storage } = getSecureStoreConfig();
       if (!storage.listByKeyRange) {
         throw new Error(
@@ -439,10 +573,10 @@ function buildKeyedStore<S extends z.ZodType>(
       const results: Array<{ key: string; data: T }> = [];
       for (const { key, record } of rows) {
         const { data, upgraded } = await decodeWithLegacyFallback<T>({
-          dek,
+          cryptoHandle,
           record,
-          canonicalAAD: canonicalAADFor(dek, key),
-          legacyAAD: def.legacyAAD?.(dek, key),
+          canonicalAAD: canonicalAADFor(cryptoHandle, key),
+          legacyAAD: def.legacyAAD?.(cryptoHandle, key),
           version: def.version,
           migrators,
           empty,
@@ -455,7 +589,7 @@ function buildKeyedStore<S extends z.ZodType>(
             ),
         });
         if (upgraded) {
-          keyedSave(userId, dek, key, data).catch((e) =>
+          keyedSave(userId, cryptoHandle, key, data).catch((e) =>
             console.error(
               `secure-store(${def.name}): perKey lazy upgrade failed:`,
               e,
@@ -466,6 +600,10 @@ function buildKeyedStore<S extends z.ZodType>(
       }
       return results;
     },
+    async getRange(range) {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      return keyed.list(userId, cryptoHandle, range);
+    },
   };
 
   if (def.contentHash) {
@@ -473,11 +611,17 @@ function buildKeyedStore<S extends z.ZodType>(
   }
 
   if (def.optimisticLock) {
-    keyed.saveIfMatch = async (userId, dek, key, data, expectedHash) => {
+    keyed.saveIfMatch = async (
+      userId,
+      cryptoHandle,
+      key,
+      data,
+      expectedHash,
+    ) => {
       const { storage } = getSecureStoreConfig();
       const valid = validateWrite(data, `saveIfMatch(key=${key})`);
       return saveRowIfMatch(
-        dek,
+        cryptoHandle,
         storage.putIfMatch
           ? (record, hash) =>
               storage.putIfMatch!(
@@ -488,7 +632,7 @@ function buildKeyedStore<S extends z.ZodType>(
                 hash,
               )
           : undefined,
-        canonicalAADFor(dek, key),
+        canonicalAADFor(cryptoHandle, key),
         valid,
         def.version,
         expectedHash,
@@ -512,8 +656,8 @@ function buildCollectionStore<S extends z.ZodType>(
 ): CollectionStore<z.infer<S>> {
   type T = z.infer<S>;
   const generateId = def.idGenerator ?? randomId;
-  const canonicalAADFor = (dek: CryptoHandle, id: string): FieldAAD =>
-    canonicalAAD(dek, def.name, id);
+  const canonicalAADFor = (cryptoHandle: CryptoHandle, id: string): FieldAAD =>
+    canonicalAAD(cryptoHandle, def.name, id);
   // Fallback for a row with a missing/corrupt blob: {} (never a genuinely valid
   // record, but `many` has no domain-level "empty value" — validateRead will
   // reject it with an explicit Zod error instead of failing the store's
@@ -533,7 +677,7 @@ function buildCollectionStore<S extends z.ZodType>(
 
   const manyUpdate = async (
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     id: string,
     data: T,
   ): Promise<void> => {
@@ -546,8 +690,8 @@ function buildCollectionStore<S extends z.ZodType>(
     }
     const { plain, encPart } = splitWrite(valid);
     const record = await encodeBlob(
-      dek,
-      canonicalAADFor(dek, id),
+      cryptoHandle,
+      canonicalAADFor(cryptoHandle, id),
       encPart,
       def.version,
       def.contentHash,
@@ -558,7 +702,7 @@ function buildCollectionStore<S extends z.ZodType>(
   const collection: CollectionStore<T> = {
     name: def.name,
     version: def.version,
-    async list(userId, dek) {
+    async list(userId, cryptoHandle) {
       const { storage } = getSecureStoreConfig();
       if (!storage.list) {
         throw new Error(
@@ -571,10 +715,10 @@ function buildCollectionStore<S extends z.ZodType>(
         const { data: encPart, upgraded } = await decodeWithLegacyFallback<
           Record<string, unknown>
         >({
-          dek,
+          cryptoHandle,
           record,
-          canonicalAAD: canonicalAADFor(dek, id),
-          legacyAAD: def.legacyAAD?.(dek, id),
+          canonicalAAD: canonicalAADFor(cryptoHandle, id),
+          legacyAAD: def.legacyAAD?.(cryptoHandle, id),
           version: def.version,
           migrators,
           empty: emptyEncPart,
@@ -596,7 +740,7 @@ function buildCollectionStore<S extends z.ZodType>(
         });
         const merged = mergeRead(plain, encPart);
         if (upgraded) {
-          manyUpdate(userId, dek, id, merged as T).catch((e) =>
+          manyUpdate(userId, cryptoHandle, id, merged as T).catch((e) =>
             console.error(
               `secure-store(${def.name}): many lazy upgrade failed:`,
               e,
@@ -611,7 +755,7 @@ function buildCollectionStore<S extends z.ZodType>(
       }
       return results;
     },
-    async create(userId, dek, data) {
+    async create(userId, cryptoHandle, data) {
       const valid = validateWrite(data, "create");
       const { storage } = getSecureStoreConfig();
       if (!storage.insert) {
@@ -622,8 +766,8 @@ function buildCollectionStore<S extends z.ZodType>(
       const id = generateId();
       const { plain, encPart } = splitWrite(valid);
       const record = await encodeBlob(
-        dek,
-        canonicalAADFor(dek, id),
+        cryptoHandle,
+        canonicalAADFor(cryptoHandle, id),
         encPart,
         def.version,
         def.contentHash,
@@ -632,7 +776,7 @@ function buildCollectionStore<S extends z.ZodType>(
       return id;
     },
     update: manyUpdate,
-    async remove(userId, dek, id) {
+    async remove(userId, cryptoHandle, id) {
       const { storage } = getSecureStoreConfig();
       if (!storage.deleteById) {
         throw new Error(
@@ -641,10 +785,24 @@ function buildCollectionStore<S extends z.ZodType>(
       }
       await storage.deleteById(def.name, userId, id);
     },
+    async get() {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      return collection.list(userId, cryptoHandle);
+    },
+    async add(data) {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      return collection.create(userId, cryptoHandle, data);
+    },
   };
 
   if (def.optimisticLock) {
-    collection.updateIfMatch = async (userId, dek, id, data, expectedHash) => {
+    collection.updateIfMatch = async (
+      userId,
+      cryptoHandle,
+      id,
+      data,
+      expectedHash,
+    ) => {
       const { storage } = getSecureStoreConfig();
       if (!storage.updateByIdIfMatch) {
         throw new Error(
@@ -654,8 +812,8 @@ function buildCollectionStore<S extends z.ZodType>(
       const valid = validateWrite(data, `updateIfMatch(id=${id})`);
       const { plain, encPart } = splitWrite(valid);
       const record = await encodeBlob(
-        dek,
-        canonicalAADFor(dek, id),
+        cryptoHandle,
+        canonicalAADFor(cryptoHandle, id),
         encPart,
         def.version,
         true,
@@ -691,32 +849,73 @@ function buildPerUserStore<S extends z.ZodType>({
     contentHash: def.contentHash,
     optimisticLock: def.optimisticLock,
     legacyAAD: def.legacyAAD
-      ? (dek) => def.legacyAAD!(dek, dek.pid)
+      ? (cryptoHandle) => def.legacyAAD!(cryptoHandle, cryptoHandle.pid)
       : undefined,
   });
   const store: Store<T> = {
     name: def.name,
     version: def.version,
-    async load(userId, dek) {
-      return validateRead(await inner.load(userId, dek), "load");
+    async load(userId, cryptoHandle) {
+      return validateRead(await inner.load(userId, cryptoHandle), "load");
     },
-    async save(userId, dek, data) {
-      await inner.save(userId, dek, validateWrite(data, "save"));
+    async save(userId, cryptoHandle, data) {
+      await inner.save(userId, cryptoHandle, validateWrite(data, "save"));
+    },
+    async get() {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      return validateRead(await inner.load(userId, cryptoHandle), "get");
+    },
+    async set(data) {
+      if (def.optimisticLock) {
+        throw new Error(
+          `${def.name}.set(): refuses to run on an optimisticLock store — a blind overwrite ` +
+            `would bypass the conflict protection this store declares. Use mutate() instead.`,
+        );
+      }
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      await inner.save(userId, cryptoHandle, validateWrite(data, "set"));
+    },
+    async mutate(fn) {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      if (store.saveIfMatch) {
+        const { data: current, hash } = await store.loadWithHash!(
+          userId,
+          cryptoHandle,
+        );
+        const next = await fn(current);
+        const result = await store.saveIfMatch(
+          userId,
+          cryptoHandle,
+          next,
+          hash,
+        );
+        if (!result.ok) {
+          throw new OptimisticLockConflictError(def.name);
+        }
+        return next;
+      }
+      const current = validateRead(
+        await inner.load(userId, cryptoHandle),
+        "mutate",
+      );
+      const next = await fn(current);
+      await inner.save(userId, cryptoHandle, validateWrite(next, "mutate"));
+      return next;
     },
   };
 
   if (def.contentHash) {
-    store.loadWithHash = async (userId, dek) => {
-      const { data, hash } = await inner.loadWithHash!(userId, dek);
+    store.loadWithHash = async (userId, cryptoHandle) => {
+      const { data, hash } = await inner.loadWithHash!(userId, cryptoHandle);
       return { data: validateRead(data, "loadWithHash"), hash };
     };
   }
 
   if (def.optimisticLock) {
-    store.saveIfMatch = async (userId, dek, data, expectedHash) => {
+    store.saveIfMatch = async (userId, cryptoHandle, data, expectedHash) => {
       return inner.saveIfMatch!(
         userId,
-        dek,
+        cryptoHandle,
         validateWrite(data, "saveIfMatch"),
         expectedHash,
       );

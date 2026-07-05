@@ -113,11 +113,11 @@ function conditionalCollectionStorage(): StorageAdapter & {
 }
 
 function fakeKeys(initial: CryptoHandle | null) {
-  let dek = initial;
+  let cryptoHandle = initial;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
-    getDek: () => dek,
-    getUserId: () => (dek ? "u1" : null),
+    getCryptoHandle: () => cryptoHandle,
+    getUserId: () => (cryptoHandle ? "u1" : null),
     subscribe(cb) {
       subs.add(cb);
       return () => subs.delete(cb);
@@ -126,7 +126,7 @@ function fakeKeys(initial: CryptoHandle | null) {
   return {
     provider,
     setDek: (n: CryptoHandle | null) => {
-      dek = n;
+      cryptoHandle = n;
       for (const cb of subs) cb();
     },
   };
@@ -191,8 +191,8 @@ describe("useCollectionStore", () => {
 
   it("unlocked: loads via store.list() on mount", async () => {
     const storage = collectionMemoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "rebalance_simulations",
@@ -202,7 +202,7 @@ describe("useCollectionStore", () => {
       version: 1,
       schemaFingerprint: fingerprintSchema(Sim, "all"),
     });
-    const id = await store.create("u1", dek, {
+    const id = await store.create("u1", cryptoHandle, {
       name: "sim-1",
       addedLiquidity: 100,
     });
@@ -217,8 +217,8 @@ describe("useCollectionStore", () => {
 
   it("create(): optimistically appends, then persists with the real generated id", async () => {
     const storage = collectionMemoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "rebalance_simulations",
@@ -247,8 +247,8 @@ describe("useCollectionStore", () => {
   });
 
   it("update(): optimistic, rolls back the whole list on failure", async () => {
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     let shouldFail = false;
     const storage: StorageAdapter = {
       async get() {
@@ -283,7 +283,10 @@ describe("useCollectionStore", () => {
       version: 1,
       schemaFingerprint: fingerprintSchema(Sim, "all"),
     });
-    const id = await store.create("u1", dek, { name: "v1", addedLiquidity: 1 });
+    const id = await store.create("u1", cryptoHandle, {
+      name: "v1",
+      addedLiquidity: 1,
+    });
 
     const { result } = renderHook(() => useCollectionStore(store));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -305,8 +308,8 @@ describe("useCollectionStore", () => {
 
   it("remove(): optimistically filters the item out, then persists the delete", async () => {
     const storage = collectionMemoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "rebalance_simulations",
@@ -316,7 +319,10 @@ describe("useCollectionStore", () => {
       version: 1,
       schemaFingerprint: fingerprintSchema(Sim, "all"),
     });
-    const id = await store.create("u1", dek, { name: "v1", addedLiquidity: 1 });
+    const id = await store.create("u1", cryptoHandle, {
+      name: "v1",
+      addedLiquidity: 1,
+    });
 
     const { result } = renderHook(() => useCollectionStore(store));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -331,8 +337,8 @@ describe("useCollectionStore", () => {
 
   it("optimisticLock: update() threads each row's hash automatically", async () => {
     const storage = conditionalCollectionStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "rebalance_simulations",
@@ -344,7 +350,10 @@ describe("useCollectionStore", () => {
       contentHash: true,
       optimisticLock: true,
     });
-    const id = await store.create("u1", dek, { name: "v1", addedLiquidity: 1 });
+    const id = await store.create("u1", cryptoHandle, {
+      name: "v1",
+      addedLiquidity: 1,
+    });
 
     const { result } = renderHook(() => useCollectionStore(store));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -363,8 +372,8 @@ describe("useCollectionStore", () => {
 
   it("optimisticLock: a conflicting concurrent update makes update() throw and roll back only that row", async () => {
     const storage = conditionalCollectionStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "rebalance_simulations",
@@ -376,16 +385,19 @@ describe("useCollectionStore", () => {
       contentHash: true,
       optimisticLock: true,
     });
-    const id = await store.create("u1", dek, { name: "v1", addedLiquidity: 1 });
+    const id = await store.create("u1", cryptoHandle, {
+      name: "v1",
+      addedLiquidity: 1,
+    });
 
     const { result } = renderHook(() => useCollectionStore(store));
     await waitFor(() => expect(result.current.loading).toBe(false));
 
     // A "concurrent tab" updates the same row directly through the store.
-    const [{ hash }] = await store.list("u1", dek);
+    const [{ hash }] = await store.list("u1", cryptoHandle);
     await store.updateIfMatch!(
       "u1",
-      dek,
+      cryptoHandle,
       id,
       { name: "concurrent", addedLiquidity: 99 },
       hash,

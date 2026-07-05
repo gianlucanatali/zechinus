@@ -30,7 +30,7 @@ type Data = { items: string[] };
 test("defineBlobStore: save→load roundtrip + the saved blob is encrypted", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const store = defineBlobStore<Data>({
     name: "test_blobs",
     version: 1,
@@ -38,9 +38,9 @@ test("defineBlobStore: save→load roundtrip + the saved blob is encrypted", asy
   });
 
   // load of a non-existent record → empty
-  assert.deepEqual(await store.load("u1", dek), { items: [] });
+  assert.deepEqual(await store.load("u1", cryptoHandle), { items: [] });
 
-  await store.save("u1", dek, { items: ["secret"] });
+  await store.save("u1", cryptoHandle, { items: ["secret"] });
 
   // the persisted blob is ciphertext: enc: prefix, plaintext not present
   const raw = adapter.rows.get("test_blobs:u1");
@@ -56,7 +56,7 @@ test("defineBlobStore: save→load roundtrip + the saved blob is encrypted", asy
   assert.equal(raw!.schemaVersion, 1);
 
   // load → decrypts correctly
-  assert.deepEqual(await store.load("u1", dek), { items: ["secret"] });
+  assert.deepEqual(await store.load("u1", cryptoHandle), { items: ["secret"] });
 });
 
 test("defineBlobStore: a different DEK doesn't decrypt (AAD/GCM auth tag)", async () => {
@@ -68,20 +68,23 @@ test("defineBlobStore: a different DEK doesn't decrypt (AAD/GCM auth tag)", asyn
     empty: { items: [] },
   });
 
-  const dek1 = createDekHandle(randomBytes(32));
-  await store.save("u1", dek1, { items: ["x"] });
+  const cryptoHandle1 = createDekHandle(randomBytes(32));
+  await store.save("u1", cryptoHandle1, { items: ["x"] });
 
-  const dek2 = createDekHandle(randomBytes(32));
-  await assert.rejects(() => store.load("u1", dek2));
+  const cryptoHandle2 = createDekHandle(randomBytes(32));
+  await assert.rejects(() => store.load("u1", cryptoHandle2));
 });
 
 test("defineBlobStore: without configureSecureStore throws an explicit error", async () => {
   __resetSecureStoreConfig();
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const store = defineBlobStore<Data>({
     name: "test_blobs",
     version: 1,
     empty: { items: [] },
   });
-  await assert.rejects(() => store.load("u1", dek), /framework not configured/);
+  await assert.rejects(
+    () => store.load("u1", cryptoHandle),
+    /framework not configured/,
+  );
 });

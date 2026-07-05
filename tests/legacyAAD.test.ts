@@ -52,15 +52,15 @@ function keyedMemoryAdapter(): StorageAdapter & {
 test("legacyAAD (perUser): a row under the OLD AAD migrates lazily on first load, converges to canonical", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const legacyRecord = await encodeBlob(
-    dek,
+    cryptoHandle,
     {
-      userId: dek.pid,
+      userId: cryptoHandle.pid,
       table: "budget_allocation_blobs",
       field: "blob",
-      rowId: dek.pid,
+      rowId: cryptoHandle.pid,
     },
     { value: "legacy" },
     1,
@@ -73,16 +73,16 @@ test("legacyAAD (perUser): a row under the OLD AAD migrates lazily on first load
     encrypt: "all",
     schema: Blob,
     version: 1,
-    legacyAAD: (dek) => ({
-      userId: dek.pid,
+    legacyAAD: (cryptoHandle) => ({
+      userId: cryptoHandle.pid,
       table: "budget_allocation_blobs",
       field: "blob",
-      rowId: dek.pid,
+      rowId: cryptoHandle.pid,
     }),
     schemaFingerprint: fingerprintSchema(Blob, "all"),
   });
 
-  assert.deepEqual(await store.load("u1", dek), { value: "legacy" });
+  assert.deepEqual(await store.load("u1", cryptoHandle), { value: "legacy" });
 
   // The stored record must now decrypt under the CANONICAL AAD alone (field:"data")
   // — build a fresh store with no legacyAAD and confirm it reads it directly.
@@ -94,13 +94,15 @@ test("legacyAAD (perUser): a row under the OLD AAD migrates lazily on first load
     version: 1,
     schemaFingerprint: fingerprintSchema(Blob, "all"),
   });
-  assert.deepEqual(await canonicalOnly.load("u1", dek), { value: "legacy" });
+  assert.deepEqual(await canonicalOnly.load("u1", cryptoHandle), {
+    value: "legacy",
+  });
 });
 
 test("legacyAAD (perUser): a save() always writes canonical AAD, never the legacy one", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "budget_allocation_blobs",
@@ -108,16 +110,16 @@ test("legacyAAD (perUser): a save() always writes canonical AAD, never the legac
     encrypt: "all",
     schema: Blob,
     version: 1,
-    legacyAAD: (dek) => ({
-      userId: dek.pid,
+    legacyAAD: (cryptoHandle) => ({
+      userId: cryptoHandle.pid,
       table: "budget_allocation_blobs",
       field: "blob",
-      rowId: dek.pid,
+      rowId: cryptoHandle.pid,
     }),
     schemaFingerprint: fingerprintSchema(Blob, "all"),
   });
 
-  await store.save("u1", dek, { value: "fresh write" });
+  await store.save("u1", cryptoHandle, { value: "fresh write" });
 
   const canonicalOnly = defineStore({
     name: "budget_allocation_blobs",
@@ -127,7 +129,7 @@ test("legacyAAD (perUser): a save() always writes canonical AAD, never the legac
     version: 1,
     schemaFingerprint: fingerprintSchema(Blob, "all"),
   });
-  assert.deepEqual(await canonicalOnly.load("u1", dek), {
+  assert.deepEqual(await canonicalOnly.load("u1", cryptoHandle), {
     value: "fresh write",
   });
 });
@@ -135,12 +137,12 @@ test("legacyAAD (perUser): a save() always writes canonical AAD, never the legac
 test("legacyAAD (perKey): migrates lazily on first load, converges to canonical", async () => {
   const adapter = keyedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const legacyRecord = await encodeBlob(
-    dek,
+    cryptoHandle,
     {
-      userId: dek.pid,
+      userId: cryptoHandle.pid,
       table: "account_snapshot_blobs",
       field: "snapshot",
       rowId: "2026-06",
@@ -156,8 +158,8 @@ test("legacyAAD (perKey): migrates lazily on first load, converges to canonical"
     encrypt: "all",
     schema: Blob,
     version: 1,
-    legacyAAD: (dek, key) => ({
-      userId: dek.pid,
+    legacyAAD: (cryptoHandle, key) => ({
+      userId: cryptoHandle.pid,
       table: "account_snapshot_blobs",
       field: "snapshot",
       rowId: key,
@@ -165,7 +167,9 @@ test("legacyAAD (perKey): migrates lazily on first load, converges to canonical"
     schemaFingerprint: fingerprintSchema(Blob, "all"),
   });
 
-  assert.deepEqual(await store.load("u1", dek, "2026-06"), { value: "june" });
+  assert.deepEqual(await store.load("u1", cryptoHandle, "2026-06"), {
+    value: "june",
+  });
 
   const canonicalOnly = defineStore({
     name: "account_snapshot_blobs",
@@ -175,7 +179,7 @@ test("legacyAAD (perKey): migrates lazily on first load, converges to canonical"
     version: 1,
     schemaFingerprint: fingerprintSchema(Blob, "all"),
   });
-  assert.deepEqual(await canonicalOnly.load("u1", dek, "2026-06"), {
+  assert.deepEqual(await canonicalOnly.load("u1", cryptoHandle, "2026-06"), {
     value: "june",
   });
 });
@@ -183,7 +187,7 @@ test("legacyAAD (perKey): migrates lazily on first load, converges to canonical"
 test("legacyAAD: no legacyAAD configured (default path) → behaves exactly as before, no migration attempted", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "budget_allocation_blobs",
@@ -194,7 +198,7 @@ test("legacyAAD: no legacyAAD configured (default path) → behaves exactly as b
     schemaFingerprint: fingerprintSchema(Blob, "all"),
   });
 
-  assert.deepEqual(await store.load("u1", dek), { value: "" });
-  await store.save("u1", dek, { value: "hi" });
-  assert.deepEqual(await store.load("u1", dek), { value: "hi" });
+  assert.deepEqual(await store.load("u1", cryptoHandle), { value: "" });
+  await store.save("u1", cryptoHandle, { value: "hi" });
+  assert.deepEqual(await store.load("u1", cryptoHandle), { value: "hi" });
 });

@@ -22,14 +22,14 @@ function fakeStorage(): StorageAdapter {
   };
 }
 
-// Only presence/absence of the dek matters for these tests, never its crypto methods —
+// Only presence/absence of the cryptoHandle matters for these tests, never its crypto methods —
 // a minimal `{ pid }` stand-in cast to CryptoHandle is safe here (no encrypt/decrypt call).
 function fakeKeys(initialDek: { pid: string } | null) {
-  let dek = initialDek as CryptoHandle | null;
+  let cryptoHandle = initialDek as CryptoHandle | null;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
-    getDek: () => dek,
-    getUserId: () => (dek ? "u1" : null),
+    getCryptoHandle: () => cryptoHandle,
+    getUserId: () => (cryptoHandle ? "u1" : null),
     subscribe(cb) {
       subs.add(cb);
       return () => subs.delete(cb);
@@ -38,7 +38,7 @@ function fakeKeys(initialDek: { pid: string } | null) {
   return {
     provider,
     setDek(next: { pid: string } | null) {
-      dek = next as CryptoHandle | null;
+      cryptoHandle = next as CryptoHandle | null;
       for (const cb of subs) cb();
     },
   };

@@ -19,12 +19,12 @@ import type { CryptoHandle, FieldAAD } from "./types.ts";
 export interface BlobStore<T> {
   readonly name: string;
   readonly version: number;
-  load(userId: string, dek: CryptoHandle): Promise<T>;
-  save(userId: string, dek: CryptoHandle, data: T): Promise<void>;
+  load(userId: string, cryptoHandle: CryptoHandle): Promise<T>;
+  save(userId: string, cryptoHandle: CryptoHandle, data: T): Promise<void>;
   /** Present only when the store declares `contentHash: true`. */
   loadWithHash?(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
   ): Promise<{ data: T; hash: string | null }>;
   /**
    * Present only when the store declares `optimisticLock: true`. Conditional write:
@@ -36,7 +36,7 @@ export interface BlobStore<T> {
    */
   saveIfMatch?(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     data: T,
     expectedHash: string | null,
   ): Promise<{ ok: boolean; hash: string | null }>;
@@ -54,7 +54,7 @@ export interface BlobStoreDef<T> {
    * `StoreDef.legacyAAD` in `store.ts` for the full contract (read-old-if-needed,
    * always-write-canonical, never masks a real error).
    */
-  legacyAAD?: (dek: CryptoHandle) => FieldAAD;
+  legacyAAD?: (cryptoHandle: CryptoHandle) => FieldAAD;
   /**
    * Set `true` if this table has a `content_hash` column — DataCloak computes it
    * internally (SHA-256 of the plaintext envelope, see `core/contentHash.ts`), no
@@ -83,14 +83,14 @@ export function defineBlobStore<T>(def: BlobStoreDef<T>): BlobStore<T> {
 
   async function save(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     data: T,
   ): Promise<void> {
     const { storage } = getSecureStoreConfig();
     await saveRow(
-      dek,
+      cryptoHandle,
       (record) => storage.put(def.name, userId, [], record),
-      canonicalAAD(dek, def.name),
+      canonicalAAD(cryptoHandle, def.name),
       data,
       def.version,
       def.contentHash,
@@ -99,30 +99,30 @@ export function defineBlobStore<T>(def: BlobStoreDef<T>): BlobStore<T> {
 
   async function loadInternal(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
   ): Promise<{ data: T; hash: string | null }> {
     const { storage } = getSecureStoreConfig();
     return loadRow(
-      dek,
+      cryptoHandle,
       {
         get: () => storage.get(def.name, userId, []),
         put: (record) => storage.put(def.name, userId, [], record),
       },
-      canonicalAAD(dek, def.name),
+      canonicalAAD(cryptoHandle, def.name),
       {
         storeName: def.name,
         rowLabel: "",
         version: def.version,
         migrators,
         empty: def.empty,
-        legacyAAD: def.legacyAAD?.(dek),
+        legacyAAD: def.legacyAAD?.(cryptoHandle),
       },
-      (data) => save(userId, dek, data),
+      (data) => save(userId, cryptoHandle, data),
     );
   }
 
-  async function load(userId: string, dek: CryptoHandle): Promise<T> {
-    return (await loadInternal(userId, dek)).data;
+  async function load(userId: string, cryptoHandle: CryptoHandle): Promise<T> {
+    return (await loadInternal(userId, cryptoHandle)).data;
   }
 
   const store: BlobStore<T> = {
@@ -133,19 +133,20 @@ export function defineBlobStore<T>(def: BlobStoreDef<T>): BlobStore<T> {
   };
 
   if (def.contentHash) {
-    store.loadWithHash = (userId, dek) => loadInternal(userId, dek);
+    store.loadWithHash = (userId, cryptoHandle) =>
+      loadInternal(userId, cryptoHandle);
   }
 
   if (def.optimisticLock) {
-    store.saveIfMatch = async (userId, dek, data, expectedHash) => {
+    store.saveIfMatch = async (userId, cryptoHandle, data, expectedHash) => {
       const { storage } = getSecureStoreConfig();
       return saveRowIfMatch(
-        dek,
+        cryptoHandle,
         storage.putIfMatch
           ? (record, hash) =>
               storage.putIfMatch!(def.name, userId, [], record, hash)
           : undefined,
-        canonicalAAD(dek, def.name),
+        canonicalAAD(cryptoHandle, def.name),
         data,
         def.version,
         expectedHash,

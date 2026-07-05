@@ -44,7 +44,7 @@ import {
   configureSecureStore,
   defineStore,
   supabaseStorageAdapter,
-} from "@datacloak";
+} from "datacloak";
 
 // once, at app bootstrap
 configureSecureStore({ storage: supabaseStorageAdapter(getSupabaseClient) });
@@ -57,8 +57,8 @@ const portfolioStore = defineStore({
   schema: z.object({ positions: z.array(Position).default([]) }),
   version: 1,
 });
-await portfolioStore.save(userId, dek, data);
-const data = await portfolioStore.load(userId, dek);
+await portfolioStore.save(userId, cryptoHandle, data);
+const data = await portfolioStore.load(userId, cryptoHandle);
 
 // perKey — one blob per (user, domain key) — e.g. transactions per month
 const transactionStore = defineStore({
@@ -68,8 +68,8 @@ const transactionStore = defineStore({
   schema: z.object({ transactions: z.array(Tx).default([]) }),
   version: 1,
 });
-await transactionStore.save(userId, dek, "2026-07", data);
-const data = await transactionStore.load(userId, dek, "2026-07");
+await transactionStore.save(userId, cryptoHandle, "2026-07", data);
+const data = await transactionStore.load(userId, cryptoHandle, "2026-07");
 
 // many — a collection with a generated id — e.g. rebalance simulations
 const simulationStore = defineStore({
@@ -82,10 +82,10 @@ const simulationStore = defineStore({
   }),
   version: 1,
 });
-const id = await simulationStore.create(userId, dek, data);
-const rows = await simulationStore.list(userId, dek); // [{ id, data }, ...]
-await simulationStore.update(userId, dek, id, data);
-await simulationStore.remove(userId, dek, id);
+const id = await simulationStore.create(userId, cryptoHandle, data);
+const rows = await simulationStore.list(userId, cryptoHandle); // [{ id, data }, ...]
+await simulationStore.update(userId, cryptoHandle, id, data);
+await simulationStore.remove(userId, cryptoHandle, id);
 ```
 
 Full runnable examples (in-memory adapter, no Supabase required):
@@ -107,7 +107,7 @@ implements this by hand.
 it — useful for sortable ids (ULID, a timestamp-prefixed scheme). DataCloak only needs
 the result unique per `(userId, collection)`; it never inspects the id's shape.
 
-**`perKey` range queries:** `keyedStore.list(userId, dek, { from, to })` returns all
+**`perKey` range queries:** `keyedStore.list(userId, cryptoHandle, { from, to })` returns all
 entries whose key falls in `[from, to]` (lexicographic — works for sortable keys like
 `year_month`), decrypted, AAD still enforced per row. Needs `listByKeyRange` on the
 adapter (both shipped adapters have it); throws explicitly if the configured adapter
@@ -116,20 +116,25 @@ doesn't.
 ## Recipe: `defineLabelDict` — dictionaries of labels
 
 ```ts
-import { defineLabelDict } from "@datacloak";
+import { defineLabelDict } from "datacloak";
 
 const accountLabels = defineLabelDict({ name: "user_label_dicts" }); // keyColumn defaults to "table_name"
 
 await accountLabels.setLabel(
   userId,
-  dek,
+  cryptoHandle,
   "accounts",
   accountId,
   "Checking account",
 );
-const label = await accountLabels.getLabel(userId, dek, "accounts", accountId);
-await accountLabels.deleteLabel(userId, dek, "accounts", accountId);
-const all = await accountLabels.getAll(userId, dek, "accounts");
+const label = await accountLabels.getLabel(
+  userId,
+  cryptoHandle,
+  "accounts",
+  accountId,
+);
+await accountLabels.deleteLabel(userId, cryptoHandle, "accounts", accountId);
+const all = await accountLabels.getAll(userId, cryptoHandle, "accounts");
 ```
 
 Zero new mechanics — it's `defineStore({ identity: { perKey }, schema: z.record(...) })`
@@ -159,8 +164,8 @@ defineStore({
   encrypt: "all",
   schema: SnapshotSchema,
   version: 1,
-  legacyAAD: (dek, key) => ({
-    userId: dek.pid,
+  legacyAAD: (cryptoHandle, key) => ({
+    userId: cryptoHandle.pid,
     table: "account_snapshot_blobs",
     field: "snapshot", // the OLD service's field value
     rowId: key, // here it happens to match the canonical rowId too
@@ -187,7 +192,7 @@ defineStore({
   (never masked by the legacy attempt's own failure) — real corruption or a wrong DEK
   still surfaces clearly.
 
-`rowKey` passed to `legacyAAD` is `dek.pid` for `perUser`, the domain key for `perKey`,
+`rowKey` passed to `legacyAAD` is `cryptoHandle.pid` for `perUser`, the domain key for `perKey`,
 the row id for `many` — whatever the store's own "row address" is.
 
 ## The underlying primitive — `migrateLegacyAAD`
@@ -198,7 +203,7 @@ pure decrypt-under-old → re-encrypt-under-new mechanics, old AAD always suppli
 caller:
 
 ```ts
-import { migrateLegacyAAD } from "@datacloak";
+import { migrateLegacyAAD } from "datacloak";
 
 const oldRecord = await storage.getByKey(
   "transaction_blobs",
@@ -207,16 +212,16 @@ const oldRecord = await storage.getByKey(
   "2026-06",
 );
 const { migrated, record } = await migrateLegacyAAD(
-  dek,
+  cryptoHandle,
   oldRecord,
   {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "transaction_blobs",
     field: "transactions",
     rowId: "2026-06",
   }, // old
   {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "transaction_blobs",
     field: "data",
     rowId: "2026-06",
@@ -284,9 +289,9 @@ const store = defineStore({
   schemaFingerprint: "…",
 });
 
-const { data, hash } = await store.loadWithHash!(userId, dek);
+const { data, hash } = await store.loadWithHash!(userId, cryptoHandle);
 // ... user edits `data` ...
-const result = await store.saveIfMatch!(userId, dek, data, hash);
+const result = await store.saveIfMatch!(userId, cryptoHandle, data, hash);
 if (!result.ok) {
   // someone else saved first — reload and show a conflict, never retry blindly
 } else {
@@ -467,7 +472,7 @@ yet; `defineStore` throws an explicit error if you try).
 ## React binding — one hook per cardinality
 
 ```tsx
-import { useStore, useKeyedStore, useCollectionStore } from "@datacloak/react";
+import { useStore, useKeyedStore, useCollectionStore } from "datacloak/react";
 
 function PortfolioPanel() {
   const { data, loading, locked, error, save } = useStore(portfolioStore); // perUser
@@ -488,7 +493,7 @@ function RebalanceSimulations() {
 }
 ```
 
-All three hide the same things from the caller: dek+userId gating (`locked`), the initial
+All three hide the same things from the caller: cryptoHandle+userId gating (`locked`), the initial
 fetch, cache read/subscribe, and optimistic write-through with automatic rollback if the
 underlying persist fails (`useCollectionStore` rolls back the whole list on `update`/
 `remove` failure — read-modify-write, not per-field patching). Wipe-on-lock is centralized
@@ -501,7 +506,7 @@ want it for a "someone else edited this" hint); `save`/`update` use `saveIfMatch
 `updateIfMatch` transparently when available, reading the hash from the cache and writing
 the new one back on success — the same `save(data)`/`update(id, data)` call site works
 whether or not the store has the lock configured. On conflict, the hook rolls back the
-optimistic update and throws `OptimisticLockConflictError` (from `@datacloak/react`) —
+optimistic update and throws `OptimisticLockConflictError` (from `datacloak/react`) —
 catch it separately from a generic save failure to show "someone else edited this, reload"
 instead of a generic error:
 
@@ -521,23 +526,23 @@ Requires `keys` (a `KeyProvider`) and `cache` (a `CacheAdapter`) in
 `configureSecureStore`:
 
 ```ts
-import { tanstackAdapter } from "@datacloak/react";
+import { tanstackAdapter } from "datacloak/react";
 
 configureSecureStore({
   storage: supabaseStorageAdapter(getSupabaseClient),
   cache: tanstackAdapter(queryClient),     // reference CacheAdapter, real TanStack Query
   keys: {                                  // KeyProvider: plain subscribable snapshot,
-    getDek: () => /* your app's current key handle | null — only needs to satisfy CryptoHandle: { pid, encryptJson, decryptJson } */,
+    getCryptoHandle: () => /* your app's current key handle | null — only needs to satisfy CryptoHandle: { pid, encryptJson, decryptJson } */,
     getUserId: () => /* your app's current userId | null */,
     subscribe: (cb) => /* subscribe to changes, return an unsubscribe fn */,
   },
 });
 ```
 
-`KeyProvider` is deliberately **not** hook-shaped (no `useDek()`) — a plain
+`KeyProvider` is deliberately **not** hook-shaped (no `useCryptoHandle()`) — a plain
 get/subscribe snapshot, read via `useSyncExternalStore` inside each hook, so the port
-itself isn't subject to the Rules of Hooks. Since your app's DEK/userId almost always
-live inside a React context (not a plain external store), bridge them with a small
+itself isn't subject to the Rules of Hooks. Since your app's crypto handle/userId almost
+always live inside a React context (not a plain external store), bridge them with a small
 invisible component that calls your context's hooks and forwards their values into a
 module-level `KeyProvider` — see the host app's own
 `src/lib/datacloakKeyProvider.ts` + `src/components/DataCloakKeyBridge.tsx` for a
@@ -548,7 +553,7 @@ lives in `datacloak/tests/useStore.test.tsx`, `useKeyedStore.test.tsx`,
 `useCollectionStore.test.tsx` — read them before writing a `KeyProvider` for a new
 consumer.
 
-## What DataCloak doesn't do yet (v1 scope — 2026-07-03)
+## What DataCloak doesn't do yet (v1 scope — 2026-07-04)
 
 Explicit error at definition (never a silent stub), with a `FIXME` in the source:
 
@@ -564,6 +569,28 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   **web** adapter (uses `navigator.credentials`, browser-only). RN needs its own adapter
   (native passkey/biometrics) calling the same `deriveKey`/`createKeyHandle` — not
   written yet, but the split already isolates exactly what would need to change.
+- **True DEK rotation** (the DEK's actual bytes change — not `KeyHandle.wrapWithKek`,
+  which re-wraps the _same_ DEK under a new KEK and is already built and used by EW's
+  `RecoveryUnlockModal`/`Impostazioni`) — discussed 2026-07-04, deliberately not built,
+  no real trigger today. A lazy extension of the `legacyAAD` pattern (a "legacy DEK"
+  fallback, symmetric to `migrateLegacyAAD`) was considered and rejected: with several
+  independent devices/passkeys each unlocking the same DEK via their own symmetric KEK,
+  per-row lazy convergence breaks multi-device consistency — once one device migrates a
+  row to the new DEK, any other device still holding only the old DEK can no longer
+  decrypt that row, and the gap widens with every read. No production zero-knowledge
+  system rotates this way: 1Password/Bitwarden/Proton keep the DEK ("vault key") stable
+  and only re-wrap it under a new KEK (exactly `wrapWithKek`); the one that does offer
+  real DEK rotation (Bitwarden) does it as a single synchronous re-encrypt-everything
+  ceremony that invalidates every other session — never a mixed-DEK state, never lazy.
+  An asymmetric-wrap variant (X25519/HPKE per passkey instead of a symmetric KEK, the
+  pattern Matrix/Olm uses to share session keys with offline devices) would let the
+  initiating device pre-provision every registered passkey without needing it present —
+  but it only solves key _distribution_, not the synchronous data re-encryption, and it
+  requires publishing a public key per passkey starting at registration time, for a
+  feature with no consumer yet. If this is ever built: a synchronous online ceremony
+  (Bitwarden-style), optionally with asymmetric wraps to avoid re-registering other
+  devices (Matrix/Olm-style) — never a framework-level lazy mechanism. Full discussion:
+  `_local/plans/20260626-1111000-secure-store-framework.md` § "Decisioni aperte".
 
 ## Extending `StorageAdapter`
 
@@ -598,37 +625,62 @@ rows }`, matching node-postgres's shape) — no hard dependency on `pg` or any s
 Both implement the exact same `StorageAdapter` interface (`core/types.ts`) — swapping one
 for the other requires no changes to `defineStore` calls, only to `configureSecureStore`.
 
-## Package boundary — import adapters from their own path, never the bare barrel
+## Package boundary — a real npm workspace, not a path alias
 
-`datacloak/package.json` declares the real dependency split: `zod`/`@noble/ciphers`/
-`@noble/hashes` are hard `dependencies` (the core needs them unconditionally);
-`@supabase/supabase-js`, `react`, `@tanstack/react-query` are `peerDependencies`, all
-marked `optional: true` in `peerDependenciesMeta` — a consumer using only
-`pgStorageAdapter` needs none of them installed (`pgStorageAdapter` itself has zero
-package dependency at all, not even `pg` — see above).
+`datacloak/` is a real npm package (`"name": "datacloak"` in its own `package.json`),
+wired into the host app via **npm workspaces** — the root `package.json` declares
+`"workspaces": ["datacloak"]`, and `npm install` symlinks `node_modules/datacloak` →
+`../datacloak`. Every consumer (the host app's `src/`/`backend/`, or any other app that
+takes a dependency on this package) imports it as a bare specifier, exactly like any
+npm package: `import { defineStore } from "datacloak"`. There is **no bundler-specific
+path alias** (no `@datacloak` entry in `vite.config.ts`/`tsconfig.json`'s `paths`) —
+resolution goes through the package's own `exports` map, the same mechanism that would
+apply if `datacloak/` were published to a registry and installed as a normal dependency.
+This is what makes the "OSS-extractable" claim checkable rather than aspirational: moving
+the folder to its own repo and publishing it changes nothing about how consumers import
+it.
 
-To make that real, **`@datacloak` (the bare barrel, `index.ts`) exports ONLY `core/` —
-zero adapters.** Importing `@datacloak` for `defineStore` must never pull Supabase,
-TanStack, or the WebAuthn browser API into the module graph. Import an adapter from its
-own file instead:
+`datacloak/package.json`'s `exports` map governs what's importable from outside:
 
-```ts
-import { supabaseStorageAdapter } from "@datacloak/adapters/supabaseStorageAdapter.ts";
-import { pgStorageAdapter } from "@datacloak/adapters/pgStorageAdapter.ts";
-import { webauthnKeyProvider } from "@datacloak/adapters/webauthnKeyProvider.ts";
-import { mnemonicRecovery } from "@datacloak/adapters/mnemonicRecovery.ts";
-import { createWorkerKeyHandle } from "@datacloak/adapters/workerKeyHandle.ts";
-import { tanstackAdapter } from "@datacloak/react"; // React binding only, not the bare barrel
+```json
+"exports": {
+  ".": "./index.ts",
+  "./react": "./react/index.ts",
+  "./adapters/*": "./adapters/*",
+  "./core/*": "./core/*"
+}
 ```
 
-**`datacloak/tsconfig.json`** is a second, standalone compiler config with no `paths` —
-no `@datacloak` alias, no reliance on the host app's `tsconfig.json`. It's the actual
-self-containment check: if `datacloak/`'s own code (including its tests) only imports
-itself via relative paths (`../core/...`, `./testKeyHandle.ts`, ...) — never the alias —
-this passes. Run it with `npm run datacloak:typecheck`. Any file inside `datacloak/`
-that imports `@datacloak`/`@datacloak/*` (the alias, only resolvable inside the
-the host app host app) instead of a relative path breaks this check — that's the signal a
-boundary was crossed by accident.
+It also declares the real dependency split: `zod`/`@noble/ciphers`/`@noble/hashes` are
+hard `dependencies` (the core needs them unconditionally); `@supabase/supabase-js`,
+`react`, `@tanstack/react-query` are `peerDependencies`, all marked `optional: true` in
+`peerDependenciesMeta` — a consumer using only `pgStorageAdapter` needs none of them
+installed (`pgStorageAdapter` itself has zero package dependency at all, not even `pg` —
+see above).
+
+To make that real, **`datacloak` (the bare barrel, `index.ts`) exports ONLY `core/` —
+zero adapters.** Importing `datacloak` for `defineStore` must never pull Supabase,
+TanStack, or the WebAuthn browser API into the module graph. Import an adapter from its
+own file instead — the same `.ts`-extension-inclusive style used everywhere else in this
+codebase (`allowImportingTsExtensions`):
+
+```ts
+import { supabaseStorageAdapter } from "datacloak/adapters/supabaseStorageAdapter.ts";
+import { pgStorageAdapter } from "datacloak/adapters/pgStorageAdapter.ts";
+import { webauthnKeyProvider } from "datacloak/adapters/webauthnKeyProvider.ts";
+import { mnemonicRecovery } from "datacloak/adapters/mnemonicRecovery.ts";
+import { createWorkerKeyHandle } from "datacloak/adapters/workerKeyHandle.ts";
+import { tanstackAdapter } from "datacloak/react"; // React binding only, not the bare barrel
+```
+
+**`datacloak/tsconfig.json`** is a second, standalone compiler config with no `paths` at
+all — no reliance on the host app's `tsconfig.json`. It's the actual self-containment
+check: if `datacloak/`'s own code (including its tests) only imports itself via relative
+paths (`../core/...`, `./testKeyHandle.ts`, ...) — never its own package name — this
+passes. Run it with `npm run datacloak:typecheck`. Any file inside `datacloak/` that
+imports `datacloak`/`datacloak/*` (its own external-facing package name, only meaningful
+from OUTSIDE the package) instead of a relative path breaks this check — that's the
+signal a boundary was crossed by accident.
 
 ## How these docs stay in sync
 

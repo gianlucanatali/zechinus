@@ -17,7 +17,7 @@ import {
   createWorkerKeyHandle,
   handleKeyHandleMessages,
 } from "../adapters/workerKeyHandle.ts";
-import { createKeyHandle } from "../core/keyDerivation.ts";
+import { createKeyHandle, asRawDekBytes } from "../core/keyDerivation.ts";
 
 /** Wires a fake main-thread `Worker` directly to a fake worker-side `WorkerContext` — no real Worker. */
 function fakeWorkerPair() {
@@ -57,7 +57,7 @@ test("createWorkerKeyHandle / handleKeyHandleMessages: init returns the correct 
     workerCtx,
   );
 
-  const rawBytes = new Uint8Array(32).fill(1);
+  const rawBytes = asRawDekBytes(new Uint8Array(32).fill(1));
   const handle = await createWorkerKeyHandle(worker, rawBytes);
   const expected = createKeyHandle(
     rawBytes,
@@ -77,7 +77,7 @@ test("createWorkerKeyHandle: encryptJson/decryptJson roundtrip through the worke
 
   const handle = await createWorkerKeyHandle(
     worker,
-    new Uint8Array(32).fill(1),
+    asRawDekBytes(new Uint8Array(32).fill(1)),
   );
   const aad = { userId: handle.pid, table: "t", field: "f", rowId: "r" };
   const enc = await handle.encryptJson({ hello: "world" }, aad);
@@ -95,7 +95,7 @@ test("createWorkerKeyHandle: encryptField/decryptField roundtrip", async () => {
 
   const handle = await createWorkerKeyHandle(
     worker,
-    new Uint8Array(32).fill(1),
+    asRawDekBytes(new Uint8Array(32).fill(1)),
   );
   const aad = { userId: handle.pid, table: "t", field: "f", rowId: "r" };
 
@@ -111,7 +111,7 @@ test("createWorkerKeyHandle: wrapWithKek proxies through to the worker's handle"
     workerCtx,
   );
 
-  const rawBytes = new Uint8Array(32).fill(1);
+  const rawBytes = asRawDekBytes(new Uint8Array(32).fill(1));
   const handle = await createWorkerKeyHandle(worker, rawBytes);
   const kek = new Uint8Array(32).fill(9);
   const wrapped = await handle.wrapWithKek(kek);
@@ -129,7 +129,7 @@ test("createWorkerKeyHandle: a worker-side error rejects the caller's promise wi
 
   const handle = await createWorkerKeyHandle(
     worker,
-    new Uint8Array(32).fill(1),
+    asRawDekBytes(new Uint8Array(32).fill(1)),
   );
   // Wrong AAD (different rowId) → GCM auth tag mismatch inside the worker → rejected here.
   const aad = { userId: handle.pid, table: "t", field: "f", rowId: "r" };
@@ -149,7 +149,7 @@ test("createWorkerKeyHandle: destroy() terminates the worker", async () => {
 
   const handle = await createWorkerKeyHandle(
     worker,
-    new Uint8Array(32).fill(1),
+    asRawDekBytes(new Uint8Array(32).fill(1)),
   );
   handle.destroy();
   assert.equal(isTerminated(), true);

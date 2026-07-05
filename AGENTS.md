@@ -25,23 +25,26 @@ memory of a past session.
 **This codebase is English-only — code, comments, docs, tests, error messages, test
 names.** No exceptions, even for a quick one-liner comment.
 
-## Package boundary — never import the host app's alias from inside `datacloak/`
+## Package boundary — never import your own package name from inside `datacloak/`
 
-`datacloak/` has its own `package.json` (real `dependencies`/optional `peerDependencies`)
-and its own `tsconfig.json` (no `paths`, no `@datacloak` alias — that alias only exists in
-the host application's config). Any file under `datacloak/` — including tests — must
-import the rest of the package via **relative paths** (`../core/types.ts`,
-`./testKeyHandle.ts`), never `@datacloak`/`@datacloak/*`. Run `npm run
-datacloak:typecheck` before declaring work done on anything inside `datacloak/` — it
-type-checks the package standalone and fails immediately if a file crossed this boundary
-by accident (this caught 4 real violations the first time it was written).
+`datacloak/` is a real npm package (`"name": "datacloak"`), linked into the the host app
+host app as an **npm workspace** (`"workspaces": ["datacloak"]` in the root
+`package.json`) — `node_modules/datacloak` is a real symlink, not a bundler path alias.
+It also has its own standalone `tsconfig.json` (no `paths` at all, no reliance on the
+host app's config). Any file under `datacloak/` — including tests — must import the rest
+of the package via **relative paths** (`../core/types.ts`, `./testKeyHandle.ts`), never
+its own package name (`datacloak`/`datacloak/*`) — that specifier is only meaningful for
+code OUTSIDE the package. Run `npm run datacloak:typecheck` before declaring work done on
+anything inside `datacloak/` — it type-checks the package standalone and fails
+immediately if a file crossed this boundary by accident (this caught 4 real violations
+the first time it was written).
 
-Also: `@datacloak` (the bare barrel, `index.ts`) exports **only `core/`** — never an
+Also: `datacloak` (the bare barrel, `index.ts`) exports **only `core/`** — never an
 adapter. `supabaseStorageAdapter`, `pgStorageAdapter`, `webauthnKeyProvider`,
 `mnemonicRecovery`, `workerKeyHandle` each live at their own file path
-(`@datacloak/adapters/<name>.ts`) so importing `@datacloak` for `defineStore` never drags
+(`datacloak/adapters/<name>.ts`) so importing `datacloak` for `defineStore` never drags
 in Supabase, a Postgres driver, or the WebAuthn browser API. The React binding
-(`useStore`/`tanstackAdapter`/...) is its own separate sub-entry, `@datacloak/react`, for
+(`useStore`/`tanstackAdapter`/...) is its own separate sub-entry, `datacloak/react`, for
 the same reason (never pulls React into a non-React consumer). See README's "Package
 boundary" section for the consumer-facing version of this rule.
 
@@ -166,7 +169,7 @@ content_hash = expected`, zero rows affected = conflict.
 automatically** — their cache slot holds `{data, hash}` internally, `save`/`update` call
 `saveIfMatch`/`updateIfMatch` transparently when the store has the lock configured, and a
 conflict rolls back the optimistic update and throws `OptimisticLockConflictError` (from
-`@datacloak/react`) instead of `{ok:false}` — app code using the hooks never sees
+`datacloak/react`) instead of `{ok:false}` — app code using the hooks never sees
 `expectedHash` at all. Only code calling `Store`/`KeyedStore`/`CollectionStore` directly
 (outside React) uses the raw `saveIfMatch`/`updateIfMatch` pattern above.
 

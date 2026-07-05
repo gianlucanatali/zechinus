@@ -24,14 +24,14 @@ export function configureSecureStore(config: SecureStoreConfig): void {
   current = config;
   lockUnsubscribe?.();
   lockUnsubscribe = null;
-  // Auto-wire "wipe cache on lock": whenever the DEK transitions to null, clear the
-  // cache once, centrally — not per `.use()` call, which would mean N redundant
-  // clears for N mounted stores. This is the framework's job, not the app's.
+  // Auto-wire "wipe cache on lock": whenever the crypto handle transitions to null,
+  // clear the cache once, centrally — not per `.use()` call, which would mean N
+  // redundant clears for N mounted stores. This is the framework's job, not the app's.
   if (config.keys && config.cache) {
     const { keys, cache } = config;
-    let wasUnlocked = keys.getDek() !== null;
+    let wasUnlocked = keys.getCryptoHandle() !== null;
     lockUnsubscribe = keys.subscribe(() => {
-      const isUnlocked = keys.getDek() !== null;
+      const isUnlocked = keys.getCryptoHandle() !== null;
       if (wasUnlocked && !isUnlocked) cache.clear();
       wasUnlocked = isUnlocked;
     });

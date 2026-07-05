@@ -15,6 +15,7 @@ import {
   defineStore,
   fingerprintSchema,
   createKeyHandle,
+  asRawDekBytes,
   type StorageAdapter,
   type BlobRecord,
 } from "../index.ts";
@@ -24,7 +25,11 @@ import {
 // example values are illustrative only, not meant to be reused verbatim.
 const EXAMPLE_PID_SALT = new Uint8Array(32).fill(7);
 const createDekHandle = (rawBytes: Uint8Array) =>
-  createKeyHandle(rawBytes, EXAMPLE_PID_SALT, "example-pid-info");
+  createKeyHandle(
+    asRawDekBytes(rawBytes),
+    EXAMPLE_PID_SALT,
+    "example-pid-info",
+  );
 
 /**
  * Minimal in-memory adapter, supports all 3 cardinalities. Examples/tests only.
@@ -85,7 +90,7 @@ const freshDek = () => createDekHandle(randomBytes(32));
 // ── 1. perUser — one blob per user (e.g. portfolio, asset) ─────────────────────────
 export async function perUserExample() {
   configureSecureStore({ storage: memoryAdapter() });
-  const dek = freshDek();
+  const cryptoHandle = freshDek();
 
   const Portfolio = z.object({ positions: z.array(z.string()).default([]) });
   const portfolioStore = defineStore({
@@ -97,14 +102,16 @@ export async function perUserExample() {
     schemaFingerprint: fingerprintSchema(Portfolio, "all"),
   });
 
-  await portfolioStore.save("u1", dek, { positions: ["AAPL", "MSFT"] });
-  return portfolioStore.load("u1", dek);
+  await portfolioStore.save("u1", cryptoHandle, {
+    positions: ["AAPL", "MSFT"],
+  });
+  return portfolioStore.load("u1", cryptoHandle);
 }
 
 // ── 2. perKey — one blob per (user, domain key) (e.g. transactions per month) ──────
 export async function perKeyExample() {
   configureSecureStore({ storage: memoryAdapter() });
-  const dek = freshDek();
+  const cryptoHandle = freshDek();
 
   const Batch = z.object({ transactions: z.array(z.string()).default([]) });
   const transactionStore = defineStore({
@@ -116,16 +123,16 @@ export async function perKeyExample() {
     schemaFingerprint: fingerprintSchema(Batch, "all"),
   });
 
-  await transactionStore.save("u1", dek, "2026-07", {
+  await transactionStore.save("u1", cryptoHandle, "2026-07", {
     transactions: ["expense"],
   });
-  return transactionStore.load("u1", dek, "2026-07");
+  return transactionStore.load("u1", cryptoHandle, "2026-07");
 }
 
 // ── 3. many — a collection with a generated id (e.g. rebalance simulations) ────────
 export async function manyExample() {
   configureSecureStore({ storage: memoryAdapter() });
-  const dek = freshDek();
+  const cryptoHandle = freshDek();
 
   const Simulation = z.object({
     name: z.string().default(""),
@@ -140,17 +147,17 @@ export async function manyExample() {
     schemaFingerprint: fingerprintSchema(Simulation, "all"),
   });
 
-  await simulationStore.create("u1", dek, {
+  await simulationStore.create("u1", cryptoHandle, {
     name: "sim-1",
     addedLiquidity: 500,
   });
-  return simulationStore.list("u1", dek);
+  return simulationStore.list("u1", cryptoHandle);
 }
 
 // ── 4. optimisticLock — reject a write if the row changed since it was last read ───
 export async function optimisticLockExample() {
   configureSecureStore({ storage: memoryAdapter() });
-  const dek = freshDek();
+  const cryptoHandle = freshDek();
 
   const Asset = z.object({ label: z.string().default("") });
   const assetStore = defineStore({
@@ -163,10 +170,15 @@ export async function optimisticLockExample() {
     optimisticLock: true,
   });
 
-  const first = await assetStore.saveIfMatch!("u1", dek, { label: "v1" }, null);
+  const first = await assetStore.saveIfMatch!(
+    "u1",
+    cryptoHandle,
+    { label: "v1" },
+    null,
+  );
   const second = await assetStore.saveIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     { label: "v2" },
     first.hash, // the hash saveIfMatch just returned — no extra fetch needed
   );
@@ -175,7 +187,7 @@ export async function optimisticLockExample() {
   // rejected — `{ ok: false }`, never thrown.
   const conflict = await assetStore.saveIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     { label: "v3-conflicting" },
     first.hash, // stale: "second" already moved the row past this hash
   );

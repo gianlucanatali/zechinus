@@ -73,7 +73,7 @@ test("optimisticLock (perKey): defineStore throws at definition time if optimist
 test("optimisticLock (perKey): saveIfMatch succeeds when expectedHash matches, independently per key", async () => {
   const adapter = conditionalKeyedAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "x_blobs",
@@ -88,7 +88,7 @@ test("optimisticLock (perKey): saveIfMatch succeeds when expectedHash matches, i
 
   const first = await store.saveIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     "2026-06",
     { count: 1 },
     null,
@@ -96,14 +96,18 @@ test("optimisticLock (perKey): saveIfMatch succeeds when expectedHash matches, i
   assert.equal(first.ok, true);
   assert.ok(first.hash);
 
-  const { data, hash } = await store.loadWithHash!("u1", dek, "2026-06");
+  const { data, hash } = await store.loadWithHash!(
+    "u1",
+    cryptoHandle,
+    "2026-06",
+  );
   assert.deepEqual(data, { count: 1 });
   assert.equal(hash, first.hash);
 
   // The hash returned by saveIfMatch is directly usable for the next write.
   const second = await store.saveIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     "2026-06",
     { count: 2 },
     first.hash,
@@ -111,28 +115,34 @@ test("optimisticLock (perKey): saveIfMatch succeeds when expectedHash matches, i
   assert.equal(second.ok, true);
   assert.ok(second.hash);
   assert.notEqual(second.hash, first.hash);
-  assert.deepEqual((await store.loadWithHash!("u1", dek, "2026-06")).data, {
-    count: 2,
-  });
+  assert.deepEqual(
+    (await store.loadWithHash!("u1", cryptoHandle, "2026-06")).data,
+    {
+      count: 2,
+    },
+  );
 
   // A different key is a fully independent lock — writing it doesn't touch "2026-06"'s.
   const otherKey = await store.saveIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     "2026-07",
     { count: 50 },
     null,
   );
   assert.equal(otherKey.ok, true);
-  assert.deepEqual((await store.loadWithHash!("u1", dek, "2026-06")).data, {
-    count: 2,
-  });
+  assert.deepEqual(
+    (await store.loadWithHash!("u1", cryptoHandle, "2026-06")).data,
+    {
+      count: 2,
+    },
+  );
 });
 
 test("optimisticLock (perKey): saveIfMatch fails (ok:false, no throw) when someone else wrote first", async () => {
   const adapter = conditionalKeyedAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "x_blobs",
@@ -145,16 +155,26 @@ test("optimisticLock (perKey): saveIfMatch fails (ok:false, no throw) when someo
     optimisticLock: true,
   });
 
-  await store.saveIfMatch!("u1", dek, "2026-06", { count: 1 }, null);
-  const { hash: staleHash } = await store.loadWithHash!("u1", dek, "2026-06");
+  await store.saveIfMatch!("u1", cryptoHandle, "2026-06", { count: 1 }, null);
+  const { hash: staleHash } = await store.loadWithHash!(
+    "u1",
+    cryptoHandle,
+    "2026-06",
+  );
 
   // A "concurrent tab" writes using the same starting hash, winning the race.
-  await store.saveIfMatch!("u1", dek, "2026-06", { count: 99 }, staleHash);
+  await store.saveIfMatch!(
+    "u1",
+    cryptoHandle,
+    "2026-06",
+    { count: 99 },
+    staleHash,
+  );
 
   // Our own write, still using the now-stale hash, must be rejected — not throw.
   const conflict = await store.saveIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     "2026-06",
     { count: 2 },
     staleHash,
@@ -163,9 +183,12 @@ test("optimisticLock (perKey): saveIfMatch fails (ok:false, no throw) when someo
   assert.equal(conflict.hash, null);
 
   // The winning write's value is untouched by our rejected attempt.
-  assert.deepEqual((await store.loadWithHash!("u1", dek, "2026-06")).data, {
-    count: 99,
-  });
+  assert.deepEqual(
+    (await store.loadWithHash!("u1", cryptoHandle, "2026-06")).data,
+    {
+      count: 99,
+    },
+  );
 });
 
 test("optimisticLock (perKey): adapter without putIfMatch → explicit error, not silent fallback", async () => {
@@ -177,7 +200,7 @@ test("optimisticLock (perKey): adapter without putIfMatch → explicit error, no
       async put() {},
     },
   });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "x_blobs",
@@ -191,7 +214,7 @@ test("optimisticLock (perKey): adapter without putIfMatch → explicit error, no
   });
 
   await assert.rejects(
-    () => store.saveIfMatch!("u1", dek, "2026-06", { count: 1 }, null),
+    () => store.saveIfMatch!("u1", cryptoHandle, "2026-06", { count: 1 }, null),
     /doesn't support optimistic locking \(putIfMatch missing\)/,
   );
 });

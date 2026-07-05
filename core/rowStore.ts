@@ -28,11 +28,11 @@ export interface RowReadIO {
  * hand.
  */
 export function canonicalAAD(
-  dek: CryptoHandle,
+  cryptoHandle: CryptoHandle,
   table: string,
-  rowId: string = dek.pid,
+  rowId: string = cryptoHandle.pid,
 ): FieldAAD {
-  return { userId: dek.pid, table, field: "data", rowId };
+  return { userId: cryptoHandle.pid, table, field: "data", rowId };
 }
 
 export interface LoadRowOpts<T> {
@@ -52,7 +52,7 @@ export interface LoadRowOpts<T> {
  * have schema access at this layer and skips it).
  */
 export async function loadRow<T>(
-  dek: CryptoHandle,
+  cryptoHandle: CryptoHandle,
   io: RowReadIO,
   aad: FieldAAD,
   opts: LoadRowOpts<T>,
@@ -60,7 +60,7 @@ export async function loadRow<T>(
 ): Promise<{ data: T; hash: string | null }> {
   const record = await io.get();
   const { data, upgraded } = await decodeWithLegacyFallback<T>({
-    dek,
+    cryptoHandle,
     record,
     canonicalAAD: aad,
     legacyAAD: opts.legacyAAD,
@@ -81,14 +81,20 @@ export async function loadRow<T>(
 }
 
 export async function saveRow<T>(
-  dek: CryptoHandle,
+  cryptoHandle: CryptoHandle,
   put: (record: BlobRecord) => Promise<void>,
   aad: FieldAAD,
   data: T,
   version: number,
   contentHash: boolean | undefined,
 ): Promise<void> {
-  const record = await encodeBlob(dek, aad, data, version, contentHash);
+  const record = await encodeBlob(
+    cryptoHandle,
+    aad,
+    data,
+    version,
+    contentHash,
+  );
   await put(record);
 }
 
@@ -105,7 +111,7 @@ export async function saveRow<T>(
  * hash to report; returning the stale one back would be misleading.
  */
 export async function saveRowIfMatch<T>(
-  dek: CryptoHandle,
+  cryptoHandle: CryptoHandle,
   putIfMatch:
     | ((record: BlobRecord, expectedHash: string | null) => Promise<boolean>)
     | undefined,
@@ -118,7 +124,7 @@ export async function saveRowIfMatch<T>(
   if (!putIfMatch) {
     throw new Error(missingCapabilityMsg);
   }
-  const record = await encodeBlob(dek, aad, data, version, true);
+  const record = await encodeBlob(cryptoHandle, aad, data, version, true);
   const ok = await putIfMatch(record, expectedHash);
   return { ok, hash: ok ? (record.contentHash ?? null) : null };
 }

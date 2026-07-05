@@ -26,30 +26,30 @@ function newAAD(userId: string, yearMonth: string): FieldAAD {
 }
 
 test("migrateLegacyAAD: no record yet → migrated:false, does NOT throw (legitimate empty state)", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const result = await migrateLegacyAAD(
-    dek,
+    cryptoHandle,
     null,
-    oldAAD(dek.pid, "2026-06"),
-    newAAD(dek.pid, "2026-06"),
+    oldAAD(cryptoHandle.pid, "2026-06"),
+    newAAD(cryptoHandle.pid, "2026-06"),
   );
   assert.deepEqual(result, { migrated: false });
 });
 
 test("migrateLegacyAAD: decrypts under the OLD AAD, re-encrypts under the NEW one, same plaintext", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const legacyRecord = await encodeBlob(
-    dek,
-    oldAAD(dek.pid, "2026-06"),
+    cryptoHandle,
+    oldAAD(cryptoHandle.pid, "2026-06"),
     { transactions: ["rent"] },
     1,
   );
 
   const result = await migrateLegacyAAD(
-    dek,
+    cryptoHandle,
     legacyRecord,
-    oldAAD(dek.pid, "2026-06"),
-    newAAD(dek.pid, "2026-06"),
+    oldAAD(cryptoHandle.pid, "2026-06"),
+    newAAD(cryptoHandle.pid, "2026-06"),
   );
 
   assert.equal(result.migrated, true);
@@ -62,8 +62,8 @@ test("migrateLegacyAAD: decrypts under the OLD AAD, re-encrypts under the NEW on
 
   // decrypting the migrated record under the NEW AAD returns the original plaintext
   const { data } = await decodeBlob<{ transactions: string[] }>(
-    dek,
-    newAAD(dek.pid, "2026-06"),
+    cryptoHandle,
+    newAAD(cryptoHandle.pid, "2026-06"),
     result.record!,
     1,
     [],
@@ -73,25 +73,29 @@ test("migrateLegacyAAD: decrypts under the OLD AAD, re-encrypts under the NEW on
 
   // and it's genuinely no longer decryptable under the OLD AAD (real migration, not a copy)
   await assert.rejects(() =>
-    decodeBlobStrict(dek, oldAAD(dek.pid, "2026-06"), result.record!),
+    decodeBlobStrict(
+      cryptoHandle,
+      oldAAD(cryptoHandle.pid, "2026-06"),
+      result.record!,
+    ),
   );
 });
 
 test("migrateLegacyAAD: preserves schemaVersion and contentHash from the source record", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const legacyRecord = await encodeBlob(
-    dek,
-    oldAAD(dek.pid, "2026-06"),
+    cryptoHandle,
+    oldAAD(cryptoHandle.pid, "2026-06"),
     { transactions: [] },
     3,
     true,
   );
 
   const result = await migrateLegacyAAD(
-    dek,
+    cryptoHandle,
     legacyRecord,
-    oldAAD(dek.pid, "2026-06"),
-    newAAD(dek.pid, "2026-06"),
+    oldAAD(cryptoHandle.pid, "2026-06"),
+    newAAD(cryptoHandle.pid, "2026-06"),
   );
 
   assert.equal(result.record!.schemaVersion, 3);
@@ -100,44 +104,49 @@ test("migrateLegacyAAD: preserves schemaVersion and contentHash from the source 
 });
 
 test("migrateLegacyAAD: wrong old-AAD guess → propagates the decrypt failure, never swallowed", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const legacyRecord = await encodeBlob(
-    dek,
-    oldAAD(dek.pid, "2026-06"),
+    cryptoHandle,
+    oldAAD(cryptoHandle.pid, "2026-06"),
     { transactions: ["rent"] },
     1,
   );
 
   const wrongGuess: FieldAAD = {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "transaction_blobs",
     field: "WRONG_FIELD_NAME", // app supplied an incorrect legacy AAD
     rowId: "2026-06",
   };
 
   await assert.rejects(() =>
-    migrateLegacyAAD(dek, legacyRecord, wrongGuess, newAAD(dek.pid, "2026-06")),
+    migrateLegacyAAD(
+      cryptoHandle,
+      legacyRecord,
+      wrongGuess,
+      newAAD(cryptoHandle.pid, "2026-06"),
+    ),
   );
 });
 
 test("migrateLegacyAAD: row exists but blob is empty → throws explicitly, does NOT silently report migrated:false", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const corruptRecord: BlobRecord = { schemaVersion: 1, blob: "" };
 
   await assert.rejects(
     () =>
       migrateLegacyAAD(
-        dek,
+        cryptoHandle,
         corruptRecord,
-        oldAAD(dek.pid, "2026-06"),
-        newAAD(dek.pid, "2026-06"),
+        oldAAD(cryptoHandle.pid, "2026-06"),
+        newAAD(cryptoHandle.pid, "2026-06"),
       ),
     /blob is missing\/empty/i,
   );
 });
 
 test("migrateLegacyAAD: row exists but blob is malformed (not enc: prefixed) → throws explicitly", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const corruptRecord: BlobRecord = {
     schemaVersion: 1,
     blob: "not-a-valid-encrypted-field",
@@ -145,20 +154,20 @@ test("migrateLegacyAAD: row exists but blob is malformed (not enc: prefixed) →
 
   await assert.rejects(() =>
     migrateLegacyAAD(
-      dek,
+      cryptoHandle,
       corruptRecord,
-      oldAAD(dek.pid, "2026-06"),
-      newAAD(dek.pid, "2026-06"),
+      oldAAD(cryptoHandle.pid, "2026-06"),
+      newAAD(cryptoHandle.pid, "2026-06"),
     ),
   );
 });
 
 // Strict decode (no empty-fallback) used only to assert the OLD AAD genuinely stops working.
 async function decodeBlobStrict(
-  dek: ReturnType<typeof createDekHandle>,
+  cryptoHandle: ReturnType<typeof createDekHandle>,
   aad: FieldAAD,
   record: BlobRecord,
 ): Promise<unknown> {
   const { parseEncField } = await import("../core/wireFormat.ts");
-  return dek.decryptJson(parseEncField(record.blob), aad);
+  return cryptoHandle.decryptJson(parseEncField(record.blob), aad);
 }

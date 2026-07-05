@@ -64,11 +64,11 @@ function conditionalMemoryStorage(): StorageAdapter & {
 }
 
 function fakeKeys(initial: CryptoHandle | null) {
-  let dek = initial;
+  let cryptoHandle = initial;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
-    getDek: () => dek,
-    getUserId: () => (dek ? "u1" : null),
+    getCryptoHandle: () => cryptoHandle,
+    getUserId: () => (cryptoHandle ? "u1" : null),
     subscribe(cb) {
       subs.add(cb);
       return () => subs.delete(cb);
@@ -77,7 +77,7 @@ function fakeKeys(initial: CryptoHandle | null) {
   return {
     provider,
     setDek(next: CryptoHandle | null) {
-      dek = next;
+      cryptoHandle = next;
       for (const cb of subs) cb();
     },
   };
@@ -112,7 +112,7 @@ describe("useStore", () => {
     __resetSecureStoreConfig();
   });
 
-  it("locked (no dek): returns no data, not loading, locked:true; save() throws", async () => {
+  it("locked (no cryptoHandle): returns no data, not loading, locked:true; save() throws", async () => {
     const storage = memoryStorage();
     const { provider } = fakeKeys(null);
     const cache = memoryCache();
@@ -138,8 +138,8 @@ describe("useStore", () => {
 
   it("unlocked, nothing saved yet: loads via store.load(), populates data, loading flips to false", async () => {
     const storage = memoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     const cache = memoryCache();
     configureSecureStore({ storage, keys: provider, cache });
 
@@ -160,8 +160,8 @@ describe("useStore", () => {
 
   it("save(): optimistic update immediately, then persists to storage", async () => {
     const storage = memoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     const cache = memoryCache();
     configureSecureStore({ storage, keys: provider, cache });
 
@@ -186,8 +186,8 @@ describe("useStore", () => {
   });
 
   it("save(): rolls back the optimistic value if the underlying store.save() rejects", async () => {
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     const cache = memoryCache();
     const failingStorage: StorageAdapter = {
       async get() {
@@ -220,10 +220,10 @@ describe("useStore", () => {
     expect(result.current.data).toEqual({ positions: [] });
   });
 
-  it("lock (dek → null) after being unlocked: cache clears, hook reflects locked state", async () => {
+  it("lock (cryptoHandle → null) after being unlocked: cache clears, hook reflects locked state", async () => {
     const storage = memoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider, setDek } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider, setDek } = fakeKeys(cryptoHandle);
     const cache = memoryCache();
     configureSecureStore({ storage, keys: provider, cache });
 
@@ -248,8 +248,8 @@ describe("useStore", () => {
 
   it("optimisticLock: save() threads the hash automatically — caller never passes one", async () => {
     const storage = conditionalMemoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     const cache = memoryCache();
     configureSecureStore({ storage, keys: provider, cache });
 
@@ -281,8 +281,8 @@ describe("useStore", () => {
 
   it("optimisticLock: a conflicting concurrent write makes the next save() throw OptimisticLockConflictError and roll back", async () => {
     const storage = conditionalMemoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     const cache = memoryCache();
     configureSecureStore({ storage, keys: provider, cache });
 
@@ -304,10 +304,10 @@ describe("useStore", () => {
     });
 
     // A "concurrent tab" writes directly through the store, bypassing this hook's cache.
-    const { hash } = await store.loadWithHash!("u1", dek);
+    const { hash } = await store.loadWithHash!("u1", cryptoHandle);
     await store.saveIfMatch!(
       "u1",
-      dek,
+      cryptoHandle,
       { positions: ["concurrent-write"] },
       hash,
     );

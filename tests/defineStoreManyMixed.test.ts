@@ -68,7 +68,7 @@ const Sim = z.object({
 test("defineStore many + mixed enc(): plaintext columns do NOT go through encryption", async () => {
   const adapter = mixedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -78,21 +78,23 @@ test("defineStore many + mixed enc(): plaintext columns do NOT go through encryp
     schemaFingerprint: fingerprintSchema(Sim, "fields"),
   });
 
-  const id = await store.create(dek.pid, dek, {
+  const id = await store.create(cryptoHandle.pid, cryptoHandle, {
     portfolioId: "pf-1",
     status: "draft",
     name: "secret-sim",
     addedLiquidity: 500,
   });
 
-  const raw = adapter.rows.get(`rebalance_simulations:${dek.pid}:${id}`)!;
+  const raw = adapter.rows.get(
+    `rebalance_simulations:${cryptoHandle.pid}:${id}`,
+  )!;
   // plaintext columns are real values, not ciphertext
   assert.deepEqual(raw.plain, { portfolioId: "pf-1", status: "draft" });
   // the secret never appears in plaintext in the row
   assert.ok(raw.record.blob.startsWith("enc:"));
   assert.ok(!JSON.stringify(raw.plain).includes("secret-sim"));
 
-  const rows = await store.list(dek.pid, dek);
+  const rows = await store.list(cryptoHandle.pid, cryptoHandle);
   assert.equal(rows.length, 1);
   assert.deepEqual(rows[0].data, {
     portfolioId: "pf-1",
@@ -105,7 +107,7 @@ test("defineStore many + mixed enc(): plaintext columns do NOT go through encryp
 test("defineStore many + mixed enc(): update/remove roundtrip", async () => {
   const adapter = mixedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -115,20 +117,20 @@ test("defineStore many + mixed enc(): update/remove roundtrip", async () => {
     schemaFingerprint: fingerprintSchema(Sim, "fields"),
   });
 
-  const id = await store.create(dek.pid, dek, {
+  const id = await store.create(cryptoHandle.pid, cryptoHandle, {
     portfolioId: "pf-1",
     status: "draft",
     name: "v1",
     addedLiquidity: 1,
   });
 
-  await store.update(dek.pid, dek, id, {
+  await store.update(cryptoHandle.pid, cryptoHandle, id, {
     portfolioId: "pf-1",
     status: "executed",
     name: "v2",
     addedLiquidity: 2,
   });
-  const afterUpdate = await store.list(dek.pid, dek);
+  const afterUpdate = await store.list(cryptoHandle.pid, cryptoHandle);
   assert.deepEqual(afterUpdate[0].data, {
     portfolioId: "pf-1",
     status: "executed",
@@ -136,14 +138,14 @@ test("defineStore many + mixed enc(): update/remove roundtrip", async () => {
     addedLiquidity: 2,
   });
 
-  await store.remove(dek.pid, dek, id);
-  assert.deepEqual(await store.list(dek.pid, dek), []);
+  await store.remove(cryptoHandle.pid, cryptoHandle, id);
+  assert.deepEqual(await store.list(cryptoHandle.pid, cryptoHandle), []);
 });
 
 test("defineStore many + mixed enc(): the AAD is bound to the id (the blob isn't movable between rows)", async () => {
   const adapter = mixedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -153,19 +155,21 @@ test("defineStore many + mixed enc(): the AAD is bound to the id (the blob isn't
     schemaFingerprint: fingerprintSchema(Sim, "fields"),
   });
 
-  const id1 = await store.create(dek.pid, dek, {
+  const id1 = await store.create(cryptoHandle.pid, cryptoHandle, {
     portfolioId: "pf-1",
     status: "draft",
     name: "secret",
     addedLiquidity: 1,
   });
-  const stolen = adapter.rows.get(`rebalance_simulations:${dek.pid}:${id1}`)!;
-  adapter.rows.set(`rebalance_simulations:${dek.pid}:other-id`, {
+  const stolen = adapter.rows.get(
+    `rebalance_simulations:${cryptoHandle.pid}:${id1}`,
+  )!;
+  adapter.rows.set(`rebalance_simulations:${cryptoHandle.pid}:other-id`, {
     record: stolen.record,
     plain: { portfolioId: "pf-1", status: "draft" },
   });
 
-  await assert.rejects(() => store.list(dek.pid, dek));
+  await assert.rejects(() => store.list(cryptoHandle.pid, cryptoHandle));
 });
 
 test("defineStore: mixed enc() fields with identity perUser/perKey → explicit error (only 'many' in v1)", () => {
@@ -184,7 +188,7 @@ test("defineStore: mixed enc() fields with identity perUser/perKey → explicit 
 test("defineStore many + mixed enc(): Zod validation on create rejects non-conforming data", async () => {
   const adapter = mixedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -196,7 +200,7 @@ test("defineStore many + mixed enc(): Zod validation on create rejects non-confo
 
   await assert.rejects(
     () =>
-      store.create(dek.pid, dek, {
+      store.create(cryptoHandle.pid, cryptoHandle, {
         portfolioId: "pf-1",
         status: "draft",
         // @ts-expect-error — name must be a string: intentional error

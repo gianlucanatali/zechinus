@@ -41,7 +41,10 @@ export function useKeyedStore<T>(
     );
   }
 
-  const dek = useSyncExternalStore(keys.subscribe, keys.getDek);
+  const cryptoHandle = useSyncExternalStore(
+    keys.subscribe,
+    keys.getCryptoHandle,
+  );
   const userId = useSyncExternalStore(keys.subscribe, keys.getUserId);
   const cacheKey = `${store.name}:${userId ?? ""}:${key}`;
 
@@ -57,12 +60,14 @@ export function useKeyedStore<T>(
 
   useEffect(() => {
     setError(null);
-    if (!dek || !userId) return;
+    if (!cryptoHandle || !userId) return;
     if (cache.get<CacheEntry<T>>(cacheKey) !== undefined) return;
     let cancelled = false;
     const fetch = store.loadWithHash
-      ? store.loadWithHash(userId, dek, key)
-      : store.load(userId, dek, key).then((data) => ({ data, hash: null }));
+      ? store.loadWithHash(userId, cryptoHandle, key)
+      : store
+          .load(userId, cryptoHandle, key)
+          .then((data) => ({ data, hash: null }));
     fetch
       .then((entry) => {
         if (!cancelled) cache.set(cacheKey, entry);
@@ -73,13 +78,13 @@ export function useKeyedStore<T>(
     return () => {
       cancelled = true;
     };
-  }, [dek, userId, key, cacheKey, cache, store]);
+  }, [cryptoHandle, userId, key, cacheKey, cache, store]);
 
   const save = useCallback(
     async (data: T) => {
-      if (!dek || !userId) {
+      if (!cryptoHandle || !userId) {
         throw new Error(
-          `${store.name}.use().save(): called while locked (no dek/userId)`,
+          `${store.name}.use().save(): called while locked (no cryptoHandle/userId)`,
         );
       }
       const previous = cache.get<CacheEntry<T>>(cacheKey);
@@ -88,7 +93,7 @@ export function useKeyedStore<T>(
         if (store.saveIfMatch) {
           const result = await store.saveIfMatch(
             userId,
-            dek,
+            cryptoHandle,
             key,
             data,
             previous?.hash ?? null,
@@ -96,7 +101,7 @@ export function useKeyedStore<T>(
           if (!result.ok) throw new OptimisticLockConflictError(store.name);
           cache.set(cacheKey, { data, hash: result.hash });
         } else {
-          await store.save(userId, dek, key, data);
+          await store.save(userId, cryptoHandle, key, data);
           cache.set(cacheKey, { data, hash: null });
         }
       } catch (e) {
@@ -104,13 +109,14 @@ export function useKeyedStore<T>(
         throw e;
       }
     },
-    [dek, userId, key, cacheKey, cache, store],
+    [cryptoHandle, userId, key, cacheKey, cache, store],
   );
 
   return {
     data: cached?.data,
-    loading: !!dek && !!userId && cached === undefined && error === null,
-    locked: !dek || !userId,
+    loading:
+      !!cryptoHandle && !!userId && cached === undefined && error === null,
+    locked: !cryptoHandle || !userId,
     error,
     save,
   };

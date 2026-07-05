@@ -20,6 +20,8 @@ import {
   wrapKey,
   unwrapKey,
   createKeyHandle,
+  asRawDekBytes,
+  bindKeyHandleFactory,
 } from "../core/keyDerivation.ts";
 
 function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
@@ -109,14 +111,14 @@ test("wrapKey / unwrapKey: unwrapping with the wrong KEK throws (GCM auth tag mi
 test("createKeyHandle: .pid matches derivePID with the same salt/info", () => {
   const key = bytesFromRange(32, (i) => i);
   const pidSalt = bytesFromRange(32, (i) => i * 7);
-  const handle = createKeyHandle(key, pidSalt, "test-pid-info");
+  const handle = createKeyHandle(asRawDekBytes(key), pidSalt, "test-pid-info");
   assert.equal(handle.pid, derivePID(key, pidSalt, "test-pid-info"));
 });
 
 test("createKeyHandle: encryptJson/decryptJson roundtrip, AAD-bound", async () => {
   const key = bytesFromRange(32, (i) => i);
   const handle = createKeyHandle(
-    key,
+    asRawDekBytes(key),
     bytesFromRange(32, (i) => i * 7),
     "info",
   );
@@ -136,7 +138,7 @@ test("createKeyHandle: encryptJson/decryptJson roundtrip, AAD-bound", async () =
 test("createKeyHandle: encryptField/decryptField roundtrip", async () => {
   const key = bytesFromRange(32, (i) => i);
   const handle = createKeyHandle(
-    key,
+    asRawDekBytes(key),
     bytesFromRange(32, (i) => i * 7),
     "info",
   );
@@ -149,7 +151,7 @@ test("createKeyHandle: encryptField/decryptField roundtrip", async () => {
 test("createKeyHandle: wrapWithKek produces a wrapped key unwrappable by wrapKey/unwrapKey", async () => {
   const key = bytesFromRange(32, (i) => i);
   const handle = createKeyHandle(
-    key,
+    asRawDekBytes(key),
     bytesFromRange(32, (i) => i * 7),
     "info",
   );
@@ -160,10 +162,31 @@ test("createKeyHandle: wrapWithKek produces a wrapped key unwrappable by wrapKey
   assert.deepEqual(unwrapped, key);
 });
 
+test("bindKeyHandleFactory: bound factory produces the same handle as calling createKeyHandle directly", () => {
+  const key = bytesFromRange(32, (i) => i);
+  const pidSalt = bytesFromRange(32, (i) => i * 7);
+  const makeHandle = bindKeyHandleFactory(pidSalt, "test-pid-info");
+  const bound = makeHandle(asRawDekBytes(key));
+  const direct = createKeyHandle(asRawDekBytes(key), pidSalt, "test-pid-info");
+  assert.equal(bound.pid, direct.pid);
+});
+
+test("bindKeyHandleFactory: each call to the bound factory is independent (fresh key copy, own destroy)", () => {
+  const pidSalt = bytesFromRange(32, (i) => i * 7);
+  const makeHandle = bindKeyHandleFactory(pidSalt, "test-pid-info");
+  const keyA = bytesFromRange(32, (i) => i);
+  const keyB = bytesFromRange(32, (i) => 31 - i);
+  const a = makeHandle(asRawDekBytes(keyA));
+  const b = makeHandle(asRawDekBytes(keyB));
+  assert.notEqual(a.pid, b.pid);
+  a.destroy();
+  assert.equal(b.pid, derivePID(keyB, pidSalt, "test-pid-info"));
+});
+
 test("createKeyHandle: destroy() zeroes the internal key bytes", async () => {
   const key = bytesFromRange(32, (i) => i + 1); // no zero bytes, so zeroing is observable
   const handle = createKeyHandle(
-    key,
+    asRawDekBytes(key),
     bytesFromRange(32, (i) => i * 7),
     "info",
   );

@@ -29,7 +29,7 @@ export interface LegacyMigrationResult {
 }
 
 export async function migrateLegacyAAD(
-  dek: CryptoHandle,
+  cryptoHandle: CryptoHandle,
   record: BlobRecord | null,
   oldAAD: FieldAAD,
   newAAD: FieldAAD,
@@ -52,11 +52,11 @@ export async function migrateLegacyAAD(
 
   // Let this throw naturally on a GCM auth-tag mismatch (wrong oldAAD guess, wrong DEK,
   // or genuinely corrupt ciphertext) — never caught/swallowed here.
-  const raw = await dek.decryptJson<unknown>(
+  const raw = await cryptoHandle.decryptJson<unknown>(
     parseEncField(record.blob),
     oldAAD,
   );
-  const reEncrypted = await dek.encryptJson(raw, newAAD);
+  const reEncrypted = await cryptoHandle.encryptJson(raw, newAAD);
 
   return {
     migrated: true,

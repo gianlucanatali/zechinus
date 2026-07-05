@@ -95,11 +95,32 @@ export interface KeyHandle extends CryptoHandle {
 }
 
 /**
+ * Branded raw key material — the actual DEK bytes, before being wrapped into a
+ * `KeyHandle`. The brand is compile-time-only (erased at runtime — it does NOT stop
+ * `console.log`, a debugger, or any other runtime inspection): its job is to make
+ * every boundary crossing of this value an explicit, typed decision instead of an
+ * accident. A plain `Uint8Array` already in scope (a file buffer, a nonce, an
+ * unrelated hash) can't silently flow into a DEK-shaped parameter, and a DEK can't
+ * silently flow into a function expecting generic bytes, without an explicit cast at
+ * that specific call site. See `asRawDekBytes` — call it exactly once, at the point
+ * the key material is first obtained (WebAuthn PRF output, a password KDF result,
+ * ...), immediately before handing it to `createKeyHandle`.
+ */
+export type RawDekBytes = Uint8Array & {
+  readonly __rawDekBytes: unique symbol;
+};
+
+/** Marks raw bytes as DEK material. See `RawDekBytes` for what this does and doesn't guard against. */
+export function asRawDekBytes(bytes: Uint8Array): RawDekBytes {
+  return bytes as RawDekBytes;
+}
+
+/**
  * Builds a `KeyHandle` from raw key bytes. The bytes are copied into a private
  * closure — the caller can zero their own copy immediately after calling this.
  */
 export function createKeyHandle(
-  rawBytes: Uint8Array,
+  rawBytes: RawDekBytes,
   pidSalt: Uint8Array,
   pidInfo: string,
 ): KeyHandle {
@@ -117,4 +138,17 @@ export function createKeyHandle(
       clean(key);
     },
   };
+}
+
+/**
+ * Binds `createKeyHandle` to a fixed `pidSalt`/`pidInfo`, returning a ready-to-use
+ * `(rawBytes) => KeyHandle` factory. Every app ends up writing this exact one-line
+ * partial application (its own salt/info are the only thing that ever differs) — so
+ * the binding itself lives here, not re-typed per app.
+ */
+export function bindKeyHandleFactory(
+  pidSalt: Uint8Array,
+  pidInfo: string,
+): (rawBytes: RawDekBytes) => KeyHandle {
+  return (rawBytes) => createKeyHandle(rawBytes, pidSalt, pidInfo);
 }

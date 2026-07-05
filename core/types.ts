@@ -152,14 +152,16 @@ export interface StorageAdapter {
 }
 
 /**
- * Key lifecycle port — where the DEK and current user id live. Deliberately NOT
- * React-hook-shaped (no `useDek()`): a plain subscribable snapshot, so any binding
- * (React via `useSyncExternalStore`, or something else entirely) can read it without
- * the port itself being subject to the Rules of Hooks. `subscribe` fires on any
- * change: unlock, lock, user switch.
+ * Key lifecycle port — where the current crypto handle and user id live. Returns a
+ * `CryptoHandle` (a capability object), never the raw DEK bytes — those are
+ * confined to the Worker that derives them (see `RawDekBytes`/`asRawDekBytes`).
+ * Deliberately NOT React-hook-shaped (no `useCryptoHandle()`): a plain subscribable
+ * snapshot, so any binding (React via `useSyncExternalStore`, or something else
+ * entirely) can read it without the port itself being subject to the Rules of
+ * Hooks. `subscribe` fires on any change: unlock, lock, user switch.
  */
 export interface KeyProvider {
-  getDek(): CryptoHandle | null;
+  getCryptoHandle(): CryptoHandle | null;
   getUserId(): string | null;
   subscribe(callback: () => void): () => void;
 }
@@ -174,6 +176,6 @@ export interface CacheAdapter {
   get<T>(key: string): T | undefined;
   set<T>(key: string, data: T): void;
   subscribe(key: string, callback: () => void): () => void;
-  /** Wipes everything this adapter holds — called automatically on lock (dek → null). */
+  /** Wipes everything this adapter holds — called automatically on lock (cryptoHandle → null). */
   clear(): void;
 }

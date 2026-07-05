@@ -19,7 +19,7 @@ import type { BlobMigrator } from "./versioning.ts";
 import type { BlobRecord, CryptoHandle, FieldAAD } from "./types.ts";
 
 export interface DecodeWithLegacyFallbackParams<T> {
-  dek: CryptoHandle;
+  cryptoHandle: CryptoHandle;
   record: BlobRecord | null;
   canonicalAAD: FieldAAD;
   /** Omit when the store has no `legacyAAD` configured — the canonical error propagates as-is. */
@@ -36,7 +36,7 @@ export async function decodeWithLegacyFallback<T>(
 ): Promise<DecodeResult<T>> {
   try {
     return await decodeBlob<T>(
-      params.dek,
+      params.cryptoHandle,
       params.canonicalAAD,
       params.record,
       params.version,
@@ -46,7 +46,7 @@ export async function decodeWithLegacyFallback<T>(
   } catch (canonicalError) {
     if (!params.legacyAAD) throw canonicalError;
     const migration = await migrateLegacyAAD(
-      params.dek,
+      params.cryptoHandle,
       params.record,
       params.legacyAAD,
       params.canonicalAAD,
@@ -58,7 +58,7 @@ export async function decodeWithLegacyFallback<T>(
     }
     await params.persistMigrated(migration.record);
     return decodeBlob<T>(
-      params.dek,
+      params.cryptoHandle,
       params.canonicalAAD,
       migration.record,
       params.version,

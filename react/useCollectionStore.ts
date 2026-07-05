@@ -43,7 +43,10 @@ export function useCollectionStore<T>(
 
   type Items = Array<{ id: string; data: T; hash: string | null }>;
 
-  const dek = useSyncExternalStore(keys.subscribe, keys.getDek);
+  const cryptoHandle = useSyncExternalStore(
+    keys.subscribe,
+    keys.getCryptoHandle,
+  );
   const userId = useSyncExternalStore(keys.subscribe, keys.getUserId);
   const cacheKey = `${store.name}:${userId ?? ""}`;
 
@@ -59,11 +62,11 @@ export function useCollectionStore<T>(
 
   useEffect(() => {
     setError(null);
-    if (!dek || !userId) return;
+    if (!cryptoHandle || !userId) return;
     if (cache.get<Items>(cacheKey) !== undefined) return;
     let cancelled = false;
     store
-      .list(userId, dek)
+      .list(userId, cryptoHandle)
       .then((items) => {
         if (!cancelled) cache.set(cacheKey, items);
       })
@@ -73,26 +76,26 @@ export function useCollectionStore<T>(
     return () => {
       cancelled = true;
     };
-  }, [dek, userId, cacheKey, cache, store]);
+  }, [cryptoHandle, userId, cacheKey, cache, store]);
 
   const requireUnlocked = useCallback(
     (op: string) => {
-      if (!dek || !userId) {
+      if (!cryptoHandle || !userId) {
         throw new Error(
-          `${store.name}.use().${op}(): called while locked (no dek/userId)`,
+          `${store.name}.use().${op}(): called while locked (no cryptoHandle/userId)`,
         );
       }
-      return { dek, userId };
+      return { cryptoHandle, userId };
     },
-    [dek, userId, store.name],
+    [cryptoHandle, userId, store.name],
   );
 
   const create = useCallback(
     async (data: T): Promise<string> => {
-      const { dek, userId } = requireUnlocked("create");
+      const { cryptoHandle, userId } = requireUnlocked("create");
       const previous = cache.get<Items>(cacheKey) ?? [];
       try {
-        const id = await store.create(userId, dek, data);
+        const id = await store.create(userId, cryptoHandle, data);
         cache.set(cacheKey, [...previous, { id, data, hash: null }]);
         return id;
       } catch (e) {
@@ -105,7 +108,7 @@ export function useCollectionStore<T>(
 
   const update = useCallback(
     async (id: string, data: T): Promise<void> => {
-      const { dek, userId } = requireUnlocked("update");
+      const { cryptoHandle, userId } = requireUnlocked("update");
       const previous = cache.get<Items>(cacheKey) ?? [];
       const currentHash = previous.find((item) => item.id === id)?.hash ?? null;
       cache.set(
@@ -118,7 +121,7 @@ export function useCollectionStore<T>(
         if (store.updateIfMatch) {
           const result = await store.updateIfMatch(
             userId,
-            dek,
+            cryptoHandle,
             id,
             data,
             currentHash,
@@ -131,7 +134,7 @@ export function useCollectionStore<T>(
             ),
           );
         } else {
-          await store.update(userId, dek, id, data);
+          await store.update(userId, cryptoHandle, id, data);
           cache.set(
             cacheKey,
             previous.map((item) =>
@@ -149,14 +152,14 @@ export function useCollectionStore<T>(
 
   const remove = useCallback(
     async (id: string): Promise<void> => {
-      const { dek, userId } = requireUnlocked("remove");
+      const { cryptoHandle, userId } = requireUnlocked("remove");
       const previous = cache.get<Items>(cacheKey) ?? [];
       cache.set(
         cacheKey,
         previous.filter((item) => item.id !== id),
       );
       try {
-        await store.remove(userId, dek, id);
+        await store.remove(userId, cryptoHandle, id);
       } catch (e) {
         cache.set(cacheKey, previous);
         throw e;
@@ -167,8 +170,9 @@ export function useCollectionStore<T>(
 
   return {
     items: cached ?? [],
-    loading: !!dek && !!userId && cached === undefined && error === null,
-    locked: !dek || !userId,
+    loading:
+      !!cryptoHandle && !!userId && cached === undefined && error === null,
+    locked: !cryptoHandle || !userId,
     error,
     create,
     update,

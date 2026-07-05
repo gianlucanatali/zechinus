@@ -64,11 +64,11 @@ function conditionalKeyedStorage(): StorageAdapter & {
 }
 
 function fakeKeys(initial: CryptoHandle | null) {
-  let dek = initial;
+  let cryptoHandle = initial;
   const subs = new Set<() => void>();
   const provider: KeyProvider = {
-    getDek: () => dek,
-    getUserId: () => (dek ? "u1" : null),
+    getCryptoHandle: () => cryptoHandle,
+    getUserId: () => (cryptoHandle ? "u1" : null),
     subscribe(cb) {
       subs.add(cb);
       return () => subs.delete(cb);
@@ -77,7 +77,7 @@ function fakeKeys(initial: CryptoHandle | null) {
   return {
     provider,
     setDek(next: CryptoHandle | null) {
-      dek = next;
+      cryptoHandle = next;
       for (const cb of subs) cb();
     },
   };
@@ -137,10 +137,10 @@ describe("useKeyedStore", () => {
     );
   });
 
-  it("unlocked: loads via store.load(userId,dek,key), keys are independent per month", async () => {
+  it("unlocked: loads via store.load(userId,cryptoHandle,key), keys are independent per month", async () => {
     const storage = keyedMemoryStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "transaction_blobs",
@@ -150,7 +150,7 @@ describe("useKeyedStore", () => {
       version: 1,
       schemaFingerprint: fingerprintSchema(Batch, "all"),
     });
-    await store.save("u1", dek, "2026-06", { transactions: ["june"] });
+    await store.save("u1", cryptoHandle, "2026-06", { transactions: ["june"] });
 
     const june = renderHook(() => useKeyedStore(store, "2026-06"));
     const july = renderHook(() => useKeyedStore(store, "2026-07"));
@@ -163,8 +163,8 @@ describe("useKeyedStore", () => {
   });
 
   it("save(): optimistic then persists; rollback on failure", async () => {
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     let shouldFail = false;
     const storage: StorageAdapter = {
       async get() {
@@ -203,8 +203,8 @@ describe("useKeyedStore", () => {
 
   it("optimisticLock: save() threads the hash automatically per key, independently across keys", async () => {
     const storage = conditionalKeyedStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "transaction_blobs",
@@ -231,8 +231,8 @@ describe("useKeyedStore", () => {
 
   it("optimisticLock: a conflicting concurrent write on the same key makes save() throw and roll back", async () => {
     const storage = conditionalKeyedStorage();
-    const dek = createDekHandle(randomBytes(32));
-    const { provider } = fakeKeys(dek);
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
     configureSecureStore({ storage, keys: provider, cache: memoryCache() });
     const store = defineStore({
       name: "transaction_blobs",
@@ -252,10 +252,10 @@ describe("useKeyedStore", () => {
       await result.current.save({ transactions: ["mine"] });
     });
 
-    const { hash } = await store.loadWithHash!("u1", dek, "2026-06");
+    const { hash } = await store.loadWithHash!("u1", cryptoHandle, "2026-06");
     await store.saveIfMatch!(
       "u1",
-      dek,
+      cryptoHandle,
       "2026-06",
       { transactions: ["concurrent"] },
       hash,

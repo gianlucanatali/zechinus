@@ -29,14 +29,14 @@ import type {
 
 /** Encrypts `data` (versioned envelope) under the given AAD → `BlobRecord` ready for storage. */
 export async function encodeBlob<T>(
-  dek: CryptoHandle,
+  cryptoHandle: CryptoHandle,
   aad: FieldAAD,
   data: T,
   version: number,
   computeContentHash?: boolean,
 ): Promise<BlobRecord> {
   const envelope = toEnvelope(data, version);
-  const enc = await dek.encryptJson(envelope, aad);
+  const enc = await cryptoHandle.encryptJson(envelope, aad);
   const record: BlobRecord = {
     schemaVersion: version,
     blob: serializeEncField(enc),
@@ -58,7 +58,7 @@ export interface DecodeResult<T> {
  * to a different slot).
  */
 export async function decodeBlob<T>(
-  dek: CryptoHandle,
+  cryptoHandle: CryptoHandle,
   aad: FieldAAD,
   record: BlobRecord | null,
   version: number,
@@ -70,7 +70,7 @@ export async function decodeBlob<T>(
   }
   const dbVersion = record.schemaVersion ?? 1;
   const parsed: EncryptedField = parseEncField(record.blob);
-  const raw = await dek.decryptJson<unknown>(parsed, aad);
+  const raw = await cryptoHandle.decryptJson<unknown>(parsed, aad);
   const { data, authenticatedVersion } = fromEnvelope<T>(raw, dbVersion);
   const { data: migrated, upgraded } = runMigrations<T>(
     data,

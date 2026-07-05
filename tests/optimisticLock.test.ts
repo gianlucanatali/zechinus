@@ -63,7 +63,7 @@ test("optimisticLock: defineBlobStore throws at definition time if optimisticLoc
 test("optimisticLock: saveIfMatch succeeds when expectedHash matches the stored one", async () => {
   const adapter = conditionalMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineBlobStore<Data>({
     name: "x_blobs",
@@ -73,27 +73,39 @@ test("optimisticLock: saveIfMatch succeeds when expectedHash matches the stored 
     optimisticLock: true,
   });
 
-  const first = await store.saveIfMatch!("u1", dek, { count: 1 }, null);
+  const first = await store.saveIfMatch!(
+    "u1",
+    cryptoHandle,
+    { count: 1 },
+    null,
+  );
   assert.equal(first.ok, true);
   assert.ok(first.hash);
 
-  const { data, hash } = await store.loadWithHash!("u1", dek);
+  const { data, hash } = await store.loadWithHash!("u1", cryptoHandle);
   assert.deepEqual(data, { count: 1 });
   assert.equal(hash, first.hash);
 
   // The hash returned by saveIfMatch is directly usable for the next write — no
   // extra fetch needed to learn the new "current" hash.
-  const second = await store.saveIfMatch!("u1", dek, { count: 2 }, first.hash);
+  const second = await store.saveIfMatch!(
+    "u1",
+    cryptoHandle,
+    { count: 2 },
+    first.hash,
+  );
   assert.equal(second.ok, true);
   assert.ok(second.hash);
   assert.notEqual(second.hash, first.hash);
-  assert.deepEqual((await store.loadWithHash!("u1", dek)).data, { count: 2 });
+  assert.deepEqual((await store.loadWithHash!("u1", cryptoHandle)).data, {
+    count: 2,
+  });
 });
 
 test("optimisticLock: saveIfMatch fails (ok:false, no throw) when someone else wrote first", async () => {
   const adapter = conditionalMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineBlobStore<Data>({
     name: "x_blobs",
@@ -103,19 +115,26 @@ test("optimisticLock: saveIfMatch fails (ok:false, no throw) when someone else w
     optimisticLock: true,
   });
 
-  await store.saveIfMatch!("u1", dek, { count: 1 }, null);
-  const { hash: staleHash } = await store.loadWithHash!("u1", dek);
+  await store.saveIfMatch!("u1", cryptoHandle, { count: 1 }, null);
+  const { hash: staleHash } = await store.loadWithHash!("u1", cryptoHandle);
 
   // A "concurrent tab" writes using the same starting hash, winning the race.
-  await store.saveIfMatch!("u1", dek, { count: 99 }, staleHash);
+  await store.saveIfMatch!("u1", cryptoHandle, { count: 99 }, staleHash);
 
   // Our own write, still using the now-stale hash, must be rejected — not throw.
-  const conflict = await store.saveIfMatch!("u1", dek, { count: 2 }, staleHash);
+  const conflict = await store.saveIfMatch!(
+    "u1",
+    cryptoHandle,
+    { count: 2 },
+    staleHash,
+  );
   assert.equal(conflict.ok, false);
   assert.equal(conflict.hash, null); // no misleading hash on a rejected write
 
   // The winning write's value is untouched by our rejected attempt.
-  assert.deepEqual((await store.loadWithHash!("u1", dek)).data, { count: 99 });
+  assert.deepEqual((await store.loadWithHash!("u1", cryptoHandle)).data, {
+    count: 99,
+  });
 });
 
 test("optimisticLock: adapter without putIfMatch → explicit error, not silent fallback", async () => {
@@ -127,7 +146,7 @@ test("optimisticLock: adapter without putIfMatch → explicit error, not silent 
       async put() {},
     },
   });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineBlobStore<Data>({
     name: "x_blobs",
@@ -138,7 +157,7 @@ test("optimisticLock: adapter without putIfMatch → explicit error, not silent 
   });
 
   await assert.rejects(
-    () => store.saveIfMatch!("u1", dek, { count: 1 }, null),
+    () => store.saveIfMatch!("u1", cryptoHandle, { count: 1 }, null),
     /doesn't support optimistic locking \(putIfMatch missing\)/,
   );
 });

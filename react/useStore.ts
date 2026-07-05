@@ -3,7 +3,7 @@
  * method on the store object, so `core/` stays React-free. Requires `keys` and
  * `cache` in `configureSecureStore` (throws an explicit error otherwise).
  *
- * What it hides from the caller: dek+userId gating, cache read/subscribe, the
+ * What it hides from the caller: cryptoHandle+userId gating, cache read/subscribe, the
  * initial `store.load()` fetch, and optimistic write-through with rollback on
  * `save()` failure. Wipe-on-lock is centralized in `core/config.ts`, not here — one
  * subscription for the whole app, not one per mounted `useStore()` call.
@@ -44,7 +44,10 @@ export function useStore<T>(store: Store<T>): UseStoreResult<T> {
     );
   }
 
-  const dek = useSyncExternalStore(keys.subscribe, keys.getDek);
+  const cryptoHandle = useSyncExternalStore(
+    keys.subscribe,
+    keys.getCryptoHandle,
+  );
   const userId = useSyncExternalStore(keys.subscribe, keys.getUserId);
   const key = `${store.name}:${userId ?? ""}`;
 
@@ -60,12 +63,12 @@ export function useStore<T>(store: Store<T>): UseStoreResult<T> {
 
   useEffect(() => {
     setError(null);
-    if (!dek || !userId) return;
+    if (!cryptoHandle || !userId) return;
     if (cache.get<CacheEntry<T>>(key) !== undefined) return;
     let cancelled = false;
     const fetch = store.loadWithHash
-      ? store.loadWithHash(userId, dek)
-      : store.load(userId, dek).then((data) => ({ data, hash: null }));
+      ? store.loadWithHash(userId, cryptoHandle)
+      : store.load(userId, cryptoHandle).then((data) => ({ data, hash: null }));
     fetch
       .then((entry) => {
         if (!cancelled) cache.set(key, entry);
@@ -76,13 +79,13 @@ export function useStore<T>(store: Store<T>): UseStoreResult<T> {
     return () => {
       cancelled = true;
     };
-  }, [dek, userId, key, cache, store]);
+  }, [cryptoHandle, userId, key, cache, store]);
 
   const save = useCallback(
     async (data: T) => {
-      if (!dek || !userId) {
+      if (!cryptoHandle || !userId) {
         throw new Error(
-          `${store.name}.use().save(): called while locked (no dek/userId)`,
+          `${store.name}.use().save(): called while locked (no cryptoHandle/userId)`,
         );
       }
       const previous = cache.get<CacheEntry<T>>(key);
@@ -91,14 +94,14 @@ export function useStore<T>(store: Store<T>): UseStoreResult<T> {
         if (store.saveIfMatch) {
           const result = await store.saveIfMatch(
             userId,
-            dek,
+            cryptoHandle,
             data,
             previous?.hash ?? null,
           );
           if (!result.ok) throw new OptimisticLockConflictError(store.name);
           cache.set(key, { data, hash: result.hash });
         } else {
-          await store.save(userId, dek, data);
+          await store.save(userId, cryptoHandle, data);
           cache.set(key, { data, hash: null });
         }
       } catch (e) {
@@ -106,13 +109,14 @@ export function useStore<T>(store: Store<T>): UseStoreResult<T> {
         throw e;
       }
     },
-    [dek, userId, key, cache, store],
+    [cryptoHandle, userId, key, cache, store],
   );
 
   return {
     data: cached?.data,
-    loading: !!dek && !!userId && cached === undefined && error === null,
-    locked: !dek || !userId,
+    loading:
+      !!cryptoHandle && !!userId && cached === undefined && error === null,
+    locked: !cryptoHandle || !userId,
     error,
     save,
   };

@@ -1,8 +1,8 @@
 /**
  * DataCloak secure-store framework — public entry point.
  *
- * This barrel is React-free by design — the React binding lives at `@datacloak/react`
- * (`react/index.ts`), a separate sub-entry, so importing `@datacloak` in a non-React
+ * This barrel is React-free by design — the React binding lives at `datacloak/react`
+ * (`react/index.ts`), a separate sub-entry, so importing `datacloak` in a non-React
  * context (backend, Deno, a future non-React consumer) never pulls React into the
  * module graph. `KeyProvider`/`CacheAdapter` are plain interfaces (no React types),
  * so they stay exported here.
@@ -14,10 +14,10 @@
  * This barrel exports ONLY `core/` — zero adapters. Every adapter (`supabaseStorageAdapter`,
  * `pgStorageAdapter`, `webauthnKeyProvider`, `mnemonicRecovery`, `workerKeyHandle`,
  * `tanstackAdapter`) is optional and pulls in its own dependency (Supabase, a Postgres
- * driver, the WebAuthn browser API, TanStack Query) — importing `@datacloak` for just
+ * driver, the WebAuthn browser API, TanStack Query) — importing `datacloak` for just
  * `defineStore` must never drag those into the module graph. Import an adapter from its
- * own file: `@datacloak/adapters/supabaseStorageAdapter.ts`,
- * `@datacloak/adapters/pgStorageAdapter.ts`, etc. See README's "Architecture: the ports"
+ * own file: `datacloak/adapters/supabaseStorageAdapter.ts`,
+ * `datacloak/adapters/pgStorageAdapter.ts`, etc. See README's "Architecture: the ports"
  * section.
  */
 
@@ -42,6 +42,8 @@ export {
   type StoreDef,
   type Identity,
 } from "./core/store.ts";
+
+export { OptimisticLockConflictError } from "./core/errors.ts";
 
 export {
   enc,
@@ -103,6 +105,9 @@ export {
   wrapKey,
   unwrapKey,
   createKeyHandle,
+  asRawDekBytes,
+  bindKeyHandleFactory,
   type KeyHandle,
   type WrappedKey,
+  type RawDekBytes,
 } from "./core/keyDerivation.ts";

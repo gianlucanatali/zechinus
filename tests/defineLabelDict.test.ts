@@ -25,11 +25,11 @@ function keyedMemoryAdapter(): StorageAdapter & {
 test("defineLabelDict: getLabel on an unset entity returns undefined, no data written yet", async () => {
   const adapter = keyedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const labels = defineLabelDict({ name: "user_label_dicts" });
 
-  const value = await labels.getLabel("u1", dek, "accounts", "acc-1");
+  const value = await labels.getLabel("u1", cryptoHandle, "accounts", "acc-1");
   assert.equal(value, undefined);
   assert.equal(adapter.rows.size, 0);
 });
@@ -37,12 +37,18 @@ test("defineLabelDict: getLabel on an unset entity returns undefined, no data wr
 test("defineLabelDict: setLabel then getLabel roundtrip", async () => {
   const adapter = keyedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const labels = defineLabelDict({ name: "user_label_dicts" });
 
-  await labels.setLabel("u1", dek, "accounts", "acc-1", "Conto corrente");
-  const value = await labels.getLabel("u1", dek, "accounts", "acc-1");
+  await labels.setLabel(
+    "u1",
+    cryptoHandle,
+    "accounts",
+    "acc-1",
+    "Conto corrente",
+  );
+  const value = await labels.getLabel("u1", cryptoHandle, "accounts", "acc-1");
 
   assert.equal(value, "Conto corrente");
   const raw = adapter.rows.get("user_label_dicts:u1:accounts");
@@ -56,13 +62,25 @@ test("defineLabelDict: setLabel then getLabel roundtrip", async () => {
 test("defineLabelDict: setLabel merges into the existing dict, doesn't clobber other entries", async () => {
   const adapter = keyedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const labels = defineLabelDict({ name: "user_label_dicts" });
-  await labels.setLabel("u1", dek, "accounts", "acc-1", "Conto corrente");
-  await labels.setLabel("u1", dek, "accounts", "acc-2", "Conto risparmio");
+  await labels.setLabel(
+    "u1",
+    cryptoHandle,
+    "accounts",
+    "acc-1",
+    "Conto corrente",
+  );
+  await labels.setLabel(
+    "u1",
+    cryptoHandle,
+    "accounts",
+    "acc-2",
+    "Conto risparmio",
+  );
 
-  assert.deepEqual(await labels.getAll("u1", dek, "accounts"), {
+  assert.deepEqual(await labels.getAll("u1", cryptoHandle, "accounts"), {
     "acc-1": "Conto corrente",
     "acc-2": "Conto risparmio",
   });
@@ -71,15 +89,27 @@ test("defineLabelDict: setLabel merges into the existing dict, doesn't clobber o
 test("defineLabelDict: deleteLabel removes only that entity, keeps the rest", async () => {
   const adapter = keyedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const labels = defineLabelDict({ name: "user_label_dicts" });
-  await labels.setLabel("u1", dek, "accounts", "acc-1", "Conto corrente");
-  await labels.setLabel("u1", dek, "accounts", "acc-2", "Conto risparmio");
+  await labels.setLabel(
+    "u1",
+    cryptoHandle,
+    "accounts",
+    "acc-1",
+    "Conto corrente",
+  );
+  await labels.setLabel(
+    "u1",
+    cryptoHandle,
+    "accounts",
+    "acc-2",
+    "Conto risparmio",
+  );
 
-  await labels.deleteLabel("u1", dek, "accounts", "acc-1");
+  await labels.deleteLabel("u1", cryptoHandle, "accounts", "acc-1");
 
-  assert.deepEqual(await labels.getAll("u1", dek, "accounts"), {
+  assert.deepEqual(await labels.getAll("u1", cryptoHandle, "accounts"), {
     "acc-2": "Conto risparmio",
   });
 });
@@ -87,16 +117,22 @@ test("defineLabelDict: deleteLabel removes only that entity, keeps the rest", as
 test("defineLabelDict: different dict keys (e.g. 'accounts' vs 'categories') are independent", async () => {
   const adapter = keyedMemoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const labels = defineLabelDict({ name: "user_label_dicts" });
-  await labels.setLabel("u1", dek, "accounts", "acc-1", "Conto corrente");
-  await labels.setLabel("u1", dek, "categories", "cat-1", "Spesa");
+  await labels.setLabel(
+    "u1",
+    cryptoHandle,
+    "accounts",
+    "acc-1",
+    "Conto corrente",
+  );
+  await labels.setLabel("u1", cryptoHandle, "categories", "cat-1", "Spesa");
 
-  assert.deepEqual(await labels.getAll("u1", dek, "accounts"), {
+  assert.deepEqual(await labels.getAll("u1", cryptoHandle, "accounts"), {
     "acc-1": "Conto corrente",
   });
-  assert.deepEqual(await labels.getAll("u1", dek, "categories"), {
+  assert.deepEqual(await labels.getAll("u1", cryptoHandle, "categories"), {
     "cat-1": "Spesa",
   });
 });
@@ -113,17 +149,17 @@ test("defineLabelDict: keyColumn is an injectable extension point (defaults to '
     },
   };
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const defaultLabels = defineLabelDict({ name: "user_label_dicts" });
-  await defaultLabels.getLabel("u1", dek, "accounts", "acc-1");
+  await defaultLabels.getLabel("u1", cryptoHandle, "accounts", "acc-1");
   assert.equal(adapter.calls[0], "get:table_name");
 
   const customLabels = defineLabelDict({
     name: "other_dicts",
     keyColumn: "dict_key",
   });
-  await customLabels.setLabel("u1", dek, "accounts", "acc-1", "x");
+  await customLabels.setLabel("u1", cryptoHandle, "accounts", "acc-1", "x");
   // setLabel does a load (get) then a save (put) — both under the custom column
   assert.equal(adapter.calls[1], "get:dict_key");
   assert.equal(adapter.calls[2], "put:dict_key");

@@ -11,7 +11,11 @@
  * calls (e.g. `createDekHandle` with the app's own salts). Both are 2-3 line files
  * that just wire the app's specifics into these two functions.
  */
-import type { KeyHandle, WrappedKey } from "../core/keyDerivation.ts";
+import type {
+  KeyHandle,
+  WrappedKey,
+  RawDekBytes,
+} from "../core/keyDerivation.ts";
 import type { FieldAAD, EncryptedField } from "../core/types.ts";
 
 export interface WorkerLike {
@@ -32,7 +36,7 @@ type Pending = {
  */
 export async function createWorkerKeyHandle(
   worker: WorkerLike,
-  rawBytes: Uint8Array,
+  rawBytes: RawDekBytes,
 ): Promise<KeyHandle> {
   let nextId = 0;
   const pending = new Map<number, Pending>();
@@ -96,10 +100,10 @@ type Req = { id: number; type: string } & Record<string, unknown>;
  * `handleKeyHandleMessages((rawBytes) => createDekHandle(rawBytes), self)`.
  */
 export function handleKeyHandleMessages(
-  createHandle: (rawBytes: Uint8Array) => KeyHandle,
+  createHandle: (rawBytes: RawDekBytes) => KeyHandle,
   ctx: WorkerContext,
 ): void {
-  let dek: KeyHandle | null = null;
+  let cryptoHandle: KeyHandle | null = null;
 
   ctx.addEventListener("message", async (e: { data: unknown }) => {
     const { id, type, ...args } = e.data as Req;
@@ -107,36 +111,39 @@ export function handleKeyHandleMessages(
       let result: unknown = null;
       switch (type) {
         case "init":
-          dek = createHandle(args.rawBytes as Uint8Array);
-          result = { pid: dek.pid };
+          cryptoHandle = createHandle(args.rawBytes as RawDekBytes);
+          result = { pid: cryptoHandle.pid };
           break;
         case "encryptField":
-          result = await dek!.encryptField(
+          result = await cryptoHandle!.encryptField(
             args.plaintext as string,
             args.aad as FieldAAD,
           );
           break;
         case "decryptField":
-          result = await dek!.decryptField(
+          result = await cryptoHandle!.decryptField(
             args.enc as EncryptedField,
             args.aad as FieldAAD,
           );
           break;
         case "encryptJson":
-          result = await dek!.encryptJson(args.value, args.aad as FieldAAD);
+          result = await cryptoHandle!.encryptJson(
+            args.value,
+            args.aad as FieldAAD,
+          );
           break;
         case "decryptJson":
-          result = await dek!.decryptJson(
+          result = await cryptoHandle!.decryptJson(
             args.enc as EncryptedField,
             args.aad as FieldAAD,
           );
           break;
         case "wrapWithKek":
-          result = await dek!.wrapWithKek(args.kek as Uint8Array);
+          result = await cryptoHandle!.wrapWithKek(args.kek as Uint8Array);
           break;
         case "destroy":
-          dek?.destroy();
-          dek = null;
+          cryptoHandle?.destroy();
+          cryptoHandle = null;
           break;
         default:
           throw new Error(`workerKeyHandle: unknown message type: ${type}`);

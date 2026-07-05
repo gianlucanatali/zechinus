@@ -6,21 +6,31 @@ import { encodeBlob } from "../core/blobCodec.ts";
 import { decodeWithLegacyFallback } from "../core/legacyFallback.ts";
 
 test("decodeWithLegacyFallback: canonical AAD succeeds → no legacy attempt, no persist", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const canonicalAAD = {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "t",
     field: "data",
     rowId: "r1",
   };
-  const record = await encodeBlob(dek, canonicalAAD, { v: "hello" }, 1);
+  const record = await encodeBlob(
+    cryptoHandle,
+    canonicalAAD,
+    { v: "hello" },
+    1,
+  );
 
   let persisted = false;
   const result = await decodeWithLegacyFallback({
-    dek,
+    cryptoHandle,
     record,
     canonicalAAD,
-    legacyAAD: { userId: dek.pid, table: "t", field: "legacy", rowId: "r1" },
+    legacyAAD: {
+      userId: cryptoHandle.pid,
+      table: "t",
+      field: "legacy",
+      rowId: "r1",
+    },
     version: 1,
     migrators: [],
     empty: { v: "" },
@@ -38,18 +48,23 @@ test("decodeWithLegacyFallback: canonical AAD succeeds → no legacy attempt, no
 });
 
 test("decodeWithLegacyFallback: no legacyAAD configured → canonical failure propagates as-is", async () => {
-  const dek = createDekHandle(randomBytes(32));
-  const wrongAAD = { userId: dek.pid, table: "t", field: "other", rowId: "r1" };
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const wrongAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "other",
+    rowId: "r1",
+  };
   const record = await encodeBlob(
-    dek,
-    { userId: dek.pid, table: "t", field: "data", rowId: "r1" },
+    cryptoHandle,
+    { userId: cryptoHandle.pid, table: "t", field: "data", rowId: "r1" },
     { v: "hello" },
     1,
   );
 
   await assert.rejects(() =>
     decodeWithLegacyFallback({
-      dek,
+      cryptoHandle,
       record,
       canonicalAAD: wrongAAD, // deliberately mismatched, no legacyAAD to fall back to
       version: 1,
@@ -61,24 +76,29 @@ test("decodeWithLegacyFallback: no legacyAAD configured → canonical failure pr
 });
 
 test("decodeWithLegacyFallback: canonical fails, legacy succeeds → migrates + persists + returns decoded data", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const legacyAAD = {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "t",
     field: "legacy",
     rowId: "r1",
   };
   const canonicalAAD = {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "t",
     field: "data",
     rowId: "r1",
   };
-  const legacyRecord = await encodeBlob(dek, legacyAAD, { v: "old data" }, 1);
+  const legacyRecord = await encodeBlob(
+    cryptoHandle,
+    legacyAAD,
+    { v: "old data" },
+    1,
+  );
 
   let persistedRecord: unknown;
   const result = await decodeWithLegacyFallback({
-    dek,
+    cryptoHandle,
     record: legacyRecord,
     canonicalAAD,
     legacyAAD,
@@ -98,16 +118,16 @@ test("decodeWithLegacyFallback: canonical fails, legacy succeeds → migrates + 
 });
 
 test("decodeWithLegacyFallback: canonical AND legacy both fail → the ORIGINAL canonical error propagates, not masked", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const otherDek = createDekHandle(randomBytes(32)); // wrong key entirely
   const canonicalAAD = {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "t",
     field: "data",
     rowId: "r1",
   };
   const legacyAAD = {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "t",
     field: "legacy",
     rowId: "r1",
@@ -116,7 +136,7 @@ test("decodeWithLegacyFallback: canonical AND legacy both fail → the ORIGINAL 
 
   await assert.rejects(() =>
     decodeWithLegacyFallback({
-      dek, // wrong DEK for this record — neither AAD attempt will decrypt
+      cryptoHandle, // wrong DEK for this record — neither AAD attempt will decrypt
       record,
       canonicalAAD,
       legacyAAD,
@@ -133,9 +153,9 @@ test("decodeWithLegacyFallback: canonical AND legacy both fail → the ORIGINAL 
 });
 
 test("decodeWithLegacyFallback: record is null (never saved) → returns empty, no legacy attempt", async () => {
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const canonicalAAD = {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "t",
     field: "data",
     rowId: "r1",
@@ -143,10 +163,15 @@ test("decodeWithLegacyFallback: record is null (never saved) → returns empty, 
 
   let legacyAttempted = false;
   const result = await decodeWithLegacyFallback({
-    dek,
+    cryptoHandle,
     record: null,
     canonicalAAD,
-    legacyAAD: { userId: dek.pid, table: "t", field: "legacy", rowId: "r1" },
+    legacyAAD: {
+      userId: cryptoHandle.pid,
+      table: "t",
+      field: "legacy",
+      rowId: "r1",
+    },
     version: 1,
     migrators: [],
     empty: { v: "default" },

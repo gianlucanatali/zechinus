@@ -5,25 +5,25 @@ import { canonicalAAD } from "../core/rowStore.ts";
 import { createDekHandle } from "./testKeyHandle.ts";
 
 test("canonicalAAD: builds the standard {userId, table, field:'data', rowId} shape", () => {
-  const dek = createDekHandle(randomBytes(32));
-  const aad = canonicalAAD(dek, "some_table", "some-row-id");
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const aad = canonicalAAD(cryptoHandle, "some_table", "some-row-id");
   assert.deepEqual(aad, {
-    userId: dek.pid,
+    userId: cryptoHandle.pid,
     table: "some_table",
     field: "data",
     rowId: "some-row-id",
   });
 });
 
-test("canonicalAAD: rowId defaults to dek.pid when omitted (perUser convention)", () => {
-  const dek = createDekHandle(randomBytes(32));
-  const aad = canonicalAAD(dek, "some_table");
-  assert.equal(aad.rowId, dek.pid);
+test("canonicalAAD: rowId defaults to cryptoHandle.pid when omitted (perUser convention)", () => {
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const aad = canonicalAAD(cryptoHandle, "some_table");
+  assert.equal(aad.rowId, cryptoHandle.pid);
 });
 
 test("canonicalAAD: different table names produce different AAD (not cross-decryptable)", () => {
-  const dek = createDekHandle(randomBytes(32));
-  const aadA = canonicalAAD(dek, "table_a", "row-1");
-  const aadB = canonicalAAD(dek, "table_b", "row-1");
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const aadA = canonicalAAD(cryptoHandle, "table_a", "row-1");
+  const aadB = canonicalAAD(cryptoHandle, "table_b", "row-1");
   assert.notDeepEqual(aadA, aadB);
 });

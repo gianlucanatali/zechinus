@@ -106,7 +106,7 @@ test("optimisticLock (many): defineStore throws at definition time if optimistic
 test("optimisticLock (many): updateIfMatch succeeds when expectedHash matches the row's current hash", async () => {
   const adapter = conditionalCollectionAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -119,16 +119,16 @@ test("optimisticLock (many): updateIfMatch succeeds when expectedHash matches th
     optimisticLock: true,
   });
 
-  const id = await store.create("u1", dek, {
+  const id = await store.create("u1", cryptoHandle, {
     name: "sim-1",
     addedLiquidity: 100,
   });
-  const [row] = await store.list("u1", dek);
+  const [row] = await store.list("u1", cryptoHandle);
   assert.ok(row.hash);
 
   const result = await store.updateIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     id,
     { name: "sim-1", addedLiquidity: 200 },
     row.hash,
@@ -137,7 +137,7 @@ test("optimisticLock (many): updateIfMatch succeeds when expectedHash matches th
   assert.ok(result.hash);
   assert.notEqual(result.hash, row.hash);
 
-  const [updated] = await store.list("u1", dek);
+  const [updated] = await store.list("u1", cryptoHandle);
   assert.deepEqual(updated.data, { name: "sim-1", addedLiquidity: 200 });
   assert.equal(updated.hash, result.hash);
 });
@@ -145,7 +145,7 @@ test("optimisticLock (many): updateIfMatch succeeds when expectedHash matches th
 test("optimisticLock (many): updateIfMatch fails (ok:false, no throw) when someone else updated the same row first", async () => {
   const adapter = conditionalCollectionAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -158,16 +158,16 @@ test("optimisticLock (many): updateIfMatch fails (ok:false, no throw) when someo
     optimisticLock: true,
   });
 
-  const id = await store.create("u1", dek, {
+  const id = await store.create("u1", cryptoHandle, {
     name: "sim-1",
     addedLiquidity: 100,
   });
-  const [{ hash: staleHash }] = await store.list("u1", dek);
+  const [{ hash: staleHash }] = await store.list("u1", cryptoHandle);
 
   // A "concurrent tab" writes using the same starting hash, winning the race.
   await store.updateIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     id,
     { name: "sim-1", addedLiquidity: 999 },
     staleHash,
@@ -176,7 +176,7 @@ test("optimisticLock (many): updateIfMatch fails (ok:false, no throw) when someo
   // Our own write, still using the now-stale hash, must be rejected — not throw.
   const conflict = await store.updateIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     id,
     { name: "sim-1", addedLiquidity: 2 },
     staleHash,
@@ -184,14 +184,14 @@ test("optimisticLock (many): updateIfMatch fails (ok:false, no throw) when someo
   assert.equal(conflict.ok, false);
   assert.equal(conflict.hash, null);
 
-  const [row] = await store.list("u1", dek);
+  const [row] = await store.list("u1", cryptoHandle);
   assert.deepEqual(row.data, { name: "sim-1", addedLiquidity: 999 });
 });
 
 test("optimisticLock (many): a conflict on one row never affects a different row", async () => {
   const adapter = conditionalCollectionAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -204,18 +204,27 @@ test("optimisticLock (many): a conflict on one row never affects a different row
     optimisticLock: true,
   });
 
-  const idA = await store.create("u1", dek, { name: "a", addedLiquidity: 1 });
-  const idB = await store.create("u1", dek, { name: "b", addedLiquidity: 2 });
-  const rows = await store.list("u1", dek);
+  const idA = await store.create("u1", cryptoHandle, {
+    name: "a",
+    addedLiquidity: 1,
+  });
+  const idB = await store.create("u1", cryptoHandle, {
+    name: "b",
+    addedLiquidity: 2,
+  });
+  const rows = await store.list("u1", cryptoHandle);
   const hashA = rows.find((r) => r.id === idA)!.hash;
   const hashB = rows.find((r) => r.id === idB)!.hash;
 
   // Make A's hash stale by writing it through the unconditional path.
-  await store.update("u1", dek, idA, { name: "a", addedLiquidity: 999 });
+  await store.update("u1", cryptoHandle, idA, {
+    name: "a",
+    addedLiquidity: 999,
+  });
 
   const conflictOnA = await store.updateIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     idA,
     { name: "a", addedLiquidity: 2 },
     hashA,
@@ -225,7 +234,7 @@ test("optimisticLock (many): a conflict on one row never affects a different row
   // B was never touched — its hash is still valid.
   const okOnB = await store.updateIfMatch!(
     "u1",
-    dek,
+    cryptoHandle,
     idB,
     { name: "b", addedLiquidity: 20 },
     hashB,
@@ -247,7 +256,7 @@ test("optimisticLock (many): adapter without updateByIdIfMatch → explicit erro
       async updateById() {},
     },
   });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "rebalance_simulations",
@@ -264,7 +273,7 @@ test("optimisticLock (many): adapter without updateByIdIfMatch → explicit erro
     () =>
       store.updateIfMatch!(
         "u1",
-        dek,
+        cryptoHandle,
         "some-id",
         { name: "x", addedLiquidity: 1 },
         null,

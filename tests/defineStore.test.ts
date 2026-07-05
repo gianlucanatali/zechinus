@@ -9,11 +9,17 @@ import {
   __resetSecureStoreConfig,
   defineStore,
   fingerprintSchema,
+  OptimisticLockConflictError,
   type StorageAdapter,
   type BlobRecord,
+  type CryptoHandle,
+  type KeyProvider,
 } from "../index.ts";
 
-// In-memory adapter: no Supabase required for the encrypted roundtrip.
+// In-memory adapter: no real backend (StorageAdapter) required for the
+// encrypted roundtrip. Also implements `putIfMatch` (needed by the
+// optimisticLock mutate() tests below) — same conflict semantics as
+// `optimisticLock.test.ts`'s `conditionalMemoryAdapter`.
 function memoryAdapter(): StorageAdapter & { rows: Map<string, BlobRecord> } {
   const rows = new Map<string, BlobRecord>();
   return {
@@ -24,6 +30,29 @@ function memoryAdapter(): StorageAdapter & { rows: Map<string, BlobRecord> } {
     async put(collection, userId, _extraKeys, record) {
       rows.set(`${collection}:${userId}`, record);
     },
+    async putIfMatch(collection, userId, _extraKeys, record, expectedHash) {
+      const key = `${collection}:${userId}`;
+      const current = rows.get(key) ?? null;
+      if (expectedHash === null) {
+        if (current) return false;
+        rows.set(key, record);
+        return true;
+      }
+      if (!current || current.contentHash !== expectedHash) return false;
+      rows.set(key, record);
+      return true;
+    },
+  };
+}
+
+// `get()`/`mutate()` resolve the cryptoHandle ambiently from the configured KeyProvider — the
+// caller never sees a `CryptoHandle`. This fake mirrors a single already-unlocked
+// session, exactly like the real `passkeyDekController` at runtime.
+function fixedKeyProvider(cryptoHandle: CryptoHandle | null): KeyProvider {
+  return {
+    getCryptoHandle: () => cryptoHandle,
+    getUserId: () => "u1",
+    subscribe: () => () => {},
   };
 }
 
@@ -35,7 +64,7 @@ const Portfolio = z.object({
 test("defineStore: perUser + encrypt:all → roundtrip + encrypted blob + derived empty", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "portfolio_blobs",
@@ -47,25 +76,358 @@ test("defineStore: perUser + encrypt:all → roundtrip + encrypted blob + derive
   });
 
   // non-existent record → empty derived from the schema's .default()s
-  assert.deepEqual(await store.load("u1", dek), { positions: [], count: 0 });
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
+    positions: [],
+    count: 0,
+  });
 
-  await store.save("u1", dek, { positions: ["AAPL"], count: 1 });
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
 
   const raw = adapter.rows.get("portfolio_blobs:u1");
   assert.ok(raw, "saved record present");
   assert.ok(raw!.blob.startsWith("enc:"), "blob has the enc: prefix");
   assert.ok(!raw!.blob.includes("AAPL"), "plaintext NOT in the ciphertext");
 
-  assert.deepEqual(await store.load("u1", dek), {
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
     positions: ["AAPL"],
     count: 1,
+  });
+});
+
+test("defineStore: get() reads ambiently — no cryptoHandle in sight", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  assert.deepEqual(await store.get(), { positions: [], count: 0 });
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+  assert.deepEqual(await store.get(), { positions: ["AAPL"], count: 1 });
+});
+
+test("defineStore: set() writes ambiently, no read involved — no cryptoHandle in sight", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await store.set({ positions: ["AAPL"], count: 1 });
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
+    positions: ["AAPL"],
+    count: 1,
+  });
+});
+
+test("defineStore: set() rejects data that fails Zod validation, and does NOT persist it", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  await assert.rejects(() =>
+    // @ts-expect-error deliberately invalid shape for the test
+    store.set({ positions: ["AAPL"], count: "not-a-number" }),
+  );
+
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
+    positions: ["AAPL"],
+    count: 1,
+  });
+});
+
+test("defineStore: set() throws an explicit error when locked (no active cryptoHandle)", async () => {
+  const adapter = memoryAdapter();
+  configureSecureStore({ storage: adapter, keys: fixedKeyProvider(null) });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await assert.rejects(
+    () => store.set({ positions: [], count: 0 }),
+    /no cryptoHandle|locked/i,
+  );
+});
+
+test("defineStore: set() refuses to run on an optimisticLock store — a blind overwrite would bypass the lock the store owner asked for", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    contentHash: true,
+    optimisticLock: true,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await assert.rejects(
+    () => store.set({ positions: ["AAPL"], count: 1 }),
+    /optimisticLock.*mutate/i,
+  );
+});
+
+test("defineStore: get() throws an explicit error when locked (no active cryptoHandle)", async () => {
+  const adapter = memoryAdapter();
+  configureSecureStore({ storage: adapter, keys: fixedKeyProvider(null) });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await assert.rejects(() => store.get(), /no cryptoHandle|locked/i);
+});
+
+test("defineStore: mutate() loads, applies the transform, saves, and returns the result — no cryptoHandle in sight", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  const result = await store.mutate((current) => ({
+    ...current,
+    positions: [...current.positions, "MSFT"],
+    count: current.count + 1,
+  }));
+
+  assert.deepEqual(result, { positions: ["AAPL", "MSFT"], count: 2 });
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
+    positions: ["AAPL", "MSFT"],
+    count: 2,
+  });
+});
+
+test("defineStore: mutate() supports an async transform function", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  const result = await store.mutate(async (current) => {
+    await Promise.resolve();
+    return { ...current, count: current.count + 5 };
+  });
+
+  assert.equal(result.count, 5);
+});
+
+test("defineStore: mutate() rejects a transform result that fails Zod validation, and does NOT persist it", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  await assert.rejects(() =>
+    store.mutate(
+      // @ts-expect-error deliberately invalid shape for the test
+      (current) => ({ ...current, count: "not-a-number" }),
+    ),
+  );
+
+  // Unchanged — the invalid transform result was never saved.
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
+    positions: ["AAPL"],
+    count: 1,
+  });
+});
+
+test("defineStore: mutate() throws an explicit error when locked (no active cryptoHandle)", async () => {
+  const adapter = memoryAdapter();
+  configureSecureStore({ storage: adapter, keys: fixedKeyProvider(null) });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await assert.rejects(
+    () => store.mutate((current) => current),
+    /no cryptoHandle|locked/i,
+  );
+});
+
+test("defineStore: mutate() throws an explicit error when no KeyProvider is configured", async () => {
+  const adapter = memoryAdapter();
+  configureSecureStore({ storage: adapter });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await assert.rejects(() => store.mutate((current) => current), /KeyProvider/);
+});
+
+test("defineStore: mutate() on an optimisticLock store throws OptimisticLockConflictError on conflict, WITHOUT retrying", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    contentHash: true,
+    optimisticLock: true,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  let fnCalls = 0;
+  await assert.rejects(
+    () =>
+      store.mutate((current) => {
+        fnCalls += 1;
+        // Simulates someone else writing between our read and our write.
+        adapter.rows.delete("portfolio_blobs:u1");
+        return { ...current, count: current.count + 1 };
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof OptimisticLockConflictError);
+      return true;
+    },
+  );
+  assert.equal(fnCalls, 1, "the transform runs exactly once, no blind retry");
+});
+
+test("defineStore: mutate() on an optimisticLock store succeeds and updates the hash when there's no conflict", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    contentHash: true,
+    optimisticLock: true,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  const result = await store.mutate((current) => ({
+    ...current,
+    count: current.count + 1,
+  }));
+
+  assert.equal(result.count, 2);
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
+    positions: ["AAPL"],
+    count: 2,
   });
 });
 
 test("defineStore: Zod validation on WRITE rejects non-conforming data", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   const store = defineStore({
     name: "portfolio_blobs",
@@ -77,7 +439,7 @@ test("defineStore: Zod validation on WRITE rejects non-conforming data", async (
 
   await assert.rejects(
     // @ts-expect-error — count must be a number: intentional error to test runtime validation
-    () => store.save("u1", dek, { positions: ["X"], count: "nan" }),
+    () => store.save("u1", cryptoHandle, { positions: ["X"], count: "nan" }),
     /doesn't conform to the schema, write rejected/,
   );
   // nothing was persisted
@@ -87,7 +449,7 @@ test("defineStore: Zod validation on WRITE rejects non-conforming data", async (
 test("defineStore: Zod validation on READ catches a non-conforming blob", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
 
   // "loose" store that writes a shape the "strict" store will reject on read
   const looseSchema = z.object({ n: z.unknown() });
@@ -99,7 +461,7 @@ test("defineStore: Zod validation on READ catches a non-conforming blob", async 
     version: 1,
     schemaFingerprint: fingerprintSchema(looseSchema, "all"),
   });
-  await loose.save("u1", dek, { n: "not-a-number" });
+  await loose.save("u1", cryptoHandle, { n: "not-a-number" });
 
   const strictSchema = z.object({ n: z.number() });
   const strict = defineStore({
@@ -111,7 +473,7 @@ test("defineStore: Zod validation on READ catches a non-conforming blob", async 
     schemaFingerprint: fingerprintSchema(strictSchema, "all"),
   });
   await assert.rejects(
-    () => strict.load("u1", dek),
+    () => strict.load("u1", cryptoHandle),
     /decrypted data doesn't conform to the schema/,
   );
 });
@@ -251,7 +613,7 @@ test("defineStore: guardrail — bumping version without adding the migrator thr
 
 test("defineStore: without configureSecureStore throws an explicit error", async () => {
   __resetSecureStoreConfig();
-  const dek = createDekHandle(randomBytes(32));
+  const cryptoHandle = createDekHandle(randomBytes(32));
   const store = defineStore({
     name: "portfolio_blobs",
     encrypt: "all",
@@ -259,5 +621,8 @@ test("defineStore: without configureSecureStore throws an explicit error", async
     version: 1,
     schemaFingerprint: fingerprintSchema(Portfolio, "all"),
   });
-  await assert.rejects(() => store.load("u1", dek), /framework not configured/);
+  await assert.rejects(
+    () => store.load("u1", cryptoHandle),
+    /framework not configured/,
+  );
 });

@@ -34,26 +34,26 @@ export interface LabelDictDef {
 export interface LabelDict {
   getLabel(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     dictKey: string,
     entityId: string,
   ): Promise<string | undefined>;
   setLabel(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     dictKey: string,
     entityId: string,
     label: string,
   ): Promise<void>;
   deleteLabel(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     dictKey: string,
     entityId: string,
   ): Promise<void>;
   getAll(
     userId: string,
-    dek: CryptoHandle,
+    cryptoHandle: CryptoHandle,
     dictKey: string,
   ): Promise<Record<string, string>>;
 }
@@ -71,22 +71,25 @@ export function defineLabelDict(def: LabelDictDef): LabelDict {
   });
 
   return {
-    async getLabel(userId, dek, dictKey, entityId) {
-      const dict = await store.load(userId, dek, dictKey);
+    async getLabel(userId, cryptoHandle, dictKey, entityId) {
+      const dict = await store.load(userId, cryptoHandle, dictKey);
       return dict[entityId];
     },
-    async setLabel(userId, dek, dictKey, entityId, label) {
-      const dict = await store.load(userId, dek, dictKey);
-      await store.save(userId, dek, dictKey, { ...dict, [entityId]: label });
+    async setLabel(userId, cryptoHandle, dictKey, entityId, label) {
+      const dict = await store.load(userId, cryptoHandle, dictKey);
+      await store.save(userId, cryptoHandle, dictKey, {
+        ...dict,
+        [entityId]: label,
+      });
     },
-    async deleteLabel(userId, dek, dictKey, entityId) {
-      const dict = await store.load(userId, dek, dictKey);
+    async deleteLabel(userId, cryptoHandle, dictKey, entityId) {
+      const dict = await store.load(userId, cryptoHandle, dictKey);
       const next = { ...dict };
       delete next[entityId];
-      await store.save(userId, dek, dictKey, next);
+      await store.save(userId, cryptoHandle, dictKey, next);
     },
-    async getAll(userId, dek, dictKey) {
-      return store.load(userId, dek, dictKey);
+    async getAll(userId, cryptoHandle, dictKey) {
+      return store.load(userId, cryptoHandle, dictKey);
     },
   };
 }
