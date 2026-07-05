@@ -645,6 +645,13 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   **web** adapter (uses `navigator.credentials`, browser-only). RN needs its own adapter
   (native passkey/biometrics) calling the same `deriveKey`/`createKeyHandle` — not
   written yet, but the split already isolates exactly what would need to change.
+  **Known RN gap beyond the KeyProvider:** `core/crypto.ts` uses
+  `CompressionStream`/`DecompressionStream` (web + Deno API) for the gzip step of every
+  encrypt/decrypt — Hermes does not implement it, so RN needs a polyfill or a
+  pluggable compression hook before any store works there. `useAutoLock`
+  (`react/useAutoLock.ts`) is also web-only (`window` events); the other React hooks
+  (`useStore`/`useKeyedStore`/`useCollectionStore`/`useIsUnlocked`) have no DOM
+  dependency and should work on RN as-is.
 - **True DEK rotation** (the DEK's actual bytes change — not `KeyHandle.wrapWithKek`,
   which re-wraps the _same_ DEK under a new KEK and is already built and used by EW's
   `RecoveryUnlockModal`/`Impostazioni`) — discussed 2026-07-04, deliberately not built,

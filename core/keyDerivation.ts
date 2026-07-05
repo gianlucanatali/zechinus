@@ -141,6 +141,11 @@ export interface CreateKeyHandleOptions {
    * to re-derive anything). Omit to use the default (recommended unless you have a
    * concrete reason to source the key elsewhere, like a KMS-managed rotation policy
    * decoupled from the DEK's own lifecycle).
+   *
+   * MUST be a keyed MAC (HMAC, KMAC, ...) — the result is stored server-side as
+   * `content_hash`, so an unkeyed hash (plain SHA-256) would let the server
+   * fingerprint plaintext contents, reintroducing the exact leak the keyed default
+   * exists to prevent. No guardrail can verify this at runtime; it's on the caller.
    */
   hashContent?(payload: unknown): Promise<string>;
 }
