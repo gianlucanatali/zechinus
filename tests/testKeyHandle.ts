@@ -14,9 +14,9 @@ import {
 const TEST_PID_SALT = new Uint8Array(32).fill(42);
 const TEST_PID_INFO = "test-pid-info";
 
-// Firma volutamente non-branded: questo helper prende sempre randomBytes() usa-e-getta
-// nei test, mai un vero segreto — richiedere asRawDekBytes() a ~130 call site di test
-// non aggiungerebbe protezione reale, solo rumore. Il cast avviene qui, una sola volta.
+// Deliberately un-branded signature: this helper always takes throwaway randomBytes()
+// in tests, never a real secret — requiring asRawDekBytes() at ~130 test call sites
+// would add no real protection, only noise. The cast happens here, once.
 export function createDekHandle(rawBytes: Uint8Array): KeyHandle {
   return createKeyHandle(asRawDekBytes(rawBytes), TEST_PID_SALT, TEST_PID_INFO);
 }
