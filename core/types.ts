@@ -17,11 +17,15 @@ export type FieldAAD = {
   rowId: string;
 };
 
-/** Wire-serialized ciphertext shape (opaque to storage). */
+/**
+ * Wire-serialized ciphertext shape (opaque to storage). `v` encodes both compression
+ * and AAD serialization, so decrypt is deterministic from the stored value alone —
+ * see `crypto.ts`'s file-level doc comment for the full 1–4 mapping.
+ */
 export type EncryptedField = {
   ct: string;
   n: string;
-  v: 1 | 2;
+  v: 1 | 2 | 3 | 4;
 };
 
 /**

@@ -80,11 +80,15 @@ export async function decodeBlob<T>(
   const parsed: EncryptedField = parseEncField(record.blob);
   const raw = await cryptoHandle.decryptJson<unknown>(parsed, aad);
   const { data, authenticatedVersion } = fromEnvelope<T>(raw, dbVersion);
-  const { data: migrated, upgraded } = runMigrations<T>(
+  const { data: migrated, upgraded: upgradedByMigrators } = runMigrations<T>(
     data,
     authenticatedVersion,
     version,
     migrators,
   );
+  // parsed.v <= 2 means the envelope still uses the legacy AAD-v1 (pipe-join)
+  // serialization — force the lazy write-back even when no schema migrator ran, so
+  // the row converges to canonical AAD-v2 (v3/v4) the next time anything saves it.
+  const upgraded = upgradedByMigrators || parsed.v <= 2;
   return { data: migrated, upgraded };
 }

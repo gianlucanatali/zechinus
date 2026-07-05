@@ -6,6 +6,15 @@
  * to a different slot makes the GCM auth tag fail to verify.
  *
  * Pipeline: plaintext → gzip (if > COMPRESS_THRESHOLD) → AES-256-GCM → base64 JSON.
+ *
+ * `EncryptedField.v` encodes BOTH the compression choice and the AAD serialization,
+ * so a blob is self-describing at decrypt time (no try-and-fallback, no double
+ * decrypt): `1`=raw+AAD-v1, `2`=gzip+AAD-v1 (read-only — AAD-v1 is the unescaped
+ * pipe-join that let one component's `|` collide with another's, see AAD-v2 below),
+ * `3`=raw+AAD-v2, `4`=gzip+AAD-v2 (always written from now on). AAD-v2 is
+ * `JSON.stringify([userId, table, field, rowId])` — JSON's own escaping makes the
+ * 4-tuple serialization unambiguous regardless of what characters a component
+ * contains.
  */
 import { gcm } from "@noble/ciphers/aes.js";
 import { randomBytes, clean } from "@noble/ciphers/utils.js";
@@ -28,8 +37,21 @@ function fromBase64(b64: string): Uint8Array {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-function buildAADBytes(aad: FieldAAD): Uint8Array {
+/** AAD-v1 (legacy, read-only): unescaped pipe-join — a `|` inside a component collides. */
+function buildAADBytesV1(aad: FieldAAD): Uint8Array {
   return ENCODER.encode(`${aad.userId}|${aad.table}|${aad.field}|${aad.rowId}`);
+}
+
+/** AAD-v2 (canonical): JSON-stringified 4-tuple — unambiguous regardless of content. */
+function buildAADBytesV2(aad: FieldAAD): Uint8Array {
+  return ENCODER.encode(
+    JSON.stringify([aad.userId, aad.table, aad.field, aad.rowId]),
+  );
+}
+
+/** `1`/`2` = legacy AAD-v1 (read-only), `3`/`4` = canonical AAD-v2. */
+function buildAADBytes(aad: FieldAAD, v: 1 | 2 | 3 | 4): Uint8Array {
+  return v <= 2 ? buildAADBytesV1(aad) : buildAADBytesV2(aad);
 }
 
 async function compress(data: Uint8Array): Promise<Uint8Array> {
@@ -60,29 +82,36 @@ export async function encryptField(
 
   const nonce = randomBytes(12);
   try {
-    const cipher = gcm(dek, nonce, buildAADBytes(aad));
+    const cipher = gcm(dek, nonce, buildAADBytesV2(aad));
     const ciphertext = cipher.encrypt(payload);
     return {
       ct: toBase64(ciphertext),
       n: toBase64(nonce),
-      v: shouldCompress ? 2 : 1,
+      v: shouldCompress ? 4 : 3,
     };
   } finally {
     clean(nonce);
   }
 }
 
-/** Decrypts a field. Throws if the AAD doesn't match (blob moved) or the key is wrong. */
+/**
+ * Decrypts a field. Throws if the AAD doesn't match (blob moved) or the key is
+ * wrong. Dispatches compression AND AAD serialization from `enc.v` — see the
+ * file-level doc comment for the 1–4 mapping.
+ */
 export async function decryptField(
   dek: Uint8Array,
   enc: EncryptedField,
   aad: FieldAAD,
 ): Promise<string> {
+  if (enc.v < 1 || enc.v > 4) {
+    throw new Error(`decryptField: unknown envelope version ${enc.v}`);
+  }
   const ciphertext = fromBase64(enc.ct);
   const nonce = fromBase64(enc.n);
-  const cipher = gcm(dek, nonce, buildAADBytes(aad));
+  const cipher = gcm(dek, nonce, buildAADBytes(aad, enc.v));
   const payload = cipher.decrypt(ciphertext);
-  const raw = enc.v === 2 ? await decompress(payload) : payload;
+  const raw = enc.v === 2 || enc.v === 4 ? await decompress(payload) : payload;
   return DECODER.decode(raw);
 }
 
@@ -98,11 +127,11 @@ export async function encryptJson<T>(
 
   const nonce = randomBytes(12);
   try {
-    const cipher = gcm(dek, nonce, buildAADBytes(aad));
+    const cipher = gcm(dek, nonce, buildAADBytesV2(aad));
     return {
       ct: toBase64(cipher.encrypt(compressed)),
       n: toBase64(nonce),
-      v: 2,
+      v: 4,
     };
   } finally {
     clean(nonce);
