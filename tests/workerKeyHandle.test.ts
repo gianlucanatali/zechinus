@@ -119,6 +119,29 @@ test("createWorkerKeyHandle: wrapWithKek proxies through to the worker's handle"
   assert.ok(wrapped.nonce);
 });
 
+test("createWorkerKeyHandle: hashContent proxies through to the worker's handle (matches the direct handle's HMAC)", async () => {
+  const { worker, workerCtx } = fakeWorkerPair();
+  handleKeyHandleMessages(
+    (rawBytes) =>
+      createKeyHandle(rawBytes, new Uint8Array(32).fill(7), "test-info"),
+    workerCtx,
+  );
+
+  const rawBytes = asRawDekBytes(new Uint8Array(32).fill(1));
+  const handle = await createWorkerKeyHandle(worker, rawBytes);
+  const direct = createKeyHandle(
+    rawBytes,
+    new Uint8Array(32).fill(7),
+    "test-info",
+  );
+
+  const payload = { a: 1, b: [1, 2, 3] };
+  assert.equal(
+    await handle.hashContent!(payload),
+    await direct.hashContent!(payload),
+  );
+});
+
 test("createWorkerKeyHandle: a worker-side error rejects the caller's promise with context", async () => {
   const { worker, workerCtx } = fakeWorkerPair();
   handleKeyHandleMessages(

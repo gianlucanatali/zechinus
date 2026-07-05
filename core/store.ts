@@ -31,7 +31,6 @@ import { decodeWithLegacyFallback } from "./legacyFallback.ts";
 import { getSecureStoreConfig } from "./config.ts";
 import { randomId } from "./randomId.ts";
 import { toEnvelope, type BlobMigrator } from "./versioning.ts";
-import { hashContent } from "./contentHash.ts";
 import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
 import type { CryptoHandle, FieldAAD, KeyColumn } from "./types.ts";
@@ -115,10 +114,10 @@ export interface StoreDef<S extends z.ZodType> {
   migrators?: BlobMigrator[];
   /**
    * Set `true` if this table has a `content_hash` column — DataCloak computes it
-   * internally (SHA-256 of the plaintext envelope, see `core/contentHash.ts`), no
-   * app-supplied function needed: hashing JSON is fully generic, unlike
-   * `StorageAdapter`/`KeyProvider` which genuinely need app-specific knowledge.
-   * Omit (or `false`) for tables without the column.
+   * internally as a keyed HMAC-SHA256 of the plaintext envelope (the DEK-derived MAC
+   * key lives in the `CryptoHandle`, see `keyDerivation.ts`'s `hashContent`), so the
+   * server only ever sees an opaque, non-fingerprintable string, never a plain hash
+   * of the content. Omit (or `false`) for tables without the column.
    */
   contentHash?: boolean;
   /**
@@ -571,7 +570,9 @@ function buildKeyedStore<S extends z.ZodType>(
       const next = await fn(current);
       if (def.contentHash && hash !== null) {
         const validated = validateWrite(next, `mutate(key=${key})`);
-        const nextHash = await hashContent(toEnvelope(validated, def.version));
+        const nextHash = await cryptoHandle.hashContent!(
+          toEnvelope(validated, def.version),
+        );
         if (nextHash === hash) return next;
       }
       await keyedSave(userId, cryptoHandle, key, next);
@@ -937,7 +938,9 @@ function buildPerUserStore<S extends z.ZodType>({
       }
       const validated = validateWrite(next, "mutate");
       if (def.contentHash && hash !== null) {
-        const nextHash = await hashContent(toEnvelope(validated, def.version));
+        const nextHash = await cryptoHandle.hashContent!(
+          toEnvelope(validated, def.version),
+        );
         if (nextHash === hash) return next;
       }
       await inner.save(userId, cryptoHandle, validated);

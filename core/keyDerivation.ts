@@ -10,6 +10,7 @@
 import { gcm } from "@noble/ciphers/aes.js";
 import { randomBytes, clean } from "@noble/ciphers/utils.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
+import { hmac } from "@noble/hashes/hmac.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import {
   encryptField,
@@ -18,6 +19,17 @@ import {
   decryptJson,
 } from "./crypto.ts";
 import type { CryptoHandle, FieldAAD, EncryptedField } from "./types.ts";
+
+/**
+ * Fixed, PUBLIC HKDF salt for deriving the `content_hash` MAC key from the DEK. It
+ * does not need to be secret — HKDF salts are non-secret by design (RFC 5869), their
+ * job is domain separation, not confidentiality. Every `KeyHandle` derives the same
+ * MAC key from a given DEK, which is exactly what's needed: skip-write/optimistic-lock
+ * compare hashes computed by potentially different handle instances for the same user.
+ */
+const DATACLOAK_MAC_SALT = new TextEncoder().encode(
+  "datacloak-content-hash-mac-salt-v1",
+);
 
 /** Generic HKDF-SHA256 derivation. `salt`/`info` are the caller's — this has no defaults. */
 export function deriveKey(
@@ -33,6 +45,12 @@ export function deriveKey(
     new TextEncoder().encode(info),
     length,
   );
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function bytesToUUID(bytes: Uint8Array): string {
@@ -115,6 +133,18 @@ export function asRawDekBytes(bytes: Uint8Array): RawDekBytes {
   return bytes as RawDekBytes;
 }
 
+export interface CreateKeyHandleOptions {
+  /**
+   * Overrides the default HMAC-SHA256-from-DEK `hashContent` — e.g. to delegate the
+   * `content_hash` MAC to an external KMS instead of deriving it from the DEK. Receives
+   * the same canonical payload `hashContent` always receives (the caller doesn't need
+   * to re-derive anything). Omit to use the default (recommended unless you have a
+   * concrete reason to source the key elsewhere, like a KMS-managed rotation policy
+   * decoupled from the DEK's own lifecycle).
+   */
+  hashContent?(payload: unknown): Promise<string>;
+}
+
 /**
  * Builds a `KeyHandle` from raw key bytes. The bytes are copied into a private
  * closure — the caller can zero their own copy immediately after calling this.
@@ -123,9 +153,23 @@ export function createKeyHandle(
   rawBytes: RawDekBytes,
   pidSalt: Uint8Array,
   pidInfo: string,
+  options?: CreateKeyHandleOptions,
 ): KeyHandle {
   const key = rawBytes.slice();
   const pid = derivePID(key, pidSalt, pidInfo);
+  const macKey = options?.hashContent
+    ? null
+    : deriveKey(key, DATACLOAK_MAC_SALT, "datacloak/content-hash-v1", 32);
+  const hashContent =
+    options?.hashContent ??
+    (async (payload: unknown) =>
+      bytesToHex(
+        hmac(
+          sha256,
+          macKey!,
+          new TextEncoder().encode(JSON.stringify(payload)),
+        ),
+      ));
   return {
     pid,
     encryptField: (plaintext, aad) => encryptField(key, plaintext, aad),
@@ -133,9 +177,11 @@ export function createKeyHandle(
     encryptJson: <T>(value: T, aad: FieldAAD) => encryptJson(key, value, aad),
     decryptJson: <T>(enc: EncryptedField, aad: FieldAAD) =>
       decryptJson<T>(key, enc, aad),
+    hashContent,
     wrapWithKek: (kek) => Promise.resolve(wrapKey(kek, key)),
     destroy() {
       clean(key);
+      if (macKey) clean(macKey);
     },
   };
 }
@@ -149,6 +195,7 @@ export function createKeyHandle(
 export function bindKeyHandleFactory(
   pidSalt: Uint8Array,
   pidInfo: string,
-): (rawBytes: RawDekBytes) => KeyHandle {
-  return (rawBytes) => createKeyHandle(rawBytes, pidSalt, pidInfo);
+): (rawBytes: RawDekBytes, options?: CreateKeyHandleOptions) => KeyHandle {
+  return (rawBytes, options) =>
+    createKeyHandle(rawBytes, pidSalt, pidInfo, options);
 }

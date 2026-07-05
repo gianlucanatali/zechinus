@@ -57,9 +57,9 @@ export interface BlobStoreDef<T> {
   legacyAAD?: (cryptoHandle: CryptoHandle) => FieldAAD;
   /**
    * Set `true` if this table has a `content_hash` column — DataCloak computes it
-   * internally (SHA-256 of the plaintext envelope, see `core/contentHash.ts`), no
-   * app-supplied function needed: hashing JSON is fully generic, unlike
-   * `StorageAdapter`/`KeyProvider` which genuinely need app-specific knowledge.
+   * internally as a keyed HMAC-SHA256 of the plaintext envelope (see
+   * `keyDerivation.ts`'s `hashContent`), so the server only ever sees an opaque
+   * string, never a plain fingerprint of the content.
    * Omit (or `false`) for tables without the column — writing a hash the schema
    * doesn't have a column for would fail at the storage layer. Enables `loadWithHash`.
    */

@@ -19,7 +19,6 @@ import {
   runMigrations,
   type BlobMigrator,
 } from "./versioning.ts";
-import { hashContent } from "./contentHash.ts";
 import type {
   BlobRecord,
   CryptoHandle,
@@ -41,7 +40,16 @@ export async function encodeBlob<T>(
     schemaVersion: version,
     blob: serializeEncField(enc),
   };
-  if (computeContentHash) record.contentHash = await hashContent(envelope);
+  if (computeContentHash) {
+    if (!cryptoHandle.hashContent) {
+      throw new Error(
+        `encodeBlob(${aad.table}): contentHash: true requires the CryptoHandle to implement ` +
+          `hashContent — this handle doesn't (structurally valid CryptoHandle, missing the ` +
+          `optional capability). Use createKeyHandle() or implement hashContent yourself.`,
+      );
+    }
+    record.contentHash = await cryptoHandle.hashContent(envelope);
+  }
   return record;
 }
 

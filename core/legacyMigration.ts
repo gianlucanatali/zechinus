@@ -63,9 +63,9 @@ export async function migrateLegacyAAD(
     record: {
       schemaVersion: record.schemaVersion,
       blob: serializeEncField(reEncrypted),
-      // content_hash hashes the plaintext envelope only (see core/contentHash.ts) —
-      // AAD never enters that computation, so it's invariant under this operation and
-      // carried over unchanged rather than recomputed.
+      // content_hash hashes the plaintext envelope only (see keyDerivation.ts's
+      // hashContent) — AAD never enters that computation, so it's invariant under
+      // this operation and carried over unchanged rather than recomputed.
       contentHash: record.contentHash,
     },
   };

@@ -36,6 +36,15 @@ export interface CryptoHandle {
   readonly pid: string;
   encryptJson<T>(value: T, aad: FieldAAD): Promise<EncryptedField>;
   decryptJson<T>(enc: EncryptedField, aad: FieldAAD): Promise<T>;
+  /**
+   * Keyed MAC (HMAC-SHA256) of the canonical (JSON-stringified) payload — the
+   * server-visible `content_hash` column. Optional for structural conformance
+   * only: any store declaring `contentHash: true` requires it at runtime, and
+   * `encodeBlob` throws loud, naming the store, if it's missing rather than
+   * falling back to an unkeyed digest (that would leak a plaintext fingerprint
+   * to the server — the whole point of keying it with the DEK).
+   */
+  hashContent?(payload: unknown): Promise<string>;
 }
 
 /** Storage row of a blob store: one opaque encrypted record per (collection, userId). */

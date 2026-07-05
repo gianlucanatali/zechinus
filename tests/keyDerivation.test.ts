@@ -183,6 +183,51 @@ test("bindKeyHandleFactory: each call to the bound factory is independent (fresh
   assert.equal(b.pid, derivePID(keyB, pidSalt, "test-pid-info"));
 });
 
+test("createKeyHandle: hashContent(payload) returns a deterministic 64-hex digest for the same payload+DEK", async () => {
+  const key = bytesFromRange(32, (i) => i);
+  const handle = createKeyHandle(
+    asRawDekBytes(key),
+    bytesFromRange(32, (i) => i * 7),
+    "info",
+  );
+  const h1 = await handle.hashContent!({ a: 1, b: [1, 2, 3] });
+  const h2 = await handle.hashContent!({ a: 1, b: [1, 2, 3] });
+  assert.equal(h1, h2);
+  assert.match(h1, /^[0-9a-f]{64}$/);
+});
+
+test("createKeyHandle: hashContent is keyed — same payload, different DEK → different hash", async () => {
+  const pidSalt = bytesFromRange(32, (i) => i * 7);
+  const handleA = createKeyHandle(
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+    pidSalt,
+    "info",
+  );
+  const handleB = createKeyHandle(
+    asRawDekBytes(bytesFromRange(32, (i) => 31 - i)),
+    pidSalt,
+    "info",
+  );
+  const payload = { a: 1, b: [1, 2, 3] };
+  assert.notEqual(
+    await handleA.hashContent!(payload),
+    await handleB.hashContent!(payload),
+  );
+});
+
+test("createKeyHandle: hashContent changes when the payload changes (same DEK)", async () => {
+  const key = bytesFromRange(32, (i) => i);
+  const handle = createKeyHandle(
+    asRawDekBytes(key),
+    bytesFromRange(32, (i) => i * 7),
+    "info",
+  );
+  assert.notEqual(
+    await handle.hashContent!({ a: 1 }),
+    await handle.hashContent!({ a: 2 }),
+  );
+});
+
 test("createKeyHandle: destroy() zeroes the internal key bytes", async () => {
   const key = bytesFromRange(32, (i) => i + 1); // no zero bytes, so zeroing is observable
   const handle = createKeyHandle(

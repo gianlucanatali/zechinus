@@ -78,6 +78,8 @@ export async function createWorkerKeyHandle(
       send("encryptJson", { value, aad }) as Promise<EncryptedField>,
     decryptJson: <T>(enc: EncryptedField, aad: FieldAAD) =>
       send("decryptJson", { enc, aad }) as Promise<T>,
+    hashContent: (payload: unknown) =>
+      send("hashContent", { payload }) as Promise<string>,
     wrapWithKek: (kek) => send("wrapWithKek", { kek }) as Promise<WrappedKey>,
     destroy() {
       worker.postMessage({ id: nextId++, type: "destroy" });
@@ -137,6 +139,14 @@ export function handleKeyHandleMessages(
             args.enc as EncryptedField,
             args.aad as FieldAAD,
           );
+          break;
+        case "hashContent":
+          if (!cryptoHandle!.hashContent) {
+            throw new Error(
+              "workerKeyHandle: the underlying KeyHandle has no hashContent — cannot proxy it through the worker.",
+            );
+          }
+          result = await cryptoHandle!.hashContent(args.payload);
           break;
         case "wrapWithKek":
           result = await cryptoHandle!.wrapWithKek(args.kek as Uint8Array);
