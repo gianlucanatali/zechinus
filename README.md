@@ -625,6 +625,42 @@ rows }`, matching node-postgres's shape) — no hard dependency on `pg` or any s
 Both implement the exact same `StorageAdapter` interface (`core/types.ts`) — swapping one
 for the other requires no changes to `defineStore` calls, only to `configureSecureStore`.
 
+## Node scripts & multi-user concurrency — `datacloak/node`
+
+`configureSecureStore`'s ambient identity (`keys: KeyProvider`) is a single
+module-level variable — fine for a browser tab (exactly one user at a time) but unsafe
+for a Node script/service that handles multiple users concurrently, e.g. `Promise.all`
+over per-user jobs: every ambient `store.get()`/`store.set()` call would see whichever
+identity was configured last, across every in-flight promise chain.
+
+`datacloak/node` exports `alsKeyProvider` (a `KeyProvider` backed by Node's
+`AsyncLocalStorage`) and `withIdentity(userId, cryptoHandle, fn)`, which binds an
+identity to the current async context for the lifetime of `fn` — every promise chain
+it spawns sees its own identity, isolated from sibling chains, even under `Promise.all`.
+Outside any `withIdentity` scope the getters return `null`, so an ambient call fails
+loud (`"no active session (locked)"`) instead of silently reusing a stale identity.
+
+```ts
+import { alsKeyProvider, withIdentity } from "datacloak/node";
+
+configureSecureStore({
+  storage: pgStorageAdapter(getClient),
+  keys: alsKeyProvider,
+});
+
+await Promise.all(
+  users.map(({ userId, cryptoHandle }) =>
+    withIdentity(userId, cryptoHandle, () =>
+      myStore.mutate((d) => ({ ...d, synced: true })),
+    ),
+  ),
+);
+```
+
+This is a separate entry point on purpose: `node:async_hooks` must never reach the
+browser bundle, so `datacloak/node` is never imported from `datacloak` (bare barrel) or
+`datacloak/react`.
+
 ## Package boundary — a real npm workspace, not a path alias
 
 `datacloak/` is a real npm package (`"name": "datacloak"` in its own `package.json`),
@@ -646,6 +682,7 @@ it.
 "exports": {
   ".": "./index.ts",
   "./react": "./react/index.ts",
+  "./node": "./node/index.ts",
   "./adapters/*": "./adapters/*",
   "./core/*": "./core/*"
 }

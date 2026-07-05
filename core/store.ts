@@ -43,7 +43,7 @@ import { OptimisticLockConflictError } from "./errors.ts";
  * session identity `getCryptoHandle()` already comes from — `passkeyDekController`
  * sets/clears both together, synchronously, never one without the other). A caller
  * needing a DIFFERENT identity (dev/test tooling, scripts) still has `load`/`save`,
- * which keep taking both explicitly.
+ * which keep taking both explicitly — or `withIdentity()` from `datacloak/node`.
  *
  * NOT exported from the public barrel: if a service needs this directly, that's
  * a sign `defineStore` is missing an ambient wrapper for whatever it's doing
@@ -167,7 +167,8 @@ export interface Store<T> {
    * (the same ambient session identity `useStore()` already reads: there is
    * exactly one active (cryptoHandle, userId) pair per session, set/cleared together —
    * a caller needing a DIFFERENT one — dev/test tooling, scripts — still has
-   * `load`/`save`, which keep taking both explicitly). Business logic that
+   * `load`/`save`, which keep taking both explicitly, or `withIdentity()` from
+   * `datacloak/node`). Business logic that
    * only needs to transform data never has to know the framework has a cryptoHandle or
    * an identity at all. Throws if no `KeyProvider` is configured, or if the
    * session is locked (no active cryptoHandle/userId).

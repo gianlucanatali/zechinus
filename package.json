@@ -8,6 +8,7 @@
   "exports": {
     ".": "./index.ts",
     "./react": "./react/index.ts",
+    "./node": "./node/index.ts",
     "./adapters/*": "./adapters/*",
     "./core/*": "./core/*"
   },

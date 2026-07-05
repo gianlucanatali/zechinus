@@ -265,6 +265,28 @@ If a new access pattern needs a capability the adapter doesn't have:
    4+ cases (roundtrip, AAD-per-row not movable across rows/keys/ids,
    adapter-missing-capability → explicit error, Zod validation rejects bad writes).
 
+## Node scripts & multi-user concurrency — which `KeyProvider` to use
+
+`configureSecureStore`'s ambient identity is one module-level variable — correct for a
+browser tab (one user per tab), wrong for a Node script/service touching more than one
+user's data concurrently (e.g. `Promise.all` over per-user jobs): every ambient call
+would see whichever identity was configured last, across every in-flight promise chain.
+
+- **Browser / single ambient user** (the app's normal runtime): the app's own
+  `KeyProvider` (bridging `PasskeyContext`/`UserContext`), as today.
+- **Node script/service, one user at a time, no concurrency**: still fine with a
+  simple fixed `KeyProvider` (see `fixedKeyProvider` pattern in `tests/defineStore.test.ts`).
+- **Node script/service handling MULTIPLE users concurrently**: use `alsKeyProvider` +
+  `withIdentity(userId, cryptoHandle, fn)` from `datacloak/node` (`AsyncLocalStorage`-backed).
+  Each `withIdentity` call isolates its identity to its own async context — safe under
+  `Promise.all`, never leaks across sibling chains. Outside any `withIdentity` scope the
+  getters return `null` and an ambient store call fails loud (`"no active session
+(locked)"`), never silently reusing a stale identity.
+
+**Never import `datacloak/node` from `datacloak/index.ts` or `datacloak/react/index.ts`**
+— `node:async_hooks` must never reach the browser bundle. It is a standalone entry point,
+by design, mirroring how `datacloak/react` is kept out of non-React consumers.
+
 ## The one invariant you must never break
 
 **Store `name` = DB table name = the `table` value baked into the AAD.** Changing it for
@@ -302,12 +324,14 @@ tests, component tests, build) — not just this package's own test suite.
   ports are plain get/subscribe objects, deliberately not hook-shaped
   (`useSyncExternalStore` reads them inside the hook, not inside the port itself) — don't
   design a new port as `useXyz()`.
-- `KeyProvider` has one known concrete implementation (the host app's, bridging
-  `PasskeyContext`/`UserContext` — see README's React binding section for the pointer).
-  Whatever a _second_ implementation looks like must not assume a browser: React Native
-  needs a different `getDek`/`getUserId`/`subscribe` behind native passkey/biometrics,
-  but the port itself already doesn't require WebAuthn — only a future concrete
-  implementation would.
+- `KeyProvider` has two known concrete implementations: the host app's browser one
+  (bridging `PasskeyContext`/`UserContext` — see README's React binding section for the
+  pointer), and `alsKeyProvider` (`datacloak/node`, `AsyncLocalStorage`-backed, for Node
+  scripts/services — see "Node scripts & multi-user concurrency" above). Whatever a
+  _future_ implementation looks like must not assume a browser: React Native needs a
+  different `getDek`/`getUserId`/`subscribe` behind native passkey/biometrics, but the
+  port itself already doesn't require WebAuthn — only a future concrete implementation
+  would.
 
 ## Keeping this guide honest
 
