@@ -120,3 +120,5 @@ export {
   type WrappedKey,
   type RawDekBytes,
 } from "./core/keyDerivation.ts";
+
+export { setGzipImpl, type GzipImpl } from "./core/gzip.ts";

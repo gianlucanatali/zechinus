@@ -19,6 +19,7 @@
 import { gcm } from "@noble/ciphers/aes.js";
 import { randomBytes, clean } from "@noble/ciphers/utils.js";
 import type { FieldAAD, EncryptedField } from "./types.ts";
+import { gzipCompress, gzipDecompress } from "./gzip.ts";
 
 const COMPRESS_THRESHOLD = 64;
 
@@ -54,22 +55,6 @@ function buildAADBytes(aad: FieldAAD, v: 1 | 2 | 3 | 4): Uint8Array {
   return v <= 2 ? buildAADBytesV1(aad) : buildAADBytesV2(aad);
 }
 
-async function compress(data: Uint8Array): Promise<Uint8Array> {
-  const cs = new CompressionStream("gzip");
-  const writer = cs.writable.getWriter();
-  writer.write(data as Uint8Array<ArrayBuffer>);
-  writer.close();
-  return new Uint8Array(await new Response(cs.readable).arrayBuffer());
-}
-
-async function decompress(data: Uint8Array): Promise<Uint8Array> {
-  const ds = new DecompressionStream("gzip");
-  const writer = ds.writable.getWriter();
-  writer.write(data as Uint8Array<ArrayBuffer>);
-  writer.close();
-  return new Uint8Array(await new Response(ds.readable).arrayBuffer());
-}
-
 /** Encrypts a text field. Compresses automatically above `COMPRESS_THRESHOLD` bytes. */
 export async function encryptField(
   dek: Uint8Array,
@@ -78,7 +63,7 @@ export async function encryptField(
 ): Promise<EncryptedField> {
   const raw = ENCODER.encode(plaintext);
   const shouldCompress = raw.length > COMPRESS_THRESHOLD;
-  const payload = shouldCompress ? await compress(raw) : raw;
+  const payload = shouldCompress ? await gzipCompress(raw) : raw;
 
   const nonce = randomBytes(12);
   try {
@@ -111,7 +96,8 @@ export async function decryptField(
   const nonce = fromBase64(enc.n);
   const cipher = gcm(dek, nonce, buildAADBytes(aad, enc.v));
   const payload = cipher.decrypt(ciphertext);
-  const raw = enc.v === 2 || enc.v === 4 ? await decompress(payload) : payload;
+  const raw =
+    enc.v === 2 || enc.v === 4 ? await gzipDecompress(payload) : payload;
   return DECODER.decode(raw);
 }
 
@@ -123,7 +109,7 @@ export async function encryptJson<T>(
 ): Promise<EncryptedField> {
   const json = JSON.stringify(value);
   const raw = ENCODER.encode(json);
-  const compressed = await compress(raw);
+  const compressed = await gzipCompress(raw);
 
   const nonce = randomBytes(12);
   try {
