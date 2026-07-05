@@ -128,10 +128,21 @@ a record that exists with a missing/malformed blob throws — never reported as
 ## `content_hash` — `contentHash: true`, not an injected function
 
 If a table has a `content_hash` column, set `contentHash: true` — DataCloak computes it
-internally (SHA-256 of the plaintext envelope, `core/contentHash.ts`) on every write.
-Unlike `StorageAdapter`/`KeyProvider`, hashing JSON needs zero app-specific knowledge, so
-this is a boolean declaration ("does this table have the column"), not an app-supplied
-function. Omit for tables without the column.
+internally as a **keyed HMAC-SHA256** of the plaintext envelope (the MAC key is derived
+from the DEK, `keyDerivation.ts`'s `createKeyHandle`, never the DEK itself) on every
+write. Keying it matters: an unkeyed hash (the pre-fix behavior, plain SHA-256) gives the
+server a deterministic fingerprint of the plaintext — it can compare two rows for
+equality, detect a rollback to previously-seen content, or dictionary-attack a
+low-entropy value, none of which it can do against an opaque HMAC output. Unlike
+`StorageAdapter`/`KeyProvider`, hashing JSON needs zero app-specific knowledge, so this is
+a boolean declaration by default ("does this table have the column"), not a
+mandatory app-supplied function — though `createKeyHandle`'s optional
+`hashContent` override exists for the rare case where the MAC should come from
+somewhere else (e.g. a KMS) instead of the DEK. Omit `contentHash` for tables without the
+column. Rows written before this fix may still carry the old unkeyed hash — harmless,
+since every comparison is stored-vs-freshly-computed equality, never a re-derivation of
+the algorithm; such a row simply converges to the new HMAC on its first write after the
+fix (see README's `content_hash` section for the full rationale).
 
 Populating the column unlocks four independent capabilities: **optimistic locking**
 (built, below), **skip-write** (built — `mutate()` on perUser/perKey skips the
@@ -193,6 +204,12 @@ conflict rolls back the optimistic update and throws `OptimisticLockConflictErro
 `version: N` requires exactly N-1 `migrators` (v1→v2, …, v(N-1)→vN) — `defineStore` throws
 immediately at definition (boot/import) if the count is off, not just later when it hits
 old data. **Always pair a `version` bump with its migrator in the same change.**
+
+Not to be confused with `EncryptedField.v` (the wire format's own crypto envelope
+version, `1 | 2 | 3 | 4` — compression + AAD serialization, orthogonal to a store's
+`version`/migrators). `1`/`2` are legacy, read-only (unescaped pipe-join AAD); every
+write emits `3`/`4` (unambiguous JSON-serialized AAD). See README's "Wire format:
+envelope version" for the full mapping.
 
 This package also requires a `schemaFingerprint` on every store (see the README's
 "versioning is mandatory" guardrail): if you change a schema's shape without updating its

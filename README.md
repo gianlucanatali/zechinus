@@ -18,6 +18,9 @@ encryption — so the domain only declares **the shape of its data**, never the 
 > standalone OSS package, and OSS ships in English. The rest of the host app follows its own
 > Italian/English convention (see `AGENTS.md`) — that convention does NOT apply inside
 > `datacloak/`.
+>
+> **Threat model:** see `SECURITY.md` for what a compromised/curious server can and
+> cannot do, and what's a declared non-goal (rollback protection, true DEK rotation).
 
 ## Mental model
 
@@ -30,6 +33,30 @@ frontend/service → defineStore({ name, identity, encrypt, schema, version }) �
                                             ↓
                               StorageAdapter (Supabase today; pluggable)
 ```
+
+## Wire format: envelope version (`EncryptedField.v`)
+
+Every ciphertext blob carries a `v: 1 | 2 | 3 | 4` alongside the ciphertext and nonce —
+NOT the same thing as `StoreDef.version` (the schema's own version, used for migrators).
+`v` tells decrypt which compression AND which AAD serialization the blob was written
+with, so decoding is deterministic from the stored value alone (no try-and-fallback, no
+double decrypt):
+
+| `v` | Compression | AAD serialization |
+| --- | ----------- | ----------------- |
+| 1   | none (raw)  | v1 — pipe-join    |
+| 2   | gzip        | v1 — pipe-join    |
+| 3   | none (raw)  | v2 — JSON 4-tuple |
+| 4   | gzip        | v2 — JSON 4-tuple |
+
+AAD-v1 (legacy) joined the 4 AAD fields (`userId|table|field|rowId`) with no escaping — a
+`|` inside any component made two logically different AADs serialize to the identical byte
+string, which AES-GCM then treated as interchangeable. AAD-v2 (canonical) is
+`JSON.stringify([userId, table, field, rowId])` — unambiguous regardless of what
+characters a component contains. **`1`/`2` are read-only** (a blob already on disk before
+this fix): every new write always emits `3` or `4`. A row still holding `1`/`2` converges
+to canonical the next time anything touches it, via the same lazy write-back
+`legacyAAD`/schema-version migrations already use — no live migration script needed.
 
 ## Quickstart
 
@@ -244,7 +271,12 @@ to migrate".
 ## `content_hash` — `contentHash: true`
 
 If a table has a `content_hash` column, set `contentHash: true` and DataCloak computes it
-for you (SHA-256 hex of the plaintext envelope, before encryption) on every write:
+for you — a **keyed HMAC-SHA256** (hex) of the plaintext envelope, before encryption, on
+every write. The MAC key is derived from the DEK (`keyDerivation.ts`'s `createKeyHandle`),
+never the DEK itself, so the server only ever sees an opaque, non-fingerprintable string —
+it cannot compare two rows' plaintext for equality, detect a rollback to old content, or
+run a dictionary attack against low-entropy values, all of which a plain (unkeyed) hash
+would let it do:
 
 ```ts
 defineStore({
@@ -258,10 +290,24 @@ defineStore({
 
 Unlike `StorageAdapter`/`KeyProvider` (which genuinely need an app-supplied
 implementation), hashing a JSON payload requires zero app-specific knowledge — so this is
-a boolean, not an injected function. DataCloak owns the hash implementation internally
-(`core/contentHash.ts`); the app only declares whether the column exists. Omit (or
-`false`) for tables without the column — writing a hash the schema has no column for
-would fail at the storage layer.
+a boolean, not an injected function by default. DataCloak computes it internally via the
+`CryptoHandle`'s optional `hashContent` method (`keyDerivation.ts`'s `createKeyHandle`
+implements it; `KeyHandle`s always have it). The app only declares whether the column
+exists. Omit (or `false`) for tables without the column — writing a hash the schema has no
+column for would fail at the storage layer.
+
+If you need the MAC computed elsewhere (e.g. delegated to a KMS instead of derived from the
+DEK), pass `createKeyHandle(rawBytes, pidSalt, pidInfo, { hashContent })` — everything else
+(encryption, PID, key wrapping) keeps the default DEK-derived behavior; only the hash
+computation is overridden.
+
+**Transition note:** rows written before this change (or by an app that hasn't upgraded
+yet) may still carry the old plain SHA-256 hash. That's harmless and self-healing: the
+optimistic-lock/skip-write comparisons only ever compare a _stored_ hash against a _freshly
+computed_ one for equality, never recompute or trust the algorithm that produced the stored
+value — so an old-format row simply converges to the new HMAC the first time anything
+writes to it (worst case, one extra write instead of a skipped one; see `content_hash
+transition` tests).
 
 `content_hash` unlocks four independent capabilities:
 
