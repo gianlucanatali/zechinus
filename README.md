@@ -263,14 +263,33 @@ a boolean, not an injected function. DataCloak owns the hash implementation inte
 `false`) for tables without the column — writing a hash the schema has no column for
 would fail at the storage layer.
 
-`content_hash` unlocks two independent capabilities. Only one is built:
+`content_hash` unlocks four independent capabilities:
 
 - **Optimistic locking** (`optimisticLock: true`, below) — **built.** Prevents a tab from
   silently overwriting another tab's write.
-- **Skip-fetch caching** ("don't re-download the blob if the hash hasn't changed") — **not
-  built.** Needs a persisted cross-session cache to compare against (today's `CacheAdapter`
-  — e.g. `tanstackAdapter` — is in-memory only, wiped on reload), a separate, larger piece
-  of work with no consumer yet.
+- **Skip-write** — **built.** `mutate()` (perUser and perKey) compares the hash of what
+  it's about to write against the hash of what it just read — if the transform produced
+  no real change, the encrypt+upload is skipped entirely, `mutate()` just returns the
+  value. Requires only `contentHash: true` (no `cache` needed, unlike skip-fetch — the
+  comparison uses the hash `mutate()` already has from its own load, not a cross-call
+  cache slot). **Gated off when `optimisticLock: true` is also set**: with optimistic
+  locking, `mutate()` writes through `saveIfMatch`, which does the real conflict check
+  server-side — skipping that write for a "no-op" transform would also skip the conflict
+  check, silently accepting a stale view. Not built for `set()`/`save()` (blind writes,
+  no "current" to compare against) or `identity: "many"` (no `mutate()`-equivalent).
+- **In-session skip-fetch revalidation** — **built.** Transparent to the app: when a store
+  declares `contentHash: true`, `configureSecureStore` has a `cache`, and the adapter
+  implements `getHash`, every `load`/`get`/`mutate` compares the cache slot's hash against
+  a lightweight `getHash()` call before deciding whether to re-download the blob — a match
+  serves the cached `{data, hash}` slot, no full load. Any of the three missing (no
+  `contentHash`, no `cache`, no `getHash`) falls back to today's behavior (always a full
+  load), so this is purely additive. Memory-only: the slot lives in the in-memory
+  `CacheAdapter`, wiped on reload/lock, same as today. `identity: "many"` is not covered —
+  its cache slot is an array with a hash per row; per-row or aggregate revalidation would
+  be a different design with no consumer asking for it yet.
+- **Cross-session persistent cache** ("skip the network round-trip entirely across page
+  reloads") — **not built.** Needs a cache that survives a reload (ciphertext persisted to
+  IndexedDB, say) — today's `CacheAdapter` is in-memory only. No consumer yet.
 
 ## Optimistic locking — `optimisticLock: true`
 
@@ -301,11 +320,15 @@ if (!result.ok) {
 }
 ```
 
-`expectedHash: null` means "I believe no row exists yet" (a plain insert; someone else's
-concurrent insert is a conflict, not an error). A non-`null` hash means "only write if
-the row's current `content_hash` still matches this" (`UPDATE ... WHERE content_hash =
-expected`, an INSERT/UPDATE-with-guard the adapter implements). **A conflict is always
-`{ok:false}`, never thrown** — an expected, recoverable outcome, not a bug.
+`expectedHash: null` means "I believe there's no REAL content yet" — covers BOTH "no row
+exists" AND "the row exists but was never hashed" (legacy data written before
+`content_hash` existed, or before this store declared `contentHash: true`). Both succeed;
+the only genuine conflict for `null` is a row that already has a REAL hash (someone else's
+write beat us to it) — the adapter resolves this against the row's actual current state,
+not a stale client-side assumption. A non-`null` hash means "only write if the row's
+current `content_hash` still matches this" (`UPDATE ... WHERE content_hash = expected`, an
+INSERT/UPDATE-with-guard the adapter implements). **A conflict is always `{ok:false}`,
+never thrown** — an expected, recoverable outcome, not a bug.
 
 Available on all 3 cardinalities: `Store.saveIfMatch` (perUser), `KeyedStore.saveIfMatch`
 (perKey, independent lock per key), `CollectionStore.updateIfMatch` (many, independent
@@ -567,8 +590,10 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   real consumer needs them today.
 - **Hub-and-spoke storage** (plaintext columns + ref on one backend, blob on another,
   e.g. low-cost object storage) — planned capability, not implemented yet.
-- **Skip-fetch caching** (don't re-download a blob if `content_hash` hasn't changed) —
-  needs a persisted cross-session cache, no consumer yet. See "`content_hash`" above.
+- **Cross-session persistent skip-fetch cache** (skip the network round-trip across page
+  reloads, not just within a session) — needs a persisted cache (ciphertext on
+  IndexedDB, say), no consumer yet. See "`content_hash`" above — the in-session variant
+  IS built.
 - **React Native**: the crypto engine (`@noble/*`) and `core/keyDerivation.ts` are
   already isomorphic — `webauthnKeyProvider` (`adapters/webauthnKeyProvider.ts`) is the
   **web** adapter (uses `navigator.credentials`, browser-only). RN needs its own adapter
@@ -605,6 +630,11 @@ address rows): add the method as **optional** (`method?:`) on `StorageAdapter`
 in-memory adapter in the test (`datacloak/tests/*.test.ts`, see `defineStoreMany.test.ts`
 for the pattern). `defineStore` must throw an explicit, descriptive error if the
 configured adapter doesn't support the requested capability — never a silent fallback.
+Optional methods today: `putIfMatch`/`updateByIdIfMatch` (optimistic locking), `list`/
+`insert`/`updateById`/`deleteById` (`identity: "many"`), `listByKeyRange` (`perKey`
+range queries), and `getHash` (in-session skip-fetch revalidation, above) — an adapter
+missing one simply never unlocks that specific capability, every other capability keeps
+working.
 
 ## Architecture: the ports
 

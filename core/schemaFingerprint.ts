@@ -31,6 +31,8 @@ interface ZodDefLike {
   innerType?: z.ZodType;
   shape?: Record<string, z.ZodType>;
   element?: z.ZodType;
+  keyType?: z.ZodType;
+  valueType?: z.ZodType;
 }
 
 function defOf(schema: z.ZodType): ZodDefLike {
@@ -50,6 +52,9 @@ function describeType(schema: z.ZodType, depth: number): string {
     case "array":
       if (depth <= 0 || !def.element) return "array";
       return `array<${describeType(def.element, depth - 1)}>`;
+    case "record":
+      if (depth <= 0 || !def.valueType) return "record";
+      return `record<${describeType(def.keyType!, depth - 1)},${describeType(def.valueType, depth - 1)}>`;
     default:
       return def.type;
   }

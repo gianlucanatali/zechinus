@@ -133,10 +133,19 @@ Unlike `StorageAdapter`/`KeyProvider`, hashing JSON needs zero app-specific know
 this is a boolean declaration ("does this table have the column"), not an app-supplied
 function. Omit for tables without the column.
 
-Populating the column unlocks two independent capabilities: **optimistic locking** (built,
-below) and **skip-fetch caching** (not built — needs a persisted cross-session cache the
-current `CacheAdapter` doesn't provide; no consumer yet). Turning `contentHash` on gets
-you the column, not either capability automatically.
+Populating the column unlocks four independent capabilities: **optimistic locking**
+(built, below), **skip-write** (built — `mutate()` on perUser/perKey skips the
+encrypt+upload when the transform is a no-op relative to what it just read; needs only
+`contentHash: true`, no `cache`; automatically OFF when `optimisticLock: true` is also
+set, since skipping the write would also skip `saveIfMatch`'s server-side conflict check —
+see README's "content_hash" section for the full rationale), **in-session skip-fetch
+revalidation** (built — a cached `{data, hash}` slot is served without a full load once a
+lightweight `getHash()` call confirms the server's `content_hash` still matches it;
+memory-only, wiped on reload/lock, requires a configured `cache` and an adapter with
+`getHash`; excludes `identity: "many"`), and **cross-session persistent caching** (not
+built — needs a cache that survives a reload, which the current in-memory-only
+`CacheAdapter` doesn't provide; no consumer yet).
+Turning `contentHash` on gets you the column, not any capability automatically.
 
 ## Optimistic locking — `optimisticLock: true`, requires `contentHash: true`
 
@@ -161,9 +170,15 @@ Available on all 3 cardinalities: `Store.saveIfMatch` (perUser), `KeyedStore.sav
 on one row never touches another). Underlying adapter capability: `StorageAdapter.
 putIfMatch`/`updateByIdIfMatch` (optional — missing capability throws an explicit error at
 the first conditional write, never a silent unconditional fallback). Both shipped adapters
-implement it: `expectedHash: null` → plain INSERT (a unique-violation is the conflict,
-caught and turned into `{ok:false}`, never rethrown); non-null → `UPDATE ... WHERE ... AND
-content_hash = expected`, zero rows affected = conflict.
+implement it: `expectedHash: null` means "no REAL content yet" — covers both "no row" and
+"row exists but was never hashed" (legacy data), and both succeed; `pgStorageAdapter` does
+this as a single atomic conditional upsert (`INSERT ... ON CONFLICT DO UPDATE ... WHERE
+content_hash IS NULL RETURNING`), `supabaseStorageAdapter` as insert-then-guarded-update
+(PostgREST's `.upsert()` can't express a conditional `ON CONFLICT ... WHERE`, so it's two
+round-trips, but the guarded UPDATE re-reads current state so no real conflict is missed).
+Either way, the only genuine conflict for `expectedHash: null` is a row that already has a
+REAL hash. Non-null → `UPDATE ... WHERE ... AND content_hash = expected`, zero rows
+affected = conflict.
 
 **The React hooks (`useStore`/`useKeyedStore`/`useCollectionStore`) thread the hash
 automatically** — their cache slot holds `{data, hash}` internally, `save`/`update` call
@@ -315,9 +330,10 @@ tests, component tests, build) — not just this package's own test suite.
 - No `encrypt: "none"` (fully plaintext row) yet, and mixed `enc()` fields only work with
   `identity: "many"` — not `perUser`/`perKey`.
 - No hub-and-spoke storage adapter (cleartext+ref on one backend, blob on another).
-- No skip-fetch caching (don't re-download a blob if `content_hash` hasn't changed) —
-  needs a persisted cross-session cache, no consumer yet. Optimistic locking (the _other_
-  `content_hash` capability) IS built — see the section above, don't confuse the two.
+- No cross-session persistent skip-fetch cache (skip the round-trip across page reloads,
+  not just within a session) — needs a persisted cache (e.g. ciphertext on IndexedDB), no
+  consumer yet. Optimistic locking AND in-session skip-fetch revalidation (the other two
+  `content_hash` capabilities) ARE built — see the section above, don't confuse the three.
 - React binding exists for all 3 cardinalities (`useStore`/`useKeyedStore`/
   `useCollectionStore`, all in `react/`). Each needs `keys` (`KeyProvider`) and `cache`
   (`CacheAdapter`) in `configureSecureStore`; without them it throws explicitly. Both

@@ -86,12 +86,15 @@ export interface StorageAdapter {
   ): Promise<void>;
   /**
    * Conditional write for optimistic locking (`defineStore`'s `optimisticLock: true`,
-   * requires `contentHash: true`). `expectedHash: null` means "I believe no row
-   * exists yet" (a plain insert; a unique-constraint violation is a conflict, not an
-   * error). A non-null `expectedHash` means "only write if the row's current
-   * content_hash still matches this" (an `UPDATE ... WHERE content_hash = expected`
-   * equivalent). Returns `false` on conflict — a conflict is an expected, recoverable
-   * outcome, never thrown as an error. Optional: not every adapter supports it.
+   * requires `contentHash: true`). `expectedHash: null` means "I believe there's no
+   * REAL content yet" — covers BOTH "no row exists" AND "the row exists but was never
+   * hashed" (legacy data written before `content_hash` existed). Both succeed; the
+   * only genuine conflict for `expectedHash: null` is a row that already has a REAL
+   * hash (someone else's write beat us to it). A non-null `expectedHash` means "only
+   * write if the row's current content_hash still matches this" (an `UPDATE ... WHERE
+   * content_hash = expected` equivalent). Returns `false` on conflict — a conflict is
+   * an expected, recoverable outcome, never thrown as an error. Optional: not every
+   * adapter supports it.
    */
   putIfMatch?(
     collection: string,
@@ -100,6 +103,18 @@ export interface StorageAdapter {
     record: BlobRecord,
     expectedHash: string | null,
   ): Promise<boolean>;
+  /**
+   * Lightweight hash-only read for skip-fetch revalidation: returns the row's
+   * current content_hash without downloading the blob. `null` means "row missing
+   * or its content_hash column is null" — callers treat both as "cannot skip,
+   * do a full load". Optional: adapters that don't implement it simply never
+   * skip (every load is a full load, today's behavior).
+   */
+  getHash?(
+    collection: string,
+    userId: string,
+    extraKeys: KeyColumn[],
+  ): Promise<string | null>;
   /**
    * perKey range query: all rows for the user whose key falls in `[from, to]`
    * (lexicographic comparison — works for sortable keys like `year_month`). Optional:

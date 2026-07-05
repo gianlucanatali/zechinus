@@ -61,3 +61,30 @@ test("fingerprintSchema: encrypt:'all' vs 'fields' with the same schema → diff
   const b = fingerprintSchema(schema, "fields");
   assert.notEqual(a, b);
 });
+test("fingerprintSchema: record value type changed → different fingerprint", () => {
+  // Regression: describeType used to fall through to the generic default for
+  // z.record, describing any record as just "record" — a record of structured
+  // objects and a record of plain strings hashed identically, so the exact
+  // drift this guardrail exists to catch went undetected.
+  const a = fingerprintSchema(z.record(z.string(), z.string()), "all");
+  const b = fingerprintSchema(
+    z.record(z.string(), z.object({ amount: z.number() })),
+    "all",
+  );
+  assert.notEqual(a, b);
+});
+
+test("fingerprintSchema: record value object shape changed → different fingerprint", () => {
+  const a = fingerprintSchema(
+    z.record(z.string(), z.object({ amount: z.number() })),
+    "all",
+  );
+  const b = fingerprintSchema(
+    z.record(
+      z.string(),
+      z.object({ amount: z.number(), currency: z.string() }),
+    ),
+    "all",
+  );
+  assert.notEqual(a, b);
+});

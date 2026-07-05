@@ -183,3 +183,44 @@ test("decodeWithLegacyFallback: record is null (never saved) → returns empty, 
   assert.deepEqual(result.data, { v: "default" });
   assert.equal(legacyAttempted, false);
 });
+test("decodeWithLegacyFallback: canonical decode fails AFTER decrypt (migrator bug) → canonical error surfaces, not the legacy GCM mismatch", async () => {
+  // Regression: the row IS under the canonical AAD, but a migrator throws while
+  // decoding it. The legacy attempt then fails to decrypt (auth-tag mismatch —
+  // the row was never legacy) and that misleading crypto error used to mask the
+  // real one. The migrator's error must be what propagates.
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const canonicalAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  const record = await encodeBlob(cryptoHandle, canonicalAAD, { v: "old" }, 1);
+
+  await assert.rejects(
+    () =>
+      decodeWithLegacyFallback({
+        cryptoHandle,
+        record,
+        canonicalAAD,
+        legacyAAD: {
+          userId: cryptoHandle.pid,
+          table: "t",
+          field: "legacy",
+          rowId: "r1",
+        },
+        version: 2,
+        migrators: [
+          () => {
+            throw new Error("migrator exploded: v1 payload not parsable");
+          },
+        ],
+        empty: { v: "" },
+        persistMigrated: async () => {
+          throw new Error("must not persist anything on failure");
+        },
+      }),
+    /migrator exploded/,
+    "the canonical (migrator) error must surface, not the legacy decrypt failure",
+  );
+});

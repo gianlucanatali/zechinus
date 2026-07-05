@@ -230,8 +230,8 @@ test("pgStorageAdapter: quotes identifiers defensively (embedded double quote do
   assert.match(calls[0].text, /FROM "weird""table"/);
 });
 
-test("pgStorageAdapter.putIfMatch: expectedHash null → plain INSERT (no ON CONFLICT)", async () => {
-  const { client, calls } = fakeClient();
+test("pgStorageAdapter.putIfMatch: expectedHash null → conditional upsert, succeeds when no row exists yet or the existing row has no hash (legacy)", async () => {
+  const { client, calls } = fakeClient([{ user_id: "u1" }]); // RETURNING matched a row
   const adapter = pgStorageAdapter(() => client);
 
   const ok = await adapter.putIfMatch!(
@@ -244,7 +244,12 @@ test("pgStorageAdapter.putIfMatch: expectedHash null → plain INSERT (no ON CON
 
   assert.equal(ok, true);
   assert.match(calls[0].text, /INSERT INTO "portfolio_blobs"/);
-  assert.ok(!calls[0].text.includes("ON CONFLICT"));
+  assert.match(calls[0].text, /ON CONFLICT \(user_id\) DO UPDATE SET/);
+  assert.match(
+    calls[0].text,
+    /WHERE "portfolio_blobs"\."content_hash" IS NULL/,
+  );
+  assert.match(calls[0].text, /RETURNING user_id/);
   assert.deepEqual(calls[0].params, [
     "u1",
     "enc:y",
@@ -254,19 +259,15 @@ test("pgStorageAdapter.putIfMatch: expectedHash null → plain INSERT (no ON CON
   ]);
 });
 
-test("pgStorageAdapter.putIfMatch: expectedHash null + unique violation (code 23505) → false, not thrown", async () => {
-  const client: PgClient = {
-    async query() {
-      throw { code: "23505", message: "duplicate key" };
-    },
-  };
+test("pgStorageAdapter.putIfMatch: expectedHash null → conflict (false, not thrown) when the existing row already has a real hash", async () => {
+  const { client } = fakeClient([]); // WHERE content_hash IS NULL excluded the row → 0 rows RETURNING
   const adapter = pgStorageAdapter(() => client);
 
   const ok = await adapter.putIfMatch!(
     "portfolio_blobs",
     "u1",
     [],
-    { schemaVersion: 1, blob: "enc:y" },
+    { schemaVersion: 1, blob: "enc:y", contentHash: "h2" },
     null,
   );
 
@@ -363,8 +364,8 @@ test("pgStorageAdapter.putIfMatch: with an extra key (perKey), scopes both the I
   );
 });
 
-test("pgStorageAdapter.updateByIdIfMatch: expectedHash null → plain INSERT with the given id", async () => {
-  const { client, calls } = fakeClient();
+test("pgStorageAdapter.updateByIdIfMatch: expectedHash null → conditional upsert with the given id, succeeds when absent or legacy (no hash)", async () => {
+  const { client, calls } = fakeClient([{ id: "row-1" }]); // RETURNING matched a row
   const adapter = pgStorageAdapter(() => client);
 
   const ok = await adapter.updateByIdIfMatch!(
@@ -381,15 +382,17 @@ test("pgStorageAdapter.updateByIdIfMatch: expectedHash null → plain INSERT wit
     calls[0].text,
     /INSERT INTO "rebalance_simulations" \("id", "user_id"/,
   );
+  assert.match(calls[0].text, /ON CONFLICT \(id\) DO UPDATE SET/);
+  assert.match(
+    calls[0].text,
+    /WHERE "rebalance_simulations"\."content_hash" IS NULL/,
+  );
+  assert.match(calls[0].text, /RETURNING id/);
   assert.deepEqual(calls[0].params.slice(0, 2), ["row-1", "u1"]);
 });
 
-test("pgStorageAdapter.updateByIdIfMatch: expectedHash null + unique violation (code 23505) → false, not thrown", async () => {
-  const client: PgClient = {
-    async query() {
-      throw { code: "23505", message: "duplicate key" };
-    },
-  };
+test("pgStorageAdapter.updateByIdIfMatch: expectedHash null → conflict (false, not thrown) when the existing row already has a real hash", async () => {
+  const { client } = fakeClient([]); // WHERE content_hash IS NULL excluded the row → 0 rows RETURNING
   const adapter = pgStorageAdapter(() => client);
 
   const ok = await adapter.updateByIdIfMatch!(
@@ -440,6 +443,50 @@ test("pgStorageAdapter.updateByIdIfMatch: false (no throw) when zero rows match 
   );
 
   assert.equal(ok, false);
+});
+
+test("pgStorageAdapter.getHash: selects content_hash by user_id, returns the value when present", async () => {
+  const { client, calls } = fakeClient([{ content_hash: "h1" }]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const hash = await adapter.getHash!("portfolio_blobs", "u1", []);
+
+  assert.equal(hash, "h1");
+  assert.match(
+    calls[0].text,
+    /SELECT content_hash FROM "portfolio_blobs" WHERE user_id = \$1/,
+  );
+  assert.deepEqual(calls[0].params, ["u1"]);
+});
+
+test("pgStorageAdapter.getHash: returns null when no row matches", async () => {
+  const { client } = fakeClient([]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const hash = await adapter.getHash!("portfolio_blobs", "u1", []);
+
+  assert.equal(hash, null);
+});
+
+test("pgStorageAdapter.getHash: returns null when the row's content_hash column is null", async () => {
+  const { client } = fakeClient([{ content_hash: null }]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const hash = await adapter.getHash!("portfolio_blobs", "u1", []);
+
+  assert.equal(hash, null);
+});
+
+test("pgStorageAdapter.getHash: with an extra key (perKey), scopes the WHERE to it too", async () => {
+  const { client, calls } = fakeClient([{ content_hash: "h1" }]);
+  const adapter = pgStorageAdapter(() => client);
+
+  await adapter.getHash!("transaction_blobs", "u1", [
+    { column: "year_month", value: "2026-07" },
+  ]);
+
+  assert.match(calls[0].text, /AND "year_month" = \$2/);
+  assert.deepEqual(calls[0].params, ["u1", "2026-07"]);
 });
 
 function params0Timestamp(calls: Array<{ params: unknown[] }>): unknown {

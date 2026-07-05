@@ -30,10 +30,11 @@ import { encodeBlob } from "./blobCodec.ts";
 import { decodeWithLegacyFallback } from "./legacyFallback.ts";
 import { getSecureStoreConfig } from "./config.ts";
 import { randomId } from "./randomId.ts";
-import type { BlobMigrator } from "./versioning.ts";
+import { toEnvelope, type BlobMigrator } from "./versioning.ts";
+import { hashContent } from "./contentHash.ts";
 import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
-import type { CryptoHandle, FieldAAD } from "./types.ts";
+import type { CryptoHandle, FieldAAD, KeyColumn } from "./types.ts";
 import { OptimisticLockConflictError } from "./errors.ts";
 
 /**
@@ -481,34 +482,44 @@ function buildKeyedStore<S extends z.ZodType>(
     userId: string,
     cryptoHandle: CryptoHandle,
     key: string,
-  ): Promise<{ data: T; hash: string | null }> => {
-    const { storage } = getSecureStoreConfig();
-    const { data, hash } = await loadRow(
-      cryptoHandle,
-      {
-        get: () =>
-          storage.get(def.name, userId, [{ column: keyColumn, value: key }]),
-        put: (record) =>
-          storage.put(
-            def.name,
-            userId,
-            [{ column: keyColumn, value: key }],
-            record,
-          ),
+  ): Promise<{ data: T; hash: string | null }> =>
+    loadRevalidated({
+      contentHash: def.contentHash,
+      cacheKey: `${def.name}:${userId}:${key}`,
+      collection: def.name,
+      userId,
+      extraKeys: [{ column: keyColumn, value: key }],
+      loadFull: async () => {
+        const { storage } = getSecureStoreConfig();
+        const { data, hash } = await loadRow(
+          cryptoHandle,
+          {
+            get: () =>
+              storage.get(def.name, userId, [
+                { column: keyColumn, value: key },
+              ]),
+            put: (record) =>
+              storage.put(
+                def.name,
+                userId,
+                [{ column: keyColumn, value: key }],
+                record,
+              ),
+          },
+          canonicalAADFor(cryptoHandle, key),
+          {
+            storeName: def.name,
+            rowLabel: "perKey ",
+            version: def.version,
+            migrators,
+            empty,
+            legacyAAD: def.legacyAAD?.(cryptoHandle, key),
+          },
+          (upgradedData) => keyedSave(userId, cryptoHandle, key, upgradedData),
+        );
+        return { data: validateRead(data, `load(key=${key})`), hash };
       },
-      canonicalAADFor(cryptoHandle, key),
-      {
-        storeName: def.name,
-        rowLabel: "perKey ",
-        version: def.version,
-        migrators,
-        empty,
-        legacyAAD: def.legacyAAD?.(cryptoHandle, key),
-      },
-      (upgradedData) => keyedSave(userId, cryptoHandle, key, upgradedData),
-    );
-    return { data: validateRead(data, `load(key=${key})`), hash };
-  };
+    });
 
   const keyed: KeyedStore<T> = {
     name: def.name,
@@ -552,8 +563,17 @@ function buildKeyedStore<S extends z.ZodType>(
         }
         return next;
       }
-      const current = (await keyedLoadInternal(userId, cryptoHandle, key)).data;
+      const { data: current, hash } = await keyedLoadInternal(
+        userId,
+        cryptoHandle,
+        key,
+      );
       const next = await fn(current);
+      if (def.contentHash && hash !== null) {
+        const validated = validateWrite(next, `mutate(key=${key})`);
+        const nextHash = await hashContent(toEnvelope(validated, def.version));
+        if (nextHash === hash) return next;
+      }
       await keyedSave(userId, cryptoHandle, key, next);
       return next;
     },
@@ -853,18 +873,37 @@ function buildPerUserStore<S extends z.ZodType>({
       ? (cryptoHandle) => def.legacyAAD!(cryptoHandle, cryptoHandle.pid)
       : undefined,
   });
+
+  const perUserLoadInternal = async (
+    userId: string,
+    cryptoHandle: CryptoHandle,
+  ): Promise<{ data: T; hash: string | null }> =>
+    loadRevalidated({
+      contentHash: def.contentHash,
+      cacheKey: `${def.name}:${userId}`,
+      collection: def.name,
+      userId,
+      extraKeys: [],
+      loadFull: async () => {
+        if (inner.loadWithHash) return inner.loadWithHash(userId, cryptoHandle);
+        return { data: await inner.load(userId, cryptoHandle), hash: null };
+      },
+    });
+
   const store: Store<T> = {
     name: def.name,
     version: def.version,
     async load(userId, cryptoHandle) {
-      return validateRead(await inner.load(userId, cryptoHandle), "load");
+      const { data } = await perUserLoadInternal(userId, cryptoHandle);
+      return validateRead(data, "load");
     },
     async save(userId, cryptoHandle, data) {
       await inner.save(userId, cryptoHandle, validateWrite(data, "save"));
     },
     async get() {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
-      return validateRead(await inner.load(userId, cryptoHandle), "get");
+      const { data } = await perUserLoadInternal(userId, cryptoHandle);
+      return validateRead(data, "get");
     },
     async set(data) {
       if (def.optimisticLock) {
@@ -878,12 +917,13 @@ function buildPerUserStore<S extends z.ZodType>({
     },
     async mutate(fn) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      const { data: rawCurrent, hash } = await perUserLoadInternal(
+        userId,
+        cryptoHandle,
+      );
+      const current = validateRead(rawCurrent, "mutate");
+      const next = await fn(current);
       if (store.saveIfMatch) {
-        const { data: current, hash } = await store.loadWithHash!(
-          userId,
-          cryptoHandle,
-        );
-        const next = await fn(current);
         const result = await store.saveIfMatch(
           userId,
           cryptoHandle,
@@ -895,19 +935,19 @@ function buildPerUserStore<S extends z.ZodType>({
         }
         return next;
       }
-      const current = validateRead(
-        await inner.load(userId, cryptoHandle),
-        "mutate",
-      );
-      const next = await fn(current);
-      await inner.save(userId, cryptoHandle, validateWrite(next, "mutate"));
+      const validated = validateWrite(next, "mutate");
+      if (def.contentHash && hash !== null) {
+        const nextHash = await hashContent(toEnvelope(validated, def.version));
+        if (nextHash === hash) return next;
+      }
+      await inner.save(userId, cryptoHandle, validated);
       return next;
     },
   };
 
   if (def.contentHash) {
     store.loadWithHash = async (userId, cryptoHandle) => {
-      const { data, hash } = await inner.loadWithHash!(userId, cryptoHandle);
+      const { data, hash } = await perUserLoadInternal(userId, cryptoHandle);
       return { data: validateRead(data, "loadWithHash"), hash };
     };
   }
@@ -927,6 +967,40 @@ function buildPerUserStore<S extends z.ZodType>({
 }
 
 /** Explicit `empty`, or derived from the schema's defaults (`.default()`). */
+type CachedEntry<T> = { data: T; hash: string | null };
+
+/**
+ * Cache-first load with hash revalidation. Serves the cached entry ONLY after
+ * the server's content_hash matched it — the core has no staleTime concept, a
+ * cached entry is never trusted blindly. Falls back to a full load (and
+ * refreshes the cache slot) in every other case. No-op passthrough when the
+ * store has no contentHash, no cache is configured, or the adapter can't do
+ * hash-only reads.
+ */
+async function loadRevalidated<T>(opts: {
+  contentHash: boolean | undefined;
+  cacheKey: string;
+  collection: string;
+  userId: string;
+  extraKeys: KeyColumn[];
+  loadFull: () => Promise<CachedEntry<T>>;
+}): Promise<CachedEntry<T>> {
+  const { cache, storage } = getSecureStoreConfig();
+  if (!opts.contentHash || !cache || !storage.getHash) return opts.loadFull();
+  const cached = cache.get<CachedEntry<T>>(opts.cacheKey);
+  if (cached !== undefined && cached.hash !== null) {
+    const serverHash = await storage.getHash(
+      opts.collection,
+      opts.userId,
+      opts.extraKeys,
+    );
+    if (serverHash !== null && serverHash === cached.hash) return cached;
+  }
+  const fresh = await opts.loadFull();
+  cache.set(opts.cacheKey, fresh);
+  return fresh;
+}
+
 function resolveEmpty<S extends z.ZodType>(def: StoreDef<S>): z.infer<S> {
   if (def.empty !== undefined) return def.empty;
   const fromUndefined = def.schema.safeParse(undefined);

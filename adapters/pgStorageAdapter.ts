@@ -31,11 +31,6 @@ function paramList(start: number, count: number): string {
   return Array.from({ length: count }, (_, i) => `$${start + i}`).join(", ");
 }
 
-/** node-postgres error shape for a unique-constraint violation (SQLSTATE 23505). */
-function isUniqueViolation(e: unknown): boolean {
-  return (e as { code?: string } | null)?.code === "23505";
-}
-
 export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
   return {
     async get(collection, userId, extraKeys): Promise<BlobRecord | null> {
@@ -52,6 +47,19 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
       const row = rows[0];
       if (!row) return null;
       return { schemaVersion: row.schema_version ?? 1, blob: row.blob };
+    },
+
+    async getHash(collection, userId, extraKeys): Promise<string | null> {
+      const extra = extraKeys
+        .map((k, i) => ` AND ${quoteIdent(k.column)} = $${i + 2}`)
+        .join("");
+      const { rows } = await getClient().query<{
+        content_hash: string | null;
+      }>(
+        `SELECT content_hash FROM ${quoteIdent(collection)} WHERE user_id = $1${extra} LIMIT 1`,
+        [userId, ...extraKeys.map((k) => k.value)],
+      );
+      return rows[0]?.content_hash ?? null;
     },
 
     async put(collection, userId, extraKeys, record): Promise<void> {
@@ -80,10 +88,16 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
     },
 
     /**
-     * `expectedHash: null` → plain INSERT; a unique-constraint violation (row already
-     * exists) is a conflict → `false`, never thrown. `expectedHash` set → `UPDATE ...
-     * WHERE ... AND content_hash = expected RETURNING` — zero rows back means either
-     * the hash didn't match or the row is gone → `false`, same non-throwing contract.
+     * `expectedHash: null` means "I believe there's no REAL content yet" — either the row
+     * doesn't exist, or it exists but was never hashed (legacy data from before
+     * `content_hash` existed). Both succeed via a conditional upsert: `ON CONFLICT DO
+     * UPDATE ... WHERE content_hash IS NULL` only writes if the pre-existing row (if any)
+     * still has no hash — Postgres resolves the race atomically, no separate
+     * insert-then-catch round-trip. Zero rows back means a REAL hash was already there
+     * (someone else's write beat us to it) → genuine conflict, `false`, never thrown.
+     * `expectedHash` set → `UPDATE ... WHERE ... AND content_hash = expected RETURNING` —
+     * zero rows back means either the hash didn't match or the row is gone → `false`,
+     * same non-throwing contract.
      */
     async putIfMatch(
       collection,
@@ -106,17 +120,23 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
           columns.push("content_hash");
           values.push(record.contentHash);
         }
-        try {
-          await client.query(
-            `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
-              `VALUES (${paramList(1, columns.length)})`,
-            values,
-          );
-          return true;
-        } catch (e) {
-          if (isUniqueViolation(e)) return false;
-          throw e;
-        }
+        const keyColumns = extraKeys.map((k) => k.column);
+        const conflictClause = ["user_id", ...keyColumns]
+          .map((c, i) => (i === 0 ? c : quoteIdent(c)))
+          .join(", ");
+        const updates = columns
+          .filter((c) => c !== "user_id" && !keyColumns.includes(c))
+          .map((c) => `${quoteIdent(c)} = excluded.${quoteIdent(c)}`)
+          .join(", ");
+        const { rows } = await client.query(
+          `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
+            `VALUES (${paramList(1, columns.length)}) ` +
+            `ON CONFLICT (${conflictClause}) DO UPDATE SET ${updates} ` +
+            `WHERE ${quoteIdent(collection)}.${quoteIdent("content_hash")} IS NULL ` +
+            `RETURNING user_id`,
+          values,
+        );
+        return rows.length > 0;
       }
       const setColumns = ["blob", "schema_version", "updated_at"];
       const setValues: unknown[] = [
@@ -274,17 +294,19 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
           values.push(record.contentHash);
         }
         for (const col of plainCols) values.push(plain[col]);
-        try {
-          await client.query(
-            `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
-              `VALUES (${paramList(1, columns.length)})`,
-            values,
-          );
-          return true;
-        } catch (e) {
-          if (isUniqueViolation(e)) return false;
-          throw e;
-        }
+        const updates = columns
+          .filter((c) => c !== "id")
+          .map((c) => `${quoteIdent(c)} = excluded.${quoteIdent(c)}`)
+          .join(", ");
+        const { rows } = await client.query(
+          `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) ` +
+            `VALUES (${paramList(1, columns.length)}) ` +
+            `ON CONFLICT (id) DO UPDATE SET ${updates} ` +
+            `WHERE ${quoteIdent(collection)}.${quoteIdent("content_hash")} IS NULL ` +
+            `RETURNING id`,
+          values,
+        );
+        return rows.length > 0;
       }
       const setColumns = ["blob", "schema_version", "updated_at", ...plainCols];
       const values: unknown[] = [

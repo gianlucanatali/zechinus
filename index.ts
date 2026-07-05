@@ -76,28 +76,7 @@ export type {
   EncryptedField,
 } from "./core/types.ts";
 
-export {
-  toEnvelope,
-  fromEnvelope,
-  runMigrations,
-  type BlobMigrator,
-  type BlobMigrationResult,
-  type VersionedEnvelope,
-} from "./core/versioning.ts";
-
-export {
-  ENC_PREFIX,
-  isEncryptedField,
-  serializeEncField,
-  parseEncField,
-} from "./core/wireFormat.ts";
-
-export {
-  encryptField,
-  decryptField,
-  encryptJson,
-  decryptJson,
-} from "./core/crypto.ts";
+export { type BlobMigrator } from "./core/versioning.ts";
 
 export {
   deriveKey,

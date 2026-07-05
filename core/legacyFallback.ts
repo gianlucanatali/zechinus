@@ -45,12 +45,23 @@ export async function decodeWithLegacyFallback<T>(
     );
   } catch (canonicalError) {
     if (!params.legacyAAD) throw canonicalError;
-    const migration = await migrateLegacyAAD(
-      params.cryptoHandle,
-      params.record,
-      params.legacyAAD,
-      params.canonicalAAD,
-    );
+    let migration;
+    try {
+      migration = await migrateLegacyAAD(
+        params.cryptoHandle,
+        params.record,
+        params.legacyAAD,
+        params.canonicalAAD,
+      );
+    } catch {
+      // In this catch path the blob exists and is a well-formed EncryptedField
+      // (decodeBlob returns `empty` for both missing and malformed blobs without
+      // throwing), so the only throw migrateLegacyAAD can produce here is a GCM
+      // auth-tag mismatch — meaning the row was never a legacy-AAD row. The
+      // canonical failure (e.g. a migrator bug) is the real error; surfacing the
+      // legacy one would mask it behind a misleading "invalid ghash tag".
+      throw canonicalError;
+    }
     if (!migration.migrated || !migration.record) {
       // Nothing found under the legacy AAD either — the canonical failure is the
       // real, more informative error (corruption, wrong DEK). Never masked.
