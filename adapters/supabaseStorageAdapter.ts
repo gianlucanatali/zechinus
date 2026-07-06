@@ -282,7 +282,7 @@ export function supabaseStorageAdapter(
         );
       // `columns` is built at runtime (dynamic list of plaintext columns) → `.select()`'s
       // literal type can't validate it, Supabase-js resolves to `GenericStringError`.
-      // Explicit cast: the real shape is known (id/schema_version/blob + plainColumns).
+      // Explicit cast: the real shape is known (id/content_hash/schema_version/blob + plainColumns).
       const rows = (data ?? []) as unknown as Record<string, unknown>[];
       return rows.map((row) => {
         const plain: Record<string, unknown> = {};

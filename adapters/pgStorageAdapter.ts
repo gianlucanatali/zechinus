@@ -38,9 +38,9 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
         .map((k, i) => ` AND ${quoteIdent(k.column)} = $${i + 2}`)
         .join("");
       const { rows } = await getClient().query<{
+        content_hash: string | null;
         schema_version: number | null;
         blob: string;
-        content_hash: string | null;
       }>(
         `SELECT schema_version, blob, content_hash FROM ${quoteIdent(collection)} WHERE user_id = $1${extra} LIMIT 1`,
         [userId, ...extraKeys.map((k) => k.value)],
@@ -254,9 +254,9 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
     ): Promise<Array<{ key: string; record: BlobRecord }>> {
       const { rows } = await getClient().query<{
         [k: string]: unknown;
+        content_hash: string | null;
         schema_version: number | null;
         blob: string;
-        content_hash: string | null;
       }>(
         `SELECT ${quoteIdent(keyColumn)}, schema_version, blob, content_hash FROM ${quoteIdent(collection)} ` +
           `WHERE user_id = $1 AND ${quoteIdent(keyColumn)} >= $2 AND ${quoteIdent(keyColumn)} <= $3 ` +
