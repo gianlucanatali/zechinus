@@ -45,6 +45,28 @@ doesn't actually provide.
   or table name is itself sensitive, that's a modeling decision to make before choosing
   DataCloak, not something the crypto layer hides.
 
+## Operational precondition: don't remove `legacyAAD` too early
+
+`legacyAAD` (porting-only, `StoreDef.legacyAAD` in `store.ts`) is what lets a store still
+decrypt rows written under an older AAD convention: canonical AAD is tried first, and only
+on failure does the store fall back to `legacyAAD`, migrate the row, and persist it under
+the canonical AAD (`datacloak/core/legacyFallback.ts`). **If `legacyAAD` is removed from a
+store definition while any row for that store still exists under the old convention (e.g. a
+dormant account that hasn't triggered a read/write since the porting), that row becomes
+permanently undecryptable** — `decodeWithLegacyFallback` has no other fallback path once
+`legacyAAD` is gone (`if (!params.legacyAAD) throw canonicalError;`). This is not a crypto
+bug, just a consequence of the row still being under an AAD the running code no longer
+knows how to try. Before deleting a `legacyAAD` clause, confirm (via `content_hash`/envelope
+version telemetry, or an explicit backfill sweep) that every row for that store has already
+converged to the canonical AAD — not just "probably, it's been a while."
+
+`content_hash` is deterministic by design (same plaintext + same DEK ⇒ same HMAC) — that's
+what makes the skip-fetch/skip-write optimization possible. It does not weaken the guarantee
+above ("Fingerprint or compare plaintext via `content_hash`"): the MAC key is derived from
+the DEK, so a party without the DEK still can't correlate hashes across users, and
+correlation within a single user's own rows is an accepted, documented trade-off, not a leak
+to a third party.
+
 ## Declared non-goals (deliberately not built)
 
 - **Rollback protection** (a monotonic counter or signed high-water-mark the client
