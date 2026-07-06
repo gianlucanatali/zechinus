@@ -450,6 +450,8 @@ function buildKeyedStore<S extends z.ZodType>(
 ): KeyedStore<z.infer<S>> {
   type T = z.infer<S>;
   const empty = resolveEmpty(def);
+  const cacheKeyFor = (userId: string, key: string): string =>
+    `${def.name}:${userId}:${key}`;
   const canonicalAADFor = (cryptoHandle: CryptoHandle, key: string): FieldAAD =>
     canonicalAAD(cryptoHandle, def.name, key);
 
@@ -484,7 +486,7 @@ function buildKeyedStore<S extends z.ZodType>(
   ): Promise<{ data: T; hash: string | null }> =>
     loadRevalidated({
       contentHash: def.contentHash,
-      cacheKey: `${def.name}:${userId}:${key}`,
+      cacheKey: cacheKeyFor(userId, key),
       collection: def.name,
       userId,
       extraKeys: [{ column: keyColumn, value: key }],
@@ -539,7 +541,12 @@ function buildKeyedStore<S extends z.ZodType>(
         );
       }
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
-      await keyedSave(userId, cryptoHandle, key, data);
+      const valid = validateWrite(data, `set(key=${key})`);
+      await keyedSave(userId, cryptoHandle, key, valid);
+      const hash = def.contentHash
+        ? await cryptoHandle.hashContent!(toEnvelope(valid, def.version))
+        : null;
+      writeThroughCache(cacheKeyFor(userId, key), valid, hash);
     },
     async mutate(key, fn) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
@@ -560,6 +567,7 @@ function buildKeyedStore<S extends z.ZodType>(
         if (!result.ok) {
           throw new OptimisticLockConflictError(def.name);
         }
+        writeThroughCache(cacheKeyFor(userId, key), next, result.hash);
         return next;
       }
       const { data: current, hash } = await keyedLoadInternal(
@@ -568,14 +576,13 @@ function buildKeyedStore<S extends z.ZodType>(
         key,
       );
       const next = await fn(current);
-      if (def.contentHash && hash !== null) {
-        const validated = validateWrite(next, `mutate(key=${key})`);
-        const nextHash = await cryptoHandle.hashContent!(
-          toEnvelope(validated, def.version),
-        );
-        if (nextHash === hash) return next;
-      }
+      const validated = validateWrite(next, `mutate(key=${key})`);
+      const nextHash = def.contentHash
+        ? await cryptoHandle.hashContent!(toEnvelope(validated, def.version))
+        : null;
+      if (def.contentHash && hash !== null && nextHash === hash) return next;
       await keyedSave(userId, cryptoHandle, key, next);
+      writeThroughCache(cacheKeyFor(userId, key), next, nextHash);
       return next;
     },
     async list(userId, cryptoHandle, range) {
@@ -856,6 +863,24 @@ function buildCollectionStore<S extends z.ZodType>(
 }
 
 // ── perUser: one blob per user ──────────────────────────────────────────────────
+/**
+ * Pushes a fresh `{data, hash}` entry into the configured `CacheAdapter` right after a
+ * successful ambient write (`set()`/`mutate()`), using the SAME cache-key scheme the
+ * React bindings (`useStore`/`useKeyedStore`) already use. No-op if no cache is
+ * configured (Node/script/test contexts). This is what makes a service calling
+ * `.mutate()` directly (outside any React hook) keep every mounted `useStore`/
+ * `useKeyedStore` consumer for that store in sync — previously only the hooks'
+ * own `save()` touched the cache, so an ambient write left them stale.
+ */
+function writeThroughCache<T>(
+  cacheKey: string,
+  data: T,
+  hash: string | null,
+): void {
+  const { cache } = getSecureStoreConfig();
+  cache?.set(cacheKey, { data, hash });
+}
+
 function buildPerUserStore<S extends z.ZodType>({
   def,
   validateRead,
@@ -863,6 +888,7 @@ function buildPerUserStore<S extends z.ZodType>({
 }: BuildContext<S>): Store<z.infer<S>> {
   type T = z.infer<S>;
   const empty = resolveEmpty(def);
+  const cacheKeyFor = (userId: string): string => `${def.name}:${userId}`;
   const inner = defineBlobStore<T>({
     name: def.name,
     version: def.version,
@@ -881,7 +907,7 @@ function buildPerUserStore<S extends z.ZodType>({
   ): Promise<{ data: T; hash: string | null }> =>
     loadRevalidated({
       contentHash: def.contentHash,
-      cacheKey: `${def.name}:${userId}`,
+      cacheKey: cacheKeyFor(userId),
       collection: def.name,
       userId,
       extraKeys: [],
@@ -914,7 +940,12 @@ function buildPerUserStore<S extends z.ZodType>({
         );
       }
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
-      await inner.save(userId, cryptoHandle, validateWrite(data, "set"));
+      const valid = validateWrite(data, "set");
+      await inner.save(userId, cryptoHandle, valid);
+      const hash = def.contentHash
+        ? await cryptoHandle.hashContent!(toEnvelope(valid, def.version))
+        : null;
+      writeThroughCache(cacheKeyFor(userId), valid, hash);
     },
     async mutate(fn) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
@@ -934,16 +965,16 @@ function buildPerUserStore<S extends z.ZodType>({
         if (!result.ok) {
           throw new OptimisticLockConflictError(def.name);
         }
+        writeThroughCache(cacheKeyFor(userId), next, result.hash);
         return next;
       }
       const validated = validateWrite(next, "mutate");
-      if (def.contentHash && hash !== null) {
-        const nextHash = await cryptoHandle.hashContent!(
-          toEnvelope(validated, def.version),
-        );
-        if (nextHash === hash) return next;
-      }
+      const nextHash = def.contentHash
+        ? await cryptoHandle.hashContent!(toEnvelope(validated, def.version))
+        : null;
+      if (def.contentHash && hash !== null && nextHash === hash) return next;
       await inner.save(userId, cryptoHandle, validated);
+      writeThroughCache(cacheKeyFor(userId), next, nextHash);
       return next;
     },
   };
