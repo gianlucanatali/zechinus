@@ -9,7 +9,13 @@
  * cached under one slot, tagged with the epoch it was fetched at; a mount whose
  * cached epoch already matches the current one skips the re-fetch.
  */
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { getSecureStoreConfig } from "../core/config.ts";
 import { keyedRangeEpochCacheKey, type KeyedStore } from "../core/store.ts";
 
@@ -21,8 +27,22 @@ interface RangeCacheEntry<T> {
 export interface UseKeyedStoreRangeResult<T> {
   data: Array<{ key: string; data: T }> | undefined;
   loading: boolean;
+  /**
+   * `true` when `data` is stale placeholder data from a PREVIOUSLY fetched range
+   * (e.g. the caller just widened `from`/`to`), served while this exact range is
+   * being fetched — mirrors TanStack's `placeholderData: keepPreviousData`. Never
+   * true while `locked` (no stale decrypted content survives a lock).
+   */
+  isPlaceholderData: boolean;
   locked: boolean;
   error: Error | null;
+  /**
+   * Forces a fresh `list()` fetch, bypassing the cached-epoch skip — resolves once
+   * the refreshed rows are in cache. For callers that need a synchronous "the write
+   * I just made is now reflected" guarantee beyond the automatic epoch invalidation
+   * (e.g. before reading `data` again in the same function).
+   */
+  reload: () => Promise<void>;
 }
 
 export function useKeyedStoreRange<T>(
@@ -70,6 +90,22 @@ export function useKeyedStoreRange<T>(
   );
 
   const [error, setError] = useState<Error | null>(null);
+  const locked = !cryptoHandle || !userId;
+
+  const previousRef = useRef<Array<{ key: string; data: T }> | null>(null);
+  useEffect(() => {
+    if (locked) {
+      previousRef.current = null;
+    } else if (cached !== undefined) {
+      previousRef.current = cached.rows;
+    }
+  }, [locked, cached]);
+
+  const isPlaceholderData =
+    !locked && cached === undefined && previousRef.current !== null;
+  const data = locked
+    ? undefined
+    : (cached?.rows ?? (isPlaceholderData ? previousRef.current! : undefined));
 
   useEffect(() => {
     setError(null);
@@ -99,11 +135,30 @@ export function useKeyedStoreRange<T>(
     epoch,
   ]);
 
+  const reload = useCallback(async () => {
+    if (!cryptoHandle || !userId) return;
+    const rows = await store.list(userId, cryptoHandle, range);
+    cache.set(rangeCacheKey, {
+      rows,
+      epoch: cache.get<number>(epochKey) ?? 0,
+    });
+  }, [
+    cryptoHandle,
+    userId,
+    store,
+    range.from,
+    range.to,
+    cache,
+    rangeCacheKey,
+    epochKey,
+  ]);
+
   return {
-    data: cached?.rows,
-    loading:
-      !!cryptoHandle && !!userId && cached === undefined && error === null,
-    locked: !cryptoHandle || !userId,
+    data,
+    loading: !!cryptoHandle && !!userId && data === undefined && error === null,
+    isPlaceholderData,
+    locked,
     error,
+    reload,
   };
 }

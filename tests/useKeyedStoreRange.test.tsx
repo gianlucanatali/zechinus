@@ -228,4 +228,129 @@ describe("useKeyedStoreRange", () => {
       ]),
     );
   });
+
+  it("reload() forces a fresh fetch even when the cached epoch already matches (no natural refetch would fire)", async () => {
+    const storage = rangeMemoryStorage();
+    let listCalls = 0;
+    const countingStorage: StorageAdapter = {
+      ...storage,
+      listByKeyRange: (...args) => {
+        listCalls++;
+        return storage.listByKeyRange!(...args);
+      },
+    };
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    configureSecureStore({
+      storage: countingStorage,
+      keys: provider,
+      cache: memoryCache(),
+    });
+    const store = defineStore({
+      name: "range_reload",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    await store.save("u1", cryptoHandle, "2026-01", { count: 1 });
+
+    const { result } = renderHook(() =>
+      useKeyedStoreRange(store, { from: "2026-01", to: "2026-01" }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const callsAfterInitialLoad = listCalls;
+    expect(result.current.data).toEqual([
+      { key: "2026-01", data: { count: 1 } },
+    ]);
+
+    // No write happened — the cached epoch still matches. A natural re-render
+    // would NOT trigger a refetch (the whole point of the epoch-match skip).
+    // reload() must fetch anyway.
+    await act(async () => {
+      await result.current.reload();
+    });
+
+    expect(listCalls).toBe(callsAfterInitialLoad + 1);
+  });
+
+  it("isPlaceholderData: switching to a new range keeps the old data visible while the new one loads", async () => {
+    const storage = rangeMemoryStorage();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "range_placeholder",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    await store.save("u1", cryptoHandle, "2026-06", { count: 6 });
+    await store.save("u1", cryptoHandle, "2026-01", { count: 1 });
+
+    const { result, rerender } = renderHook(
+      ({ range }) => useKeyedStoreRange(store, range),
+      { initialProps: { range: { from: "2026-06", to: "2026-06" } } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toEqual([
+      { key: "2026-06", data: { count: 6 } },
+    ]);
+    expect(result.current.isPlaceholderData).toBe(false);
+
+    // Widen the range backward — a DIFFERENT cache slot, not yet fetched.
+    rerender({ range: { from: "2026-01", to: "2026-06" } });
+
+    // The old range's data is shown immediately as a placeholder — never a
+    // loading flash — while the new range resolves in the background.
+    expect(result.current.data).toEqual([
+      { key: "2026-06", data: { count: 6 } },
+    ]);
+    expect(result.current.isPlaceholderData).toBe(true);
+    expect(result.current.loading).toBe(false);
+
+    await waitFor(() =>
+      expect(result.current.data).toEqual([
+        { key: "2026-01", data: { count: 1 } },
+        { key: "2026-06", data: { count: 6 } },
+      ]),
+    );
+    expect(result.current.isPlaceholderData).toBe(false);
+  });
+
+  it("isPlaceholderData/data never survive a lock — no stale decrypted content after DEK clears", async () => {
+    const storage = rangeMemoryStorage();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider, setDek } = fakeKeys(cryptoHandle);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "range_lock_wipe",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    await store.save("u1", cryptoHandle, "2026-02", { count: 2 });
+
+    const { result } = renderHook(() =>
+      useKeyedStoreRange(store, { from: "2026-01", to: "2026-12" }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toEqual([
+      { key: "2026-02", data: { count: 2 } },
+    ]);
+
+    act(() => setDek(null));
+
+    expect(result.current.locked).toBe(true);
+    expect(result.current.data).toBeUndefined();
+    expect(result.current.isPlaceholderData).toBe(false);
+  });
 });
