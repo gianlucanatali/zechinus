@@ -268,4 +268,34 @@ describe("useKeyedStore", () => {
     });
     expect(result.current.data).toEqual({ transactions: ["mine"] });
   });
+
+  it("reload(): picks up a write that happened OUTSIDE this hook's save() (e.g. a backend endpoint writing directly, no ambient mutate() in this tab)", async () => {
+    const storage = keyedMemoryStorage();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "transaction_blobs",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    const { result } = renderHook(() => useKeyedStore(store, "2026-06"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toEqual({ transactions: [] });
+
+    await store.save("u1", cryptoHandle, "2026-06", {
+      transactions: ["out-of-band"],
+    });
+    expect(result.current.data).toEqual({ transactions: [] }); // still stale
+
+    await act(async () => {
+      await result.current.reload();
+    });
+
+    expect(result.current.data).toEqual({ transactions: ["out-of-band"] });
+  });
 });

@@ -321,4 +321,34 @@ describe("useStore", () => {
     // Rolled back to what the hook believed was current, not silently overwritten.
     expect(result.current.data).toEqual({ positions: ["AAPL"] });
   });
+
+  it("reload(): picks up a write that happened OUTSIDE this hook's save() (e.g. a backend endpoint writing directly, no ambient mutate() in this tab)", async () => {
+    const storage = memoryStorage();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "portfolio_blobs",
+      identity: "perUser",
+      encrypt: "all",
+      schema: Portfolio,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+    });
+
+    const { result } = renderHook(() => useStore(store));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toEqual({ positions: [] });
+
+    // Out-of-band write: goes straight through store.save(), never through this
+    // hook's cache-aware save() — simulates a backend endpoint persisting directly.
+    await store.save("u1", cryptoHandle, { positions: ["out-of-band"] });
+    expect(result.current.data).toEqual({ positions: [] }); // still stale
+
+    await act(async () => {
+      await result.current.reload();
+    });
+
+    expect(result.current.data).toEqual({ positions: ["out-of-band"] });
+  });
 });

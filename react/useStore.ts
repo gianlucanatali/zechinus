@@ -29,6 +29,13 @@ export interface UseStoreResult<T> {
   locked: boolean;
   error: Error | null;
   save: (data: T) => Promise<void>;
+  /**
+   * Forces a fresh fetch and refreshes the cache slot — for callers that wrote
+   * through a path OUTSIDE this hook's own `save()` (e.g. a backend endpoint that
+   * persisted directly, not an ambient `store.mutate()`/`.set()` call in this
+   * browser tab), where no cache-aware write-through ever ran to pick it up.
+   */
+  reload: () => Promise<void>;
 }
 
 export function useStore<T>(store: Store<T>): UseStoreResult<T> {
@@ -112,6 +119,14 @@ export function useStore<T>(store: Store<T>): UseStoreResult<T> {
     [cryptoHandle, userId, key, cache, store],
   );
 
+  const reload = useCallback(async () => {
+    if (!cryptoHandle || !userId) return;
+    const entry = store.loadWithHash
+      ? await store.loadWithHash(userId, cryptoHandle)
+      : { data: await store.load(userId, cryptoHandle), hash: null };
+    cache.set(key, entry);
+  }, [cryptoHandle, userId, key, cache, store]);
+
   return {
     data: cached?.data,
     loading:
@@ -119,5 +134,6 @@ export function useStore<T>(store: Store<T>): UseStoreResult<T> {
     locked: !cryptoHandle || !userId,
     error,
     save,
+    reload,
   };
 }
