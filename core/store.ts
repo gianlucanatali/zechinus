@@ -444,6 +444,20 @@ interface BuildContext<S extends z.ZodType> {
 }
 
 // ── perKey: one blob per (user, key); AAD.rowId = key ──────────────────────────
+/**
+ * Cache key for a keyed store's per-`(store,user)` write counter — bumped by
+ * `buildKeyedStore`'s ambient `set()`/`mutate()` on every write, regardless of
+ * which key changed. `useKeyedStoreRange` (`datacloak/react`) subscribes to this
+ * key to know when an already-fetched range might be stale; exported so the
+ * React binding computes the exact same string, never duplicated by hand.
+ */
+export function keyedRangeEpochCacheKey(
+  storeName: string,
+  userId: string,
+): string {
+  return `${storeName}:${userId}:__keysEpoch__`;
+}
+
 function buildKeyedStore<S extends z.ZodType>(
   { def, migrators, validateRead, validateWrite }: BuildContext<S>,
   keyColumn: string,
@@ -454,6 +468,18 @@ function buildKeyedStore<S extends z.ZodType>(
     `${def.name}:${userId}:${key}`;
   const canonicalAADFor = (cryptoHandle: CryptoHandle, key: string): FieldAAD =>
     canonicalAAD(cryptoHandle, def.name, key);
+
+  // Bumped after every ambient keyed write (set()/mutate()), regardless of which
+  // key changed — the only signal `useKeyedStoreRange` needs to know a range it
+  // has already fetched might now be stale (a `CacheAdapter` has no notion of
+  // "subscribe to every key in [from,to]", so a per-store, per-user counter is
+  // the simplest correct invalidation trigger; see `keyedRangeEpochCacheKey`).
+  const bumpRangeEpoch = (userId: string): void => {
+    const { cache } = getSecureStoreConfig();
+    if (!cache) return;
+    const epochKey = keyedRangeEpochCacheKey(def.name, userId);
+    cache.set(epochKey, (cache.get<number>(epochKey) ?? 0) + 1);
+  };
 
   const keyedSave = async (
     userId: string,
@@ -547,6 +573,7 @@ function buildKeyedStore<S extends z.ZodType>(
         ? await cryptoHandle.hashContent!(toEnvelope(valid, def.version))
         : null;
       writeThroughCache(cacheKeyFor(userId, key), valid, hash);
+      bumpRangeEpoch(userId);
     },
     async mutate(key, fn) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
@@ -568,6 +595,7 @@ function buildKeyedStore<S extends z.ZodType>(
           throw new OptimisticLockConflictError(def.name);
         }
         writeThroughCache(cacheKeyFor(userId, key), next, result.hash);
+        bumpRangeEpoch(userId);
         return next;
       }
       const { data: current, hash } = await keyedLoadInternal(
@@ -583,6 +611,7 @@ function buildKeyedStore<S extends z.ZodType>(
       if (def.contentHash && hash !== null && nextHash === hash) return next;
       await keyedSave(userId, cryptoHandle, key, next);
       writeThroughCache(cacheKeyFor(userId, key), next, nextHash);
+      bumpRangeEpoch(userId);
       return next;
     },
     async list(userId, cryptoHandle, range) {

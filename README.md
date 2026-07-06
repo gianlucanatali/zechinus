@@ -541,7 +541,12 @@ yet; `defineStore` throws an explicit error if you try).
 ## React binding — one hook per cardinality
 
 ```tsx
-import { useStore, useKeyedStore, useCollectionStore } from "datacloak/react";
+import {
+  useStore,
+  useKeyedStore,
+  useKeyedStoreRange,
+  useCollectionStore,
+} from "datacloak/react";
 
 function PortfolioPanel() {
   const { data, loading, locked, error, save } = useStore(portfolioStore); // perUser
@@ -554,6 +559,14 @@ function PortfolioPanel() {
 function TransactionsForMonth({ month }: { month: string }) {
   const { data, save } = useKeyedStore(transactionStore, month); // perKey
   // ...
+}
+
+function TransactionsForYear() {
+  const { data, loading } = useKeyedStoreRange(transactionStore, {
+    from: "2026-01",
+    to: "2026-12",
+  }); // perKey range — read-only, no save() (write a single key via useKeyedStore/mutate)
+  // data: Array<{ key: string; data: T }> | undefined
 }
 
 function RebalanceSimulations() {
@@ -617,9 +630,27 @@ module-level `KeyProvider` — see the host app's own
 `src/lib/datacloakKeyProvider.ts` + `src/components/DataCloakKeyBridge.tsx` for a
 concrete, working reference (bridges `PasskeyContext`/`UserContext`).
 
+**Ambient writes (`store.set()`/`store.mutate()`, called directly from a service —
+not through a hook's `save()`) are cache-aware too:** after a successful persist,
+`set()`/`mutate()` (perUser and perKey) push the fresh `{data, hash}` into the
+configured `CacheAdapter` themselves, under the exact same key `useStore`/
+`useKeyedStore` read from. A service calling `.mutate()` directly (e.g.
+`patchPortfolioTransaction`) now keeps every mounted hook for that store in sync,
+same as if the write had gone through the hook's own `save()`.
+
+**`useKeyedStoreRange(store, {from, to})`** is the range counterpart of
+`useKeyedStore` — read-only (no `save`), for showing several keys at once (e.g. a
+year of monthly batches). A `CacheAdapter` has no notion of "subscribe to every key
+in `[from, to]`", so the range result is cached as one slot, invalidated via a
+per-`(store, user)` write counter that `set()`/`mutate()` bump on every keyed write
+(regardless of which key changed) — simple and always correct, at the cost of an
+occasional refetch for a write outside the mounted range. `list`/`getRange` need
+`listByKeyRange` on the adapter, same requirement as `KeyedStore.list()`.
+
 Verified, runnable usage (including optimistic-rollback and lock-clears-cache behavior)
 lives in `datacloak/tests/useStore.test.tsx`, `useKeyedStore.test.tsx`,
-`useCollectionStore.test.tsx` — read them before writing a `KeyProvider` for a new
+`useKeyedStoreRange.test.tsx`, `useCollectionStore.test.tsx`,
+`cacheAwareWrites.test.ts` — read them before writing a `KeyProvider` for a new
 consumer.
 
 **If a component only needs a boolean lock/unlock gate — never the data or the

@@ -6,6 +6,10 @@ export { useStore, type UseStoreResult } from "./useStore.ts";
 export { useIsUnlocked } from "./useIsUnlocked.ts";
 export { useKeyedStore, type UseKeyedStoreResult } from "./useKeyedStore.ts";
 export {
+  useKeyedStoreRange,
+  type UseKeyedStoreRangeResult,
+} from "./useKeyedStoreRange.ts";
+export {
   useCollectionStore,
   type UseCollectionStoreResult,
 } from "./useCollectionStore.ts";
