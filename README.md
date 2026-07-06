@@ -654,26 +654,13 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   dependency and should work on RN as-is.
 - **True DEK rotation** (the DEK's actual bytes change — not `KeyHandle.wrapWithKek`,
   which re-wraps the _same_ DEK under a new KEK and is already built and used by EW's
-  `RecoveryUnlockModal`/`Impostazioni`) — discussed 2026-07-04, deliberately not built,
-  no real trigger today. A lazy extension of the `legacyAAD` pattern (a "legacy DEK"
-  fallback, symmetric to `migrateLegacyAAD`) was considered and rejected: with several
-  independent devices/passkeys each unlocking the same DEK via their own symmetric KEK,
-  per-row lazy convergence breaks multi-device consistency — once one device migrates a
-  row to the new DEK, any other device still holding only the old DEK can no longer
-  decrypt that row, and the gap widens with every read. No production zero-knowledge
-  system rotates this way: 1Password/Bitwarden/Proton keep the DEK ("vault key") stable
-  and only re-wrap it under a new KEK (exactly `wrapWithKek`); the one that does offer
-  real DEK rotation (Bitwarden) does it as a single synchronous re-encrypt-everything
-  ceremony that invalidates every other session — never a mixed-DEK state, never lazy.
-  An asymmetric-wrap variant (X25519/HPKE per passkey instead of a symmetric KEK, the
-  pattern Matrix/Olm uses to share session keys with offline devices) would let the
-  initiating device pre-provision every registered passkey without needing it present —
-  but it only solves key _distribution_, not the synchronous data re-encryption, and it
-  requires publishing a public key per passkey starting at registration time, for a
-  feature with no consumer yet. If this is ever built: a synchronous online ceremony
-  (Bitwarden-style), optionally with asymmetric wraps to avoid re-registering other
-  devices (Matrix/Olm-style) — never a framework-level lazy mechanism. Full discussion:
-  `_local/plans/20260626-1111000-secure-store-framework.md` § "Decisioni aperte".
+  `RecoveryUnlockModal`/`Impostazioni`) — deliberately not built, no real trigger today.
+  A lazy per-row convergence (a "legacy DEK" fallback symmetric to `migrateLegacyAAD`)
+  was considered and **rejected**: it breaks multi-device consistency, and no production
+  zero-knowledge system rotates that way. **If ever built: a synchronous, session-
+  invalidating ceremony (Bitwarden-style), never a framework-level lazy mechanism.** Full
+  rationale (the multi-device failure mode, the 1Password/Bitwarden/Proton and Matrix/Olm
+  comparison): `_local/plans/20260626-1111000-secure-store-framework.md` § "Decisioni aperte".
 
 ## Extending `StorageAdapter`
 

@@ -1,7 +1,7 @@
 # DataCloak — secure-store framework
 
 **Read this before writing, reading, or extending code inside `datacloak/`, when a
-consuming app needs to persist encrypted user data via `defineStore`/`defineBlobStore`,
+consuming app needs to persist encrypted user data via `defineStore`/`defineLabelDict`,
 OR before writing/editing any AAD, envelope, encrypt/decrypt, or storage-upsert logic in
 the consuming app — that logic almost always belongs in DataCloak, not inline.**
 
@@ -128,21 +128,13 @@ a record that exists with a missing/malformed blob throws — never reported as
 ## `content_hash` — `contentHash: true`, not an injected function
 
 If a table has a `content_hash` column, set `contentHash: true` — DataCloak computes it
-internally as a **keyed HMAC-SHA256** of the plaintext envelope (the MAC key is derived
-from the DEK, `keyDerivation.ts`'s `createKeyHandle`, never the DEK itself) on every
-write. Keying it matters: an unkeyed hash (the pre-fix behavior, plain SHA-256) gives the
-server a deterministic fingerprint of the plaintext — it can compare two rows for
-equality, detect a rollback to previously-seen content, or dictionary-attack a
-low-entropy value, none of which it can do against an opaque HMAC output. Unlike
-`StorageAdapter`/`KeyProvider`, hashing JSON needs zero app-specific knowledge, so this is
-a boolean declaration by default ("does this table have the column"), not a
-mandatory app-supplied function — though `createKeyHandle`'s optional
-`hashContent` override exists for the rare case where the MAC should come from
-somewhere else (e.g. a KMS) instead of the DEK. Omit `contentHash` for tables without the
-column. Rows written before this fix may still carry the old unkeyed hash — harmless,
-since every comparison is stored-vs-freshly-computed equality, never a re-derivation of
-the algorithm; such a row simply converges to the new HMAC on its first write after the
-fix (see README's `content_hash` section for the full rationale).
+internally as a **keyed HMAC-SHA256** of the plaintext envelope (MAC key derived from the
+DEK, never the DEK itself) on every write; omit it for tables without the column. It's a
+boolean, not an app-supplied function (hashing JSON needs no app-specific knowledge) —
+though `createKeyHandle`'s optional `hashContent` override exists for the rare case the MAC
+should come from elsewhere (e.g. a KMS). Legacy rows carrying the old unkeyed SHA-256 are
+harmless and self-heal on first write. Why keyed (anti-fingerprinting) and the convergence
+path: README § "content_hash" + `SECURITY.md`.
 
 Populating the column unlocks four independent capabilities: **optimistic locking**
 (built, below), **skip-write** (built — `mutate()` on perUser/perKey skips the
@@ -181,15 +173,10 @@ Available on all 3 cardinalities: `Store.saveIfMatch` (perUser), `KeyedStore.sav
 on one row never touches another). Underlying adapter capability: `StorageAdapter.
 putIfMatch`/`updateByIdIfMatch` (optional — missing capability throws an explicit error at
 the first conditional write, never a silent unconditional fallback). Both shipped adapters
-implement it: `expectedHash: null` means "no REAL content yet" — covers both "no row" and
-"row exists but was never hashed" (legacy data), and both succeed; `pgStorageAdapter` does
-this as a single atomic conditional upsert (`INSERT ... ON CONFLICT DO UPDATE ... WHERE
-content_hash IS NULL RETURNING`), `supabaseStorageAdapter` as insert-then-guarded-update
-(PostgREST's `.upsert()` can't express a conditional `ON CONFLICT ... WHERE`, so it's two
-round-trips, but the guarded UPDATE re-reads current state so no real conflict is missed).
-Either way, the only genuine conflict for `expectedHash: null` is a row that already has a
-REAL hash. Non-null → `UPDATE ... WHERE ... AND content_hash = expected`, zero rows
-affected = conflict.
+implement it. `expectedHash: null` means "no REAL content yet" — covers both "no row" and
+"row exists but was never hashed" (legacy data); the only genuine conflict for `null` is a
+row that already has a REAL hash. How each adapter implements the conditional write (pg's
+atomic upsert vs supabase's insert-then-guarded-update): README § "Optimistic locking".
 
 **The React hooks (`useStore`/`useKeyedStore`/`useCollectionStore`) thread the hash
 automatically** — their cache slot holds `{data, hash}` internally, `save`/`update` call
@@ -225,12 +212,10 @@ new required field with no default) needs `version` bump + migrator too, since d
 old data would otherwise fail `schema.safeParse()` on read. The error message names both
 options; read it before picking one.
 
-It's still technically a different shape either way — "safe" means Zod can absorb it, not
-"not a version." The guardrail doesn't forbid bumping `version` for a backward-compatible
-change too (write an identity migrator, `(d) => d`, if a team wants every shape change
-tracked explicitly for a stricter audit trail); it just doesn't require it. Don't present
-the "safe change, skip the bump" path as the only correct one — it's the default the
-guardrail allows, not a rule it enforces.
+A "safe" change is still a different shape — the guardrail _allows_ skipping the `version`
+bump for a backward-compatible one, it doesn't _forbid_ bumping anyway (identity migrator
+`(d) => d`) if a team wants every shape tracked. Full rationale: README § "versioning is
+mandatory".
 
 **Never compute `schemaFingerprint` inline** (`fingerprintSchema(MySchema, ...)` in the
 same `defineStore()` call that uses `MySchema`) — that compares the schema against itself,
@@ -365,7 +350,7 @@ tests, component tests, build) — not just this package's own test suite.
   pointer), and `alsKeyProvider` (`datacloak/node`, `AsyncLocalStorage`-backed, for Node
   scripts/services — see "Node scripts & multi-user concurrency" above). Whatever a
   _future_ implementation looks like must not assume a browser: React Native needs a
-  different `getDek`/`getUserId`/`subscribe` behind native passkey/biometrics, but the
+  different `getCryptoHandle`/`getUserId`/`subscribe` behind native passkey/biometrics, but the
   port itself already doesn't require WebAuthn — only a future concrete implementation
   would.
 

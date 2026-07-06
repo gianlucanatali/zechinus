@@ -1,6 +1,6 @@
 ---
 name: datacloak
-description: Use when reading, writing, or extending code inside datacloak/, when a consuming app needs to persist encrypted user data via defineStore/defineBlobStore, OR before writing/editing any AAD, envelope, encrypt/decrypt, or storage-upsert logic in the consuming app — that logic almost always belongs in DataCloak, not inline. Covers cardinality choice, the explicit-encryption guardrail, extending StorageAdapter, and the doc-sync convention.
+description: Use when reading, writing, or extending code inside datacloak/, when a consuming app needs to persist encrypted user data via defineStore/defineLabelDict, OR before writing/editing any AAD, envelope, encrypt/decrypt, or storage-upsert logic in the consuming app — that logic almost always belongs in DataCloak, not inline. Covers cardinality choice, the explicit-encryption guardrail, extending StorageAdapter, and the doc-sync convention.
 ---
 
 # DataCloak — secure-store framework
