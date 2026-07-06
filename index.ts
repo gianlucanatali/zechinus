@@ -43,7 +43,10 @@ export {
   type Identity,
 } from "./core/store.ts";
 
-export { OptimisticLockConflictError } from "./core/errors.ts";
+export {
+  LockedSessionError,
+  OptimisticLockConflictError,
+} from "./core/errors.ts";
 
 export {
   enc,

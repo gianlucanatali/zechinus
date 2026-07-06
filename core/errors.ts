@@ -14,3 +14,11 @@ export class OptimisticLockConflictError extends Error {
     this.name = "OptimisticLockConflictError";
   }
 }
+
+/** Thrown when an ambient store is called with no active session (vault locked). */
+export class LockedSessionError extends Error {
+  constructor(storeName: string) {
+    super(`${storeName}: no active session (locked)`);
+    this.name = "LockedSessionError";
+  }
+}

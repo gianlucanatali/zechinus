@@ -16,6 +16,7 @@ import {
   configureSecureStore,
   defineStore,
   fingerprintSchema,
+  LockedSessionError,
   type StorageAdapter,
   type BlobRecord,
   type CryptoHandle,
@@ -66,7 +67,7 @@ test("alsKeyProvider: outside any withIdentity scope, getters return null and an
     schemaFingerprint: fingerprintSchema(Portfolio, "all"),
   });
 
-  await assert.rejects(() => store.get(), /no active session/);
+  await assert.rejects(() => store.get(), LockedSessionError);
 });
 
 test("alsKeyProvider: two withIdentity chains run under Promise.all and never see each other's identity", async () => {

@@ -34,7 +34,7 @@ import { toEnvelope, type BlobMigrator } from "./versioning.ts";
 import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
 import type { CryptoHandle, FieldAAD, KeyColumn } from "./types.ts";
-import { OptimisticLockConflictError } from "./errors.ts";
+import { LockedSessionError, OptimisticLockConflictError } from "./errors.ts";
 
 /**
  * Resolves the current session's `CryptoHandle` AND userId from the configured
@@ -62,7 +62,7 @@ function resolveAmbientIdentity(storeName: string): {
   const cryptoHandle = keys.getCryptoHandle();
   const userId = keys.getUserId();
   if (!cryptoHandle || !userId) {
-    throw new Error(`${storeName}: no active session (locked)`);
+    throw new LockedSessionError(storeName);
   }
   return { cryptoHandle, userId };
 }
