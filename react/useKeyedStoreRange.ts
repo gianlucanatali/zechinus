@@ -24,6 +24,39 @@ interface RangeCacheEntry<T> {
   epoch: number;
 }
 
+/**
+ * In-flight fetch registry, keyed by `rangeCacheKey` — shared across every
+ * `useKeyedStoreRange` instance in the app (module-level, not per-hook-call).
+ * Without it, two components mounting the SAME range in the same tick (e.g. an
+ * account register + a summary panel both querying the same month window) each
+ * see an empty cache slot and independently call `store.list()` — a real,
+ * observed regression (duplicate network round-trips). Whoever calls first
+ * registers the promise; latecomers for the same key await that same promise
+ * instead of starting their own fetch.
+ */
+const inflightRangeFetches = new Map<
+  string,
+  Promise<Array<{ key: string; data: unknown }>>
+>();
+
+function fetchRangeDeduped<T>(
+  cacheKey: string,
+  fetcher: () => Promise<Array<{ key: string; data: T }>>,
+): Promise<Array<{ key: string; data: T }>> {
+  const existing = inflightRangeFetches.get(cacheKey);
+  if (existing) {
+    return existing as Promise<Array<{ key: string; data: T }>>;
+  }
+  const promise = fetcher().finally(() => {
+    inflightRangeFetches.delete(cacheKey);
+  });
+  inflightRangeFetches.set(
+    cacheKey,
+    promise as Promise<Array<{ key: string; data: unknown }>>,
+  );
+  return promise;
+}
+
 export interface UseKeyedStoreRangeResult<T> {
   data: Array<{ key: string; data: T }> | undefined;
   loading: boolean;
@@ -113,8 +146,9 @@ export function useKeyedStoreRange<T>(
     const existing = cache.get<RangeCacheEntry<T>>(rangeCacheKey);
     if (existing !== undefined && existing.epoch === epoch) return;
     let cancelled = false;
-    store
-      .list(userId, cryptoHandle, range)
+    fetchRangeDeduped(rangeCacheKey, () =>
+      store.list(userId, cryptoHandle, range),
+    )
       .then((rows) => {
         if (!cancelled) cache.set(rangeCacheKey, { rows, epoch });
       })

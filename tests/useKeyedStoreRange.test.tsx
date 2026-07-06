@@ -229,6 +229,53 @@ describe("useKeyedStoreRange", () => {
     );
   });
 
+  it("dedupes concurrent fetches for the SAME range across independent hook instances (regression: two components mounting together must share ONE fetch, not one each)", async () => {
+    const storage = rangeMemoryStorage();
+    let listCalls = 0;
+    const countingStorage: StorageAdapter = {
+      ...storage,
+      listByKeyRange: (...args) => {
+        listCalls++;
+        return storage.listByKeyRange!(...args);
+      },
+    };
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    configureSecureStore({
+      storage: countingStorage,
+      keys: provider,
+      cache: memoryCache(),
+    });
+    const store = defineStore({
+      name: "range_concurrent_mount",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    await store.save("u1", cryptoHandle, "2026-01", { count: 1 });
+
+    // Two independent components mounting the SAME range at the same time —
+    // e.g. AccountsRegister + a summary panel both querying the same months.
+    const first = renderHook(() =>
+      useKeyedStoreRange(store, { from: "2026-01", to: "2026-01" }),
+    );
+    const second = renderHook(() =>
+      useKeyedStoreRange(store, { from: "2026-01", to: "2026-01" }),
+    );
+
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+    await waitFor(() => expect(second.result.current.loading).toBe(false));
+
+    expect(listCalls).toBe(1);
+    expect(first.result.current.data).toEqual([
+      { key: "2026-01", data: { count: 1 } },
+    ]);
+    expect(second.result.current.data).toEqual(first.result.current.data);
+  });
+
   it("reload() forces a fresh fetch even when the cached epoch already matches (no natural refetch would fire)", async () => {
     const storage = rangeMemoryStorage();
     let listCalls = 0;
