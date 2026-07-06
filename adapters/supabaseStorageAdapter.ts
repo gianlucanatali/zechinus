@@ -33,6 +33,7 @@ function mapBlobRow(data: Record<string, unknown> | null): BlobRecord | null {
   return {
     schemaVersion: (data.schema_version as number | null) ?? 1,
     blob: data.blob as string,
+    contentHash: (data.content_hash as string | null) ?? null,
   };
 }
 
@@ -57,7 +58,7 @@ export function supabaseStorageAdapter(
         collection,
         userId,
         extraKeys,
-        "schema_version, blob",
+        "schema_version, blob, content_hash",
       );
       if (error)
         throw new Error(
@@ -186,7 +187,7 @@ export function supabaseStorageAdapter(
     ): Promise<Array<{ key: string; record: BlobRecord }>> {
       const { data, error } = await getClient()
         .from(collection)
-        .select(`${keyColumn}, schema_version, blob`)
+        .select(`${keyColumn}, schema_version, blob, content_hash`)
         .eq("user_id", userId)
         .gte(keyColumn, from)
         .lte(keyColumn, to)
@@ -202,6 +203,7 @@ export function supabaseStorageAdapter(
         record: {
           schemaVersion: (row.schema_version as number | null) ?? 1,
           blob: row.blob as string,
+          contentHash: (row.content_hash as string | null) ?? null,
         },
       }));
     },
@@ -213,9 +215,13 @@ export function supabaseStorageAdapter(
     ): Promise<
       Array<{ id: string; record: BlobRecord; plain: Record<string, unknown> }>
     > {
-      const columns = ["id", "schema_version", "blob", ...plainColumns].join(
-        ", ",
-      );
+      const columns = [
+        "id",
+        "schema_version",
+        "blob",
+        "content_hash",
+        ...plainColumns,
+      ].join(", ");
       const { data, error } = await getClient()
         .from(collection)
         .select(columns)
@@ -236,6 +242,7 @@ export function supabaseStorageAdapter(
           record: {
             schemaVersion: (row.schema_version as number | null) ?? 1,
             blob: row.blob as string,
+            contentHash: (row.content_hash as string | null) ?? null,
           },
           plain,
         };

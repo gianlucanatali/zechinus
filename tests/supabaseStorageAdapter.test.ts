@@ -1,0 +1,156 @@
+/**
+ * Verifies supabaseStorageAdapter's read methods (get/listByKeyRange/list) actually
+ * select and map `content_hash` — the exact gap that shipped silently until
+ * `optimisticLock: true` was first used against a real Supabase backend
+ * (previously "no unit test of its own — only E2E coverage through the app", per
+ * pgStorageAdapter.test.ts's header comment). Without content_hash in the SELECT,
+ * `mutate()`'s conflict check always reads `hash: null`, so `saveIfMatch` compares
+ * against `null` even when the row has a real hash — every write after the first
+ * throws `OptimisticLockConflictError`, even with zero concurrent writers
+ * (reproduced empirically against local Supabase before this fix).
+ */
+import assert from "node:assert/strict";
+import test from "node:test";
+import { supabaseStorageAdapter } from "../adapters/supabaseStorageAdapter.ts";
+
+type Row = Record<string, unknown>;
+
+/** Minimal fake mirroring the chain shape supabaseStorageAdapter actually calls. */
+function fakeSupabase(rows: Row[] | Row | null) {
+  const calls: Array<{ collection: string; columns: string }> = [];
+  const builder = {
+    _collection: "",
+    _columns: "",
+    select(columns: string) {
+      this._columns = columns;
+      calls.push({ collection: this._collection, columns });
+      return this;
+    },
+    eq() {
+      return this;
+    },
+    gte() {
+      return this;
+    },
+    lte() {
+      return this;
+    },
+    order() {
+      return this;
+    },
+    async maybeSingle() {
+      return { data: rows as Row | null, error: null };
+    },
+    then(resolve: (v: { data: Row[] | null; error: null }) => unknown) {
+      return resolve({ data: rows as Row[] | null, error: null });
+    },
+  };
+  const client = {
+    from(collection: string) {
+      builder._collection = collection;
+      return builder;
+    },
+  };
+  return { client, calls };
+}
+
+test("supabaseStorageAdapter.get: selects content_hash and maps it", async () => {
+  const { client, calls } = fakeSupabase({
+    schema_version: 1,
+    blob: "enc:x",
+    content_hash: "h1",
+  });
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  const result = await adapter.get("portfolio_blobs", "u1", []);
+
+  assert.match(calls[0].columns, /content_hash/);
+  assert.deepEqual(result, {
+    schemaVersion: 1,
+    blob: "enc:x",
+    contentHash: "h1",
+  });
+});
+
+test("supabaseStorageAdapter.get: null content_hash on a legacy row (never hashed)", async () => {
+  const { client } = fakeSupabase({
+    schema_version: 1,
+    blob: "enc:x",
+    content_hash: null,
+  });
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  const result = await adapter.get("portfolio_blobs", "u1", []);
+
+  assert.deepEqual(result, {
+    schemaVersion: 1,
+    blob: "enc:x",
+    contentHash: null,
+  });
+});
+
+test("supabaseStorageAdapter.listByKeyRange: selects content_hash and maps it per row", async () => {
+  const { client, calls } = fakeSupabase([
+    {
+      year_month: "2026-06",
+      schema_version: 1,
+      blob: "enc:a",
+      content_hash: "ha",
+    },
+    {
+      year_month: "2026-07",
+      schema_version: 1,
+      blob: "enc:b",
+      content_hash: "hb",
+    },
+  ]);
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  const rows = await adapter.listByKeyRange!(
+    "transaction_blobs",
+    "u1",
+    "year_month",
+    "2026-06",
+    "2026-07",
+  );
+
+  assert.match(calls[0].columns, /content_hash/);
+  assert.deepEqual(rows, [
+    {
+      key: "2026-06",
+      record: { schemaVersion: 1, blob: "enc:a", contentHash: "ha" },
+    },
+    {
+      key: "2026-07",
+      record: { schemaVersion: 1, blob: "enc:b", contentHash: "hb" },
+    },
+  ]);
+});
+
+test("supabaseStorageAdapter.list: selects content_hash and maps it alongside plain columns", async () => {
+  const { client, calls } = fakeSupabase([
+    {
+      id: "row-1",
+      schema_version: 1,
+      blob: "enc:a",
+      content_hash: "h1",
+      portfolio_id: "pf-1",
+      status: "draft",
+    },
+  ]);
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  const rows = await adapter.list!("rebalance_simulations", "u1", [
+    "portfolio_id",
+    "status",
+  ]);
+
+  assert.match(calls[0].columns, /content_hash/);
+  assert.deepEqual(rows, [
+    {
+      id: "row-1",
+      record: { schemaVersion: 1, blob: "enc:a", contentHash: "h1" },
+      plain: { portfolio_id: "pf-1", status: "draft" },
+    },
+  ]);
+});

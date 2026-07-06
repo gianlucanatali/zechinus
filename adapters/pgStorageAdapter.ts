@@ -40,13 +40,18 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
       const { rows } = await getClient().query<{
         schema_version: number | null;
         blob: string;
+        content_hash: string | null;
       }>(
-        `SELECT schema_version, blob FROM ${quoteIdent(collection)} WHERE user_id = $1${extra} LIMIT 1`,
+        `SELECT schema_version, blob, content_hash FROM ${quoteIdent(collection)} WHERE user_id = $1${extra} LIMIT 1`,
         [userId, ...extraKeys.map((k) => k.value)],
       );
       const row = rows[0];
       if (!row) return null;
-      return { schemaVersion: row.schema_version ?? 1, blob: row.blob };
+      return {
+        schemaVersion: row.schema_version ?? 1,
+        blob: row.blob,
+        contentHash: row.content_hash ?? null,
+      };
     },
 
     async getHash(collection, userId, extraKeys): Promise<string | null> {
@@ -184,15 +189,20 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
         [k: string]: unknown;
         schema_version: number | null;
         blob: string;
+        content_hash: string | null;
       }>(
-        `SELECT ${quoteIdent(keyColumn)}, schema_version, blob FROM ${quoteIdent(collection)} ` +
+        `SELECT ${quoteIdent(keyColumn)}, schema_version, blob, content_hash FROM ${quoteIdent(collection)} ` +
           `WHERE user_id = $1 AND ${quoteIdent(keyColumn)} >= $2 AND ${quoteIdent(keyColumn)} <= $3 ` +
           `ORDER BY ${quoteIdent(keyColumn)}`,
         [userId, from, to],
       );
       return rows.map((row) => ({
         key: row[keyColumn] as string,
-        record: { schemaVersion: row.schema_version ?? 1, blob: row.blob },
+        record: {
+          schemaVersion: row.schema_version ?? 1,
+          blob: row.blob,
+          contentHash: row.content_hash ?? null,
+        },
       }));
     },
 
@@ -203,7 +213,13 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
     ): Promise<
       Array<{ id: string; record: BlobRecord; plain: Record<string, unknown> }>
     > {
-      const columns = ["id", "schema_version", "blob", ...plainColumns];
+      const columns = [
+        "id",
+        "schema_version",
+        "blob",
+        "content_hash",
+        ...plainColumns,
+      ];
       const { rows } = await getClient().query<Record<string, unknown>>(
         `SELECT ${columns.map(quoteIdent).join(", ")} FROM ${quoteIdent(collection)} WHERE user_id = $1`,
         [userId],
@@ -216,6 +232,7 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
           record: {
             schemaVersion: (row.schema_version as number | null) ?? 1,
             blob: row.blob as string,
+            contentHash: (row.content_hash as string | null) ?? null,
           },
           plain,
         };

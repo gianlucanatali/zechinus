@@ -2,8 +2,8 @@
  * Verifies the SQL/params pgStorageAdapter builds — no real Postgres needed. A fake
  * `PgClient` records every call; assertions check the query shape and bound params,
  * not a live database. Live correctness is validated by the consuming app's own
- * integration/E2E suite against a real Postgres (same as supabaseStorageAdapter,
- * which has no unit test of its own — only E2E coverage through the app).
+ * integration/E2E suite against a real Postgres. See supabaseStorageAdapter.test.ts
+ * for the equivalent coverage on the other shipped adapter.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -36,7 +36,7 @@ test("pgStorageAdapter.get: selects by user_id, returns null on empty result", a
   assert.equal(result, null);
   assert.match(
     calls[0].text,
-    /SELECT schema_version, blob FROM "portfolio_blobs" WHERE user_id = \$1/,
+    /SELECT schema_version, blob, content_hash FROM "portfolio_blobs" WHERE user_id = \$1/,
   );
   assert.deepEqual(calls[0].params, ["u1"]);
 });
@@ -47,7 +47,30 @@ test("pgStorageAdapter.get: maps a found row", async () => {
 
   const result = await adapter.get("portfolio_blobs", "u1", []);
 
-  assert.deepEqual(result, { schemaVersion: 2, blob: "enc:x" });
+  assert.deepEqual(result, {
+    schemaVersion: 2,
+    blob: "enc:x",
+    contentHash: null,
+  });
+});
+
+// REGRESSIONE: get() non selezionava content_hash — mutate()/saveIfMatch usava
+// sempre hash:null anche su una riga con un hash reale, facendo fallire ogni
+// scrittura successiva con OptimisticLockConflictError anche senza un vero
+// secondo scrittore (riprodotto empiricamente contro Supabase locale).
+test("pgStorageAdapter.get: maps content_hash when present", async () => {
+  const { client } = fakeClient([
+    { schema_version: 2, blob: "enc:x", content_hash: "h1" },
+  ]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const result = await adapter.get("portfolio_blobs", "u1", []);
+
+  assert.deepEqual(result, {
+    schemaVersion: 2,
+    blob: "enc:x",
+    contentHash: "h1",
+  });
 });
 
 test("pgStorageAdapter.put: upserts on user_id, includes content_hash only when present", async () => {
@@ -121,12 +144,18 @@ test("pgStorageAdapter.listByKeyRange: quotes the key column, binds from/to, ord
 
   assert.match(
     calls[0].text,
-    /SELECT "year_month", schema_version, blob FROM "transaction_blobs" WHERE user_id = \$1 AND "year_month" >= \$2 AND "year_month" <= \$3 ORDER BY "year_month"/,
+    /SELECT "year_month", schema_version, blob, content_hash FROM "transaction_blobs" WHERE user_id = \$1 AND "year_month" >= \$2 AND "year_month" <= \$3 ORDER BY "year_month"/,
   );
   assert.deepEqual(calls[0].params, ["u1", "2026-06", "2026-07"]);
   assert.deepEqual(rows, [
-    { key: "2026-06", record: { schemaVersion: 1, blob: "enc:a" } },
-    { key: "2026-07", record: { schemaVersion: 1, blob: "enc:b" } },
+    {
+      key: "2026-06",
+      record: { schemaVersion: 1, blob: "enc:a", contentHash: null },
+    },
+    {
+      key: "2026-07",
+      record: { schemaVersion: 1, blob: "enc:b", contentHash: null },
+    },
   ]);
 });
 
@@ -149,12 +178,12 @@ test("pgStorageAdapter.list: selects id/schema_version/blob plus the given plain
 
   assert.match(
     calls[0].text,
-    /SELECT "id", "schema_version", "blob", "portfolio_id", "status" FROM "rebalance_simulations" WHERE user_id = \$1/,
+    /SELECT "id", "schema_version", "blob", "content_hash", "portfolio_id", "status" FROM "rebalance_simulations" WHERE user_id = \$1/,
   );
   assert.deepEqual(rows, [
     {
       id: "row-1",
-      record: { schemaVersion: 1, blob: "enc:a" },
+      record: { schemaVersion: 1, blob: "enc:a", contentHash: null },
       plain: { portfolio_id: "pf-1", status: "draft" },
     },
   ]);
