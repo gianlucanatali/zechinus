@@ -47,8 +47,12 @@ export interface UseAggregationResult<T> {
   /** Forces an explicit recompute now (e.g. retry after `error`). Fire-and-forget — the
    * result surfaces through `data`/`error` above, not through this call's return value.
    * Throws synchronously if called while locked (no cryptoHandle/userId), same discipline
-   * every other binding's write method uses (see `useStore`'s `save()`). */
-  refresh: () => void;
+   * every other binding's write method uses (see `useStore`'s `save()`).
+   *
+   * `opts.bypassExternalsTtl` (Task 5 review, Finding 3): forwarded as-is to
+   * `Aggregation.refresh()` — see that method's own doc comment (`core/aggregation.ts`)
+   * for when a caller needs this vs. a plain `refresh()`. */
+  refresh: (opts?: { bypassExternalsTtl?: boolean }) => void;
 }
 
 export function useAggregation<T>(
@@ -97,18 +101,21 @@ export function useAggregation<T>(
     };
   }, [cryptoHandle, userId, agg]);
 
-  const refresh = useCallback(() => {
-    if (!cryptoHandle || !userId) {
-      throw new Error(
-        `${agg.name}.useAggregation().refresh(): called while locked (no cryptoHandle/userId)`,
-      );
-    }
-    agg.refresh().catch((e: unknown) => {
-      // Not swallowed silently: also logged here, on top of surfacing via `error` above
-      // (the same `lastError` `defineAggregation` publishes through the state port).
-      console.error(`${agg.name}.useAggregation().refresh(): failed:`, e);
-    });
-  }, [cryptoHandle, userId, agg]);
+  const refresh = useCallback(
+    (opts?: { bypassExternalsTtl?: boolean }) => {
+      if (!cryptoHandle || !userId) {
+        throw new Error(
+          `${agg.name}.useAggregation().refresh(): called while locked (no cryptoHandle/userId)`,
+        );
+      }
+      agg.refresh(opts).catch((e: unknown) => {
+        // Not swallowed silently: also logged here, on top of surfacing via `error` above
+        // (the same `lastError` `defineAggregation` publishes through the state port).
+        console.error(`${agg.name}.useAggregation().refresh(): failed:`, e);
+      });
+    },
+    [cryptoHandle, userId, agg],
+  );
 
   const state: AggregationState<T> = cached ?? {
     data: null,

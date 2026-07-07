@@ -709,6 +709,90 @@ test("scenario 9: an Aggregation as a source — a downstream aggregate reads th
 });
 
 test(
+  "refresh({ bypassExternalsTtl: true }): forces a fresh external fetch even inside its " +
+    "TTL window; a plain refresh() keeps reusing the cached value (Task 5 review, Finding " +
+    "3 — a worker that just wrote new market data needs the NEXT recompute to see it now, " +
+    "not after the external's TTL expires)",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    configureSecureStore({
+      storage: adapter,
+      cache,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+
+    const source = makeSource("bypass_ttl_source");
+    await source.set({ value: 1 });
+
+    let priceFetchCalls = 0;
+    // The external's return value changes on every REAL fetch (a fresh market snapshot),
+    // so the test can tell a bypassed refetch apart from a reused cache entry by the
+    // persisted `data`, not just a call counter.
+    const agg = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "bypass_ttl_agg", key: "__agg__" },
+      sources: { src: source },
+      externals: {
+        prices: {
+          load: async () => {
+            priceFetchCalls++;
+            return priceFetchCalls * 100;
+          },
+          // Long TTL — deliberately far outside this test's runtime, so any refetch
+          // observed below can only be explained by an explicit bypass, never expiry.
+          ttlMs: 10 * 60 * 1000,
+        },
+      },
+      compute: ({ sources, externals }) => ({
+        total: sources.src.value + externals.prices,
+      }),
+    });
+
+    await agg.get();
+    await waitFor(
+      () =>
+        priceFetchCalls === 1 && adapter.putCallsFor("bypass_ttl_agg") === 1,
+    );
+    assert.deepEqual((await agg.get()).data, { total: 101 }); // 1 + 100
+
+    // Plain refresh(): existing guarantee (scenario 9) must still hold — reuses the
+    // cached external within its TTL.
+    await agg.refresh();
+    assert.equal(
+      priceFetchCalls,
+      1,
+      "a plain refresh() must not refetch an external that's still within its TTL",
+    );
+    assert.deepEqual((await agg.get()).data, { total: 101 });
+
+    // Explicit bypass: must refetch NOW, well within the TTL window, and persist the
+    // new value.
+    await agg.refresh({ bypassExternalsTtl: true });
+    assert.equal(
+      priceFetchCalls,
+      2,
+      "refresh({ bypassExternalsTtl: true }) must force a fresh external fetch even " +
+        "though the TTL hasn't expired",
+    );
+    assert.deepEqual((await agg.get()).data, { total: 201 }); // 1 + 200
+
+    // A subsequent PLAIN refresh() must go back to reusing the cache the bypass just
+    // refreshed — bypass is a one-shot escape hatch, not a standing TTL override.
+    await agg.refresh();
+    assert.equal(
+      priceFetchCalls,
+      2,
+      "a plain refresh() right after a bypass must reuse the just-refreshed cache, not " +
+        "fetch again",
+    );
+  },
+);
+
+test(
   "review finding: a lock firing DURING internalStore.save()'s own internal await " +
     "(not just before it starts) must not update lastEnvelope or publish the downstream " +
     "fingerprint — a narrower race window than the guard's stated precedent, reload()",

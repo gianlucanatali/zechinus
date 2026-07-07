@@ -229,8 +229,18 @@ export interface Aggregation<T> {
    * concurrently. Rejects with whatever `compute()` threw; the previously persisted
    * aggregate is left completely untouched (never partially written) — see scenario 8 in
    * this task's tests.
+   *
+   * `bypassExternalsTtl` (Task 5 review, Finding 3): a plain `refresh()` still respects
+   * each external's own `ttlMs` — it forces the recompute, not a refetch of data that's
+   * still fresh by the external's own clock (see scenario 9: "forcing D to recompute
+   * must never cause A's external to be fetched again"). Pass `{ bypassExternalsTtl:
+   * true }` for the different case — the CALLER, not the TTL clock, knows the external
+   * data just changed (e.g. a price-history worker just wrote new rows) and wants the
+   * next recompute to see it now rather than wait out the TTL. One-shot: only THIS
+   * recompute's external fetches are forced; the refreshed value re-enters the normal
+   * TTL-gated cache afterward (see the "one-shot escape hatch" test).
    */
-  refresh(): Promise<T>;
+  refresh(opts?: { bypassExternalsTtl?: boolean }): Promise<T>;
 }
 
 /**
@@ -861,11 +871,26 @@ export function defineAggregation<
         error: lastError,
       };
     },
-    async refresh() {
+    async refresh(opts?: { bypassExternalsTtl?: boolean }) {
       resolveAmbientIdentity(name);
       if (debounceTimer) {
         clearTimeout(debounceTimer);
         debounceTimer = null;
+      }
+      // Wipe the in-memory external cache BEFORE triggering the recompute — the TTL
+      // check in `computeAndPersist` (`cached && now - cached.fetchedAtMs < ext.ttlMs`)
+      // then naturally misses (no entry) and refetches every external, exactly like the
+      // very first compute. No changes to `computeAndPersist`/`triggerRecompute`'s
+      // single-flight or fingerprint-gating logic needed: if a recompute is already
+      // in-flight when this is called, it already decided (before this call) whether to
+      // reuse the (still-present, at that point) cache — clearing it here still
+      // guarantees the QUEUED rerun that single-flight schedules right after (see
+      // `rerunRequested`) sees an empty cache and refetches, which is what actually
+      // matters: the aggregate's persisted value (and the state it publishes downstream
+      // via `notifyReactState`) reflects fresh externals soon after this call, not
+      // necessarily on the exact promise it returns.
+      if (opts?.bypassExternalsTtl) {
+        externalCache.clear();
       }
       return triggerRecompute();
     },
