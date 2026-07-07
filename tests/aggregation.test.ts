@@ -493,3 +493,130 @@ test("scenario 8: a throwing compute() surfaces the error, leaves the previously
     "a successful retry must clear the previous error",
   );
 });
+
+test("scenario 9: an Aggregation as a source — a downstream aggregate reads the source's persisted value and propagates its fingerprint, without ever causing a duplicate fetch of the source's own externals", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("s9_source");
+  await source.set({ value: 1 });
+
+  // A: a store-sourced aggregation with a mocked, counted external (the "expensive price
+  // fetch" from the plan's motivation) — a long TTL so, within this test, it is only ever
+  // fetched on A's OWN first compute, never again just because a store change happened.
+  let priceFetchCalls = 0;
+  let computeCallsA = 0;
+  const aggA = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "s9_agg_a", key: "__agg__" },
+    debounceMs: 20,
+    sources: { src: source },
+    externals: {
+      prices: {
+        load: async () => {
+          priceFetchCalls++;
+          return 100;
+        },
+        ttlMs: 10 * 60 * 1000,
+      },
+    },
+    compute: ({ sources, externals }) => {
+      computeCallsA++;
+      return { total: sources.src.value + externals.prices };
+    },
+  });
+
+  // C: an aggregation whose ONLY source is A itself (Aggregation-as-source, not a store).
+  let computeCallsC = 0;
+  const aggC = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "s9_agg_c", key: "__agg__" },
+    debounceMs: 20,
+    sources: { a: aggA },
+    compute: ({ sources }) => {
+      computeCallsC++;
+      return { total: sources.a.total * 10 };
+    },
+  });
+
+  // D: a third level, sourcing C — proves the fingerprint propagates along the whole DAG,
+  // not just one hop.
+  let computeCallsD = 0;
+  const aggD = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "s9_agg_d", key: "__agg__" },
+    debounceMs: 20,
+    sources: { c: aggC },
+    compute: ({ sources }) => {
+      computeCallsD++;
+      return { total: sources.c.total + 1 };
+    },
+  });
+
+  // Establish each level in dependency order — same discipline scenario 2 uses to
+  // establish the subscription before the burst being measured.
+  await aggA.get();
+  await waitFor(() => computeCallsA === 1 && priceFetchCalls === 1);
+
+  await aggC.get();
+  await waitFor(() => computeCallsC === 1);
+  assert.deepEqual((await aggC.get()).data, { total: 1010 }); // (1 + 100) * 10
+
+  await aggD.get();
+  await waitFor(() => computeCallsD === 1);
+  assert.deepEqual((await aggD.get()).data, { total: 1011 }); // 1010 + 1
+
+  assert.equal(
+    priceFetchCalls,
+    1,
+    "sanity: nothing but A's own compute ever touches the external",
+  );
+
+  // 1. A really changes (its store source changes) -> A recomputes -> C (source = A)
+  //    detects a different fingerprint -> C recomputes -> D (source = C) cascades too.
+  await source.set({ value: 2 });
+  await waitFor(() => computeCallsA === 2, 3000);
+  await waitFor(() => computeCallsC === 2, 3000);
+  await waitFor(() => computeCallsD === 2, 3000);
+  await settle();
+
+  assert.equal(
+    priceFetchCalls,
+    1,
+    "the external's TTL hasn't expired — A's recompute must reuse its cached price, " +
+      "never refetch it just because the store source changed",
+  );
+  assert.deepEqual((await aggC.get()).data, { total: 1020 }); // (2 + 100) * 10
+  assert.deepEqual((await aggD.get()).data, { total: 1021 }); // 1020 + 1
+
+  // 2. A does NOT change from here on. Forcing D to recompute must read C's persisted
+  //    value (which itself reads A's persisted value) with ZERO additional invocations of
+  //    A's compute and ZERO additional fetches of A's external — proves there is no
+  //    double fetch of the source aggregate's externals anywhere in the DAG.
+  const computeCallsABefore = computeCallsA;
+  const priceFetchCallsBefore = priceFetchCalls;
+  await aggD.refresh();
+  assert.equal(
+    computeCallsA,
+    computeCallsABefore,
+    "forcing a recompute at the bottom of the DAG (D) must never cascade into a " +
+      "recompute of A when A's own sources haven't changed",
+  );
+  assert.equal(
+    priceFetchCalls,
+    priceFetchCallsBefore,
+    "forcing D to recompute must never cause A's external to be fetched again",
+  );
+});

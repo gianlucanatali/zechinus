@@ -18,12 +18,17 @@
  *    already does — see `store.ts`'s `writeThroughCache`)
  *  - debounced, single-flight recompute
  *
- * NOT in this file (later tasks, see the plan): an `Aggregation` as a `sources` entry
- * (Task 2 — `Source` below is deliberately widenable to accommodate it without a breaking
- * change), the declarative `FieldOperators` form of `compute` (Task 3 — `compute`'s type
- * here is only the pure-function form, see `ComputeFn`'s doc comment), the React binding
- * (Task 4), and `onSourceWrite` (Task 6 — a different primitive, for a write-REACTION,
- * not an aggregate).
+ * Task 2 additions: an `Aggregation` may itself be a `sources` entry (see `Source` below,
+ * `isAggregationSource`) — a downstream aggregation reads the upstream one's PERSISTED
+ * value via its own `.get()` (never duplicating its compute/externals logic) and the
+ * upstream's fingerprint propagates into the downstream's own `sourceFingerprints`, using
+ * the exact same CacheAdapter push/subscribe convention a `Store` source already uses (see
+ * `aggregationSourceFingerprint`) — no special-casing needed in `ensureSubscribed`/`isFresh`.
+ *
+ * NOT in this file (later tasks, see the plan): the declarative `FieldOperators` form of
+ * `compute` (Task 3 — `compute`'s type here is only the pure-function form, see
+ * `ComputeFn`'s doc comment), the React binding (Task 4), and `onSourceWrite` (Task 6 — a
+ * different primitive, for a write-REACTION, not an aggregate).
  */
 
 import { z } from "zod";
@@ -43,15 +48,15 @@ export interface ExternalInput<T = unknown> {
 }
 
 /**
- * What an aggregation can read from. In this task, only a `perUser` `Store` — reading
- * from ANOTHER `Aggregation` (opt-in DAG composition, e.g. a dashboard aggregate sourcing
- * an already-computed portfolio-history aggregate) is Task 2. The generic constraint
- * below (`Record<string, Source>`) is what widens there — to
- * `Record<string, Store<any> | Aggregation<any>>` — without touching any existing caller.
+ * What an aggregation can read from: a `perUser` `Store`, OR another `Aggregation`
+ * (opt-in DAG composition — e.g. a dashboard aggregate sourcing an already-computed
+ * portfolio-history aggregate, so the expensive fetch behind it never runs twice). See
+ * `isAggregationSource` for how the two are told apart at runtime.
  */
-export type Source = Store<any>;
+export type Source = Store<any> | Aggregation<any>;
 
-type SourceData<S> = S extends Store<infer D> ? D : never;
+type SourceData<S> =
+  S extends Store<infer D> ? D : S extends Aggregation<infer D> ? D : never;
 /** The `sources` shape `compute()` receives: one field per `sources` entry, holding that
  * source's plain (decrypted) data — never the store object itself. */
 export type DataOf<TSources extends Record<string, Source>> = {
@@ -193,6 +198,35 @@ function resolveAmbientIdentity(name: string): {
     throw new LockedSessionError(name);
   }
   return { cryptoHandle, userId };
+}
+
+/**
+ * Runtime discriminator for the `Source` union. `Aggregation<T>` is the only member with
+ * a `refresh()` method — no `Store`/`KeyedStore`/`CollectionStore` cardinality in
+ * `store.ts` ever exposes one — so its presence is a safe, unambiguous tag, no extra
+ * marker property needed on either shape.
+ */
+function isAggregationSource(source: Source): source is Aggregation<unknown> {
+  return (
+    typeof (source as Partial<Aggregation<unknown>>).refresh === "function"
+  );
+}
+
+/**
+ * An Aggregation source has no `contentHash` column of its own (it isn't a `Store`) — its
+ * "fingerprint", for a DOWNSTREAM aggregation's freshness check, is a deterministic digest
+ * of its own persisted `data`. Computed identically in the two places that must agree: (1)
+ * `computeAndPersist` below publishes it to the shared CacheAdapter slot right after a
+ * REAL (non-skip-write) persist, using the exact same `${name}:${userId}` convention a
+ * Store source's ambient write already publishes to (`writeThroughCache` in store.ts) — so
+ * `ensureSubscribed`/`isFresh` need ZERO special-casing to also work for an Aggregation
+ * source; (2) a downstream aggregation computes the SAME digest live, from the value its
+ * own `.get()` call just returned, when building ITS `sourceFingerprints`. If these ever
+ * disagreed, `isFresh()` could get permanently stuck — the same class of bug the
+ * "regression" test above caught for skip-writes.
+ */
+function aggregationSourceFingerprint(data: unknown): string {
+  return JSON.stringify(data);
 }
 
 export function defineAggregation<
@@ -347,12 +381,47 @@ export function defineAggregation<
     const { cryptoHandle, userId } = resolveAmbientIdentity(name);
 
     const sourceEntries = await Promise.all(
-      Object.entries(def.sources).map(async ([sourceName, source]) => {
-        const { data, hash } = source.loadWithHash
-          ? await source.loadWithHash(userId, cryptoHandle)
-          : { data: await source.load(userId, cryptoHandle), hash: null };
-        return [sourceName, data, hash] as const;
-      }),
+      // Cast to `Record<string, Source>` (not the generic `TSources`) so the type guard
+      // below actually narrows `source` in both branches — a type predicate can't reliably
+      // exclude its type from a still-generic type parameter (a known TS limitation), only
+      // from a concrete union like `Source`.
+      Object.entries(def.sources as Record<string, Source>).map(
+        async ([sourceName, source]) => {
+          if (isAggregationSource(source)) {
+            // Read the source aggregation's PERSISTED value via its own ambient `.get()`
+            // — never its `compute()`/externals, never `.refresh()`. If it's stale,
+            // `.get()` kicks off ITS OWN background recompute (its own independent
+            // staleness pipeline) and still returns immediately with what's currently
+            // persisted — exactly the "no double fetch" behavior scenario 9 requires.
+            const state = await source.get();
+            if (state.data === null) {
+              throw new Error(
+                `defineAggregation(${name}): source aggregation "${sourceName}" (${source.name}) ` +
+                  `has no persisted value yet — call its own get()/refresh() at least once ` +
+                  `before using it as a source for another aggregation.`,
+              );
+            }
+            return [
+              sourceName,
+              state.data,
+              aggregationSourceFingerprint(state.data),
+            ] as const;
+          }
+          // Only a Store can reach here — `isAggregationSource` above already returned
+          // false — but TS can't fully exclude `Aggregation<any>` from this branch on its
+          // own (narrowing a union against a *generic* type predicate parameter has known
+          // limitations), hence the explicit cast rather than relying on control-flow
+          // narrowing alone.
+          const storeSource = source as Store<any>;
+          const { data, hash } = storeSource.loadWithHash
+            ? await storeSource.loadWithHash(userId, cryptoHandle)
+            : {
+                data: await storeSource.load(userId, cryptoHandle),
+                hash: null,
+              };
+          return [sourceName, data, hash] as const;
+        },
+      ),
     );
     const sourcesData = Object.fromEntries(
       sourceEntries.map(([sourceName, data]) => [sourceName, data]),
@@ -420,6 +489,19 @@ export function defineAggregation<
         data: validated,
       };
       await internalStore.save(userId, cryptoHandle, def.storage.key, envelope);
+      // Publish this aggregation's OWN fingerprint under the exact same
+      // `${name}:${userId}` convention a Store source's ambient write already uses (see
+      // `writeThroughCache` in store.ts) — this is the ONLY hook a downstream aggregation
+      // needs to treat this one as just another named `Source`: `ensureSubscribed`
+      // already subscribes by `${source.name}:${userId}` for every source, generically.
+      // Skipped on a skip-write (this branch), same as a store's own mutate() skips
+      // writeThroughCache on an unchanged contentHash — nothing downstream needs to know
+      // about a persist that changed nothing observable.
+      const { cache } = getSecureStoreConfig();
+      cache?.set(`${name}:${userId}`, {
+        data: validated,
+        hash: aggregationSourceFingerprint(validated),
+      });
     }
     return validated;
   }
