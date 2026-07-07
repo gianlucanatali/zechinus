@@ -12,7 +12,21 @@ import {
   type BlobRecord,
   type CryptoHandle,
   type KeyProvider,
+  type CacheAdapter,
 } from "../index.ts";
+import { keyedRangeEpochCacheKey } from "../core/store.ts";
+
+function memoryCache(): CacheAdapter {
+  const data = new Map<string, unknown>();
+  return {
+    get: (key) => data.get(key) as never,
+    set: (key, value) => {
+      data.set(key, value);
+    },
+    subscribe: () => () => {},
+    clear: () => data.clear(),
+  };
+}
 
 // `createMany()` resolves the cryptoHandle ambiently from the configured
 // KeyProvider, same as `get()`/`set()`/`mutate()` — the caller never sees a
@@ -123,7 +137,9 @@ test("keyed store createMany: rejects if any of the N keys already exists (inser
     schemaFingerprint: fingerprintSchema(Batch, "all"),
   });
 
-  await store.save("u1", cryptoHandle, "2026-06", { transactions: ["existing"] });
+  await store.save("u1", cryptoHandle, "2026-06", {
+    transactions: ["existing"],
+  });
 
   await assert.rejects(
     () =>
@@ -223,4 +239,47 @@ test("keyed store createMany: adapter without insertMany → explicit error", as
     () => store.createMany([{ key: "2026-06", data: { transactions: [] } }]),
     /doesn't support bulk keyed creation \(insertMany missing\)/,
   );
+});
+
+test("keyed store createMany: cache-aware like set()/mutate() — each key's slot is populated, ONE epoch bump for the whole batch", async () => {
+  const adapter = keyedMemoryAdapterWithInsertMany();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "transaction_blobs",
+    identity: { perKey: "year_month" },
+    encrypt: "all",
+    schema: Batch,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Batch, "all"),
+  });
+
+  await store.createMany([
+    { key: "2026-06", data: { transactions: ["june"] } },
+    { key: "2026-07", data: { transactions: ["july"] } },
+  ]);
+
+  // A useKeyedStoreRange mounted on a range covering these months must see
+  // them without a full list() — same write-through as an ambient set()/mutate().
+  const juneEntry = cache.get<{ data: unknown; hash: string | null }>(
+    "transaction_blobs:u1:2026-06",
+  );
+  const julyEntry = cache.get<{ data: unknown; hash: string | null }>(
+    "transaction_blobs:u1:2026-07",
+  );
+  assert.deepEqual(juneEntry?.data, { transactions: ["june"] });
+  assert.deepEqual(julyEntry?.data, { transactions: ["july"] });
+
+  // ONE epoch bump for the whole batch, not one per created key — a mounted
+  // useKeyedStoreRange should refetch once, not N times, after a bulk seed.
+  const epoch = cache.get<number>(
+    keyedRangeEpochCacheKey("transaction_blobs", "u1"),
+  );
+  assert.equal(epoch, 1);
 });

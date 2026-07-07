@@ -631,7 +631,7 @@ function buildKeyedStore<S extends z.ZodType>(
           `defineStore(${def.name}): the configured adapter doesn't support bulk keyed creation (insertMany missing).`,
         );
       }
-      const rows = await Promise.all(
+      const prepared = await Promise.all(
         entries.map(async ({ key, data }) => {
           const valid = validateWrite(data, `createMany(key=${key})`);
           const record = await encodeBlob(
@@ -641,13 +641,28 @@ function buildKeyedStore<S extends z.ZodType>(
             def.version,
             def.contentHash,
           );
-          return {
-            extraKeys: [{ column: keyColumn, value: key }],
-            record,
-          };
+          return { key, valid, record };
         }),
       );
-      await storage.insertMany(def.name, userId, rows);
+      await storage.insertMany(
+        def.name,
+        userId,
+        prepared.map(({ key, record }) => ({
+          extraKeys: [{ column: keyColumn, value: key }],
+          record,
+        })),
+      );
+      // Stesso schema di set()/mutate(): ogni chiave creata aggiorna il proprio
+      // slot cache, un solo epoch bump per l'intero batch (un range montato che
+      // osserva questo store deve rifare list() una volta sola, non N).
+      for (const { key, valid, record } of prepared) {
+        writeThroughCache(
+          cacheKeyFor(userId, key),
+          valid,
+          record.contentHash ?? null,
+        );
+      }
+      bumpRangeEpoch(userId);
     },
     async list(userId, cryptoHandle, range) {
       const { storage } = getSecureStoreConfig();
