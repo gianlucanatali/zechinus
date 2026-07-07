@@ -349,4 +349,46 @@ describe("useKeyedStore", () => {
     expect(cache.get(`transaction_blobs:u1:2026-06`)).toBeUndefined();
     expect(result.current.data).toBeUndefined();
   });
+
+  it("dedupes concurrent fetches for the SAME key across independent hook instances (regression: two globally-mounted components — e.g. a copilot widget and an import provider both reading the same label dict — must share ONE fetch, not one each)", async () => {
+    const storage = keyedMemoryStorage();
+    let getCalls = 0;
+    const countingStorage: StorageAdapter = {
+      ...storage,
+      get: (...args) => {
+        getCalls++;
+        return storage.get(...args);
+      },
+    };
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    configureSecureStore({
+      storage: countingStorage,
+      keys: provider,
+      cache: memoryCache(),
+    });
+    const store = defineStore({
+      name: "key_concurrent_mount",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    await store.save("u1", cryptoHandle, "2026-06", {
+      transactions: ["seeded"],
+    });
+
+    // Two independent components mounting the SAME key at the same time.
+    const first = renderHook(() => useKeyedStore(store, "2026-06"));
+    const second = renderHook(() => useKeyedStore(store, "2026-06"));
+
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+    await waitFor(() => expect(second.result.current.loading).toBe(false));
+
+    expect(getCalls).toBe(1);
+    expect(first.result.current.data).toEqual({ transactions: ["seeded"] });
+    expect(second.result.current.data).toEqual(first.result.current.data);
+  });
 });

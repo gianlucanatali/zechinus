@@ -405,4 +405,44 @@ describe("useStore", () => {
     expect(cache.get(`portfolio_blobs:u1`)).toBeUndefined();
     expect(result.current.data).toBeUndefined();
   });
+
+  it("dedupes concurrent fetches across independent hook instances (regression: two globally-mounted components reading the same perUser store — e.g. UserContext + a direct usePortfolio() call — must share ONE fetch, not one each)", async () => {
+    const storage = memoryStorage();
+    let getCalls = 0;
+    const countingStorage: StorageAdapter = {
+      ...storage,
+      get: (...args) => {
+        getCalls++;
+        return storage.get(...args);
+      },
+    };
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    configureSecureStore({
+      storage: countingStorage,
+      keys: provider,
+      cache: memoryCache(),
+    });
+    const store = defineStore({
+      name: "store_concurrent_mount",
+      identity: "perUser",
+      encrypt: "all",
+      schema: Portfolio,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+    });
+
+    await store.save("u1", cryptoHandle, { positions: ["seeded"] });
+
+    // Two independent components mounting the SAME perUser store at once.
+    const first = renderHook(() => useStore(store));
+    const second = renderHook(() => useStore(store));
+
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+    await waitFor(() => expect(second.result.current.loading).toBe(false));
+
+    expect(getCalls).toBe(1);
+    expect(first.result.current.data).toEqual({ positions: ["seeded"] });
+    expect(second.result.current.data).toEqual(first.result.current.data);
+  });
 });

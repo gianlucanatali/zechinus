@@ -17,6 +17,31 @@ interface CacheEntry<T> {
   hash: string | null;
 }
 
+/**
+ * In-flight fetch registry, keyed by `cacheKey` — shared across every
+ * `useKeyedStore` instance in the app (module-level, not per-hook-call).
+ * Without it, two globally-mounted components reading the SAME key (e.g. a
+ * copilot widget and an import provider both reading the "budget_categories"
+ * label dict) each see an empty cache slot and independently fetch — a real,
+ * observed regression (duplicate network round-trips for data one of them
+ * already has in flight). Same pattern as useKeyedStoreRange's
+ * inflightRangeFetches.
+ */
+const inflightKeyFetches = new Map<string, Promise<CacheEntry<unknown>>>();
+
+function fetchKeyDeduped<T>(
+  cacheKey: string,
+  fetcher: () => Promise<CacheEntry<T>>,
+): Promise<CacheEntry<T>> {
+  const existing = inflightKeyFetches.get(cacheKey);
+  if (existing) return existing as Promise<CacheEntry<T>>;
+  const promise = fetcher().finally(() => {
+    inflightKeyFetches.delete(cacheKey);
+  });
+  inflightKeyFetches.set(cacheKey, promise as Promise<CacheEntry<unknown>>);
+  return promise;
+}
+
 export interface UseKeyedStoreResult<T> {
   data: T | undefined;
   loading: boolean;
@@ -70,11 +95,13 @@ export function useKeyedStore<T>(
     if (!cryptoHandle || !userId) return;
     if (cache.get<CacheEntry<T>>(cacheKey) !== undefined) return;
     let cancelled = false;
-    const fetch = store.loadWithHash
-      ? store.loadWithHash(userId, cryptoHandle, key)
-      : store
-          .load(userId, cryptoHandle, key)
-          .then((data) => ({ data, hash: null }));
+    const fetch = fetchKeyDeduped(cacheKey, () =>
+      store.loadWithHash
+        ? store.loadWithHash(userId, cryptoHandle, key)
+        : store
+            .load(userId, cryptoHandle, key)
+            .then((data) => ({ data, hash: null })),
+    );
     fetch
       .then((entry) => {
         if (!cancelled) cache.set(cacheKey, entry);
