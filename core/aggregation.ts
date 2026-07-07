@@ -115,12 +115,14 @@ export interface AggregationDef<
    * table/collection); `key` is the sentinel row identifier within it — several
    * aggregations MAY share one physical table via distinct `key` values, the same
    * convention `snapshotStore`/`dashboardSummaryStore` already use with a generic
-   * "domain key" column. The physical column backing this key must be named `"key"`
-   * (this module's own convention for tables it fully owns) — wiring an aggregation
-   * into a PRE-EXISTING table whose sentinel column has a different name (e.g.
-   * `year_month`) needs an explicit follow-up, see this task's report.
+   * "domain key" column. `keyColumn` is the NAME of the physical DB column backing that
+   * key — defaults to `"key"` (this module's own convention for tables it fully owns)
+   * when omitted, so every aggregation from Task 1-4 keeps working unchanged. Set it
+   * explicitly to wire an aggregation onto a PRE-EXISTING table whose sentinel column has
+   * a different name (e.g. `account_snapshot_blobs.year_month`) — the whole point being
+   * zero DB migration for an aggregate that reuses an already-shipped table.
    */
-  storage: { table: string; key: string };
+  storage: { table: string; key: string; keyColumn?: string };
   sources: TSources;
   externals?: TExt;
   /** Either a hand-written pure function, OR the declarative operator-record form from
@@ -315,7 +317,7 @@ export function defineAggregation<
   const envelopeFingerprint = fingerprintSchema(envelopeSchema, "all");
   const internalStore = defineStore({
     name: def.storage.table,
-    identity: { perKey: "key" },
+    identity: { perKey: def.storage.keyColumn ?? "key" },
     schema: envelopeSchema,
     version: 1,
     encrypt: "all",

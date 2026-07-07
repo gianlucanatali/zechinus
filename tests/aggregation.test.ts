@@ -96,25 +96,44 @@ function switchableKeyProvider(): {
 function memoryAdapter(): StorageAdapter & {
   rows: Map<string, BlobRecord>;
   putCallsFor: (collection: string) => number;
+  /** Every distinct `extraKeys[].column` name this adapter has ever seen for a given
+   * collection — lets a test assert WHICH sentinel column name the store actually used
+   * (e.g. `"key"` vs a configured `keyColumn` like `"year_month"`), not just that
+   * read/write round-tripped correctly. */
+  columnsUsedFor: (collection: string) => Set<string>;
 } {
   const rows = new Map<string, BlobRecord>();
   const putCallsByCollection = new Map<string, number>();
+  const columnsByCollection = new Map<string, Set<string>>();
   const rowKey = (
     collection: string,
     userId: string,
     extraKeys: { column: string; value: string }[],
   ) => `${collection}:${userId}:${extraKeys[0]?.value ?? ""}`;
+  const recordColumns = (
+    collection: string,
+    extraKeys: { column: string; value: string }[],
+  ) => {
+    const seen = columnsByCollection.get(collection) ?? new Set<string>();
+    for (const k of extraKeys) seen.add(k.column);
+    columnsByCollection.set(collection, seen);
+  };
 
   const adapter: StorageAdapter & {
     rows: typeof rows;
     putCallsFor: (collection: string) => number;
+    columnsUsedFor: (collection: string) => Set<string>;
   } = {
     rows,
     putCallsFor: (collection) => putCallsByCollection.get(collection) ?? 0,
+    columnsUsedFor: (collection) =>
+      columnsByCollection.get(collection) ?? new Set(),
     async get(collection, userId, extraKeys) {
+      recordColumns(collection, extraKeys);
       return rows.get(rowKey(collection, userId, extraKeys)) ?? null;
     },
     async put(collection, userId, extraKeys, record) {
+      recordColumns(collection, extraKeys);
       putCallsByCollection.set(
         collection,
         (putCallsByCollection.get(collection) ?? 0) + 1,
@@ -122,6 +141,7 @@ function memoryAdapter(): StorageAdapter & {
       rows.set(rowKey(collection, userId, extraKeys), record);
     },
     async getHash(collection, userId, extraKeys) {
+      recordColumns(collection, extraKeys);
       return (
         rows.get(rowKey(collection, userId, extraKeys))?.contentHash ?? null
       );
@@ -870,3 +890,83 @@ test(
     );
   },
 );
+
+// ── Task 5-pre: `storage.keyColumn` — configurable sentinel column name ────────────────
+//
+// The internal store `defineAggregation` builds for itself must be wireable onto a
+// PRE-EXISTING table whose sentinel column isn't literally named `"key"` (e.g.
+// `account_snapshot_blobs.year_month`, the table Task 5 reuses for the dashboard
+// aggregate with zero migration). These two tests assert on the ACTUAL column name the
+// adapter observed (`columnsUsedFor`), not just that the read/write round-tripped —
+// asserting only the round-trip would pass even if the column name were silently wrong,
+// since the in-memory adapter's `rowKey` doesn't itself depend on the column name.
+
+test('keyColumn: a custom sentinel column name is used for persistence instead of the literal "key"', async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("keycol_custom_source");
+  await source.set({ value: 5 });
+
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: {
+      table: "keycol_custom_agg",
+      key: "__dashboard__",
+      keyColumn: "year_month",
+    },
+    sources: { src: source },
+    compute: ({ sources }) => ({ total: sources.src.value }),
+  });
+
+  await agg.get();
+  await waitFor(() => adapter.putCallsFor("keycol_custom_agg") === 1);
+
+  assert.deepEqual(
+    [...adapter.columnsUsedFor("keycol_custom_agg")],
+    ["year_month"],
+    "the internal store must persist using the configured keyColumn, never the " +
+      'hardcoded literal "key"',
+  );
+});
+
+test('keyColumn: omitted -> defaults to the literal column "key" (Task 1-4 backward compatibility, unchanged)', async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("keycol_default_source");
+  await source.set({ value: 7 });
+
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "keycol_default_agg", key: "__agg__" },
+    sources: { src: source },
+    compute: ({ sources }) => ({ total: sources.src.value }),
+  });
+
+  await agg.get();
+  await waitFor(() => adapter.putCallsFor("keycol_default_agg") === 1);
+
+  assert.deepEqual(
+    [...adapter.columnsUsedFor("keycol_default_agg")],
+    ["key"],
+    "an aggregation that doesn't specify keyColumn must keep persisting under the " +
+      'literal column "key" — exactly Task 1-4\'s existing, already-tested behavior',
+  );
+});
