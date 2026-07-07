@@ -400,4 +400,57 @@ describe("useKeyedStoreRange", () => {
     expect(result.current.data).toBeUndefined();
     expect(result.current.isPlaceholderData).toBe(false);
   });
+
+  it("reload(): a lock that happens WHILE the fetch is in flight must not repopulate the cache with stale decrypted data", async () => {
+    const base = rangeMemoryStorage();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider, setDek } = fakeKeys(cryptoHandle);
+    const cache = memoryCache();
+
+    let listCalls = 0;
+    let releaseSecondList!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecondList = resolve;
+    });
+    const gatedStorage: StorageAdapter = {
+      ...base,
+      async listByKeyRange(...args) {
+        listCalls++;
+        if (listCalls === 2) await secondGate;
+        return base.listByKeyRange!(...args);
+      },
+    };
+    configureSecureStore({ storage: gatedStorage, keys: provider, cache });
+
+    const store = defineStore({
+      name: "range_reload_lock",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    await store.save("u1", cryptoHandle, "2026-01", { count: 1 });
+
+    const { result } = renderHook(() =>
+      useKeyedStoreRange(store, { from: "2026-01", to: "2026-01" }),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    const reloadPromise = result.current.reload(); // fetch #2 now in flight, gated
+
+    act(() => setDek(null)); // lock happens WHILE the fetch is pending
+    expect(result.current.locked).toBe(true);
+
+    releaseSecondList();
+    await act(async () => {
+      await reloadPromise;
+    });
+
+    expect(
+      cache.get(`range_reload_lock:u1:range:2026-01:2026-01`),
+    ).toBeUndefined();
+    expect(result.current.data).toBeUndefined();
+  });
 });

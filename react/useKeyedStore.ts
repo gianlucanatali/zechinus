@@ -124,8 +124,13 @@ export function useKeyedStore<T>(
     const entry = store.loadWithHash
       ? await store.loadWithHash(userId, cryptoHandle, key)
       : { data: await store.load(userId, cryptoHandle, key), hash: null };
+    // Re-check identity AFTER the await: if a lock (or a switch to a different
+    // user) happened while this fetch was in flight, never let decrypted
+    // content from a superseded session repopulate the cache — same principle
+    // as useKeyedStoreRange's previousRef-cleared-on-lock guard.
+    if (keys.getCryptoHandle() === null || keys.getUserId() !== userId) return;
     cache.set(cacheKey, entry);
-  }, [cryptoHandle, userId, key, cacheKey, cache, store]);
+  }, [cryptoHandle, userId, key, cacheKey, cache, store, keys]);
 
   return {
     data: cached?.data,

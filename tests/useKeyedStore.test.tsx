@@ -298,4 +298,55 @@ describe("useKeyedStore", () => {
 
     expect(result.current.data).toEqual({ transactions: ["out-of-band"] });
   });
+
+  it("reload(): a lock that happens WHILE the fetch is in flight must not repopulate the cache with stale decrypted data", async () => {
+    const base = keyedMemoryStorage();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider, setDek } = fakeKeys(cryptoHandle);
+    const cache = memoryCache();
+
+    let getCalls = 0;
+    let releaseSecondGet!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecondGet = resolve;
+    });
+    const gatedStorage: StorageAdapter = {
+      ...base,
+      async get(...args) {
+        getCalls++;
+        if (getCalls === 2) await secondGate;
+        return base.get(...args);
+      },
+    };
+    configureSecureStore({ storage: gatedStorage, keys: provider, cache });
+
+    const store = defineStore({
+      name: "transaction_blobs",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    const { result } = renderHook(() => useKeyedStore(store, "2026-06"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await store.save("u1", cryptoHandle, "2026-06", {
+      transactions: ["out-of-band"],
+    });
+
+    const reloadPromise = result.current.reload(); // fetch #2 now in flight, gated
+
+    act(() => setDek(null)); // lock happens WHILE the fetch is pending
+    expect(result.current.locked).toBe(true);
+
+    releaseSecondGet();
+    await act(async () => {
+      await reloadPromise;
+    });
+
+    expect(cache.get(`transaction_blobs:u1:2026-06`)).toBeUndefined();
+    expect(result.current.data).toBeUndefined();
+  });
 });

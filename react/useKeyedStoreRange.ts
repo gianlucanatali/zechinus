@@ -172,6 +172,10 @@ export function useKeyedStoreRange<T>(
   const reload = useCallback(async () => {
     if (!cryptoHandle || !userId) return;
     const rows = await store.list(userId, cryptoHandle, range);
+    // Re-check identity AFTER the await: if a lock (or a switch to a different
+    // user) happened while this fetch was in flight, never let decrypted
+    // content from a superseded session repopulate the cache.
+    if (keys.getCryptoHandle() === null || keys.getUserId() !== userId) return;
     cache.set(rangeCacheKey, {
       rows,
       epoch: cache.get<number>(epochKey) ?? 0,
@@ -185,6 +189,7 @@ export function useKeyedStoreRange<T>(
     cache,
     rangeCacheKey,
     epochKey,
+    keys,
   ]);
 
   return {

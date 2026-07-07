@@ -351,4 +351,58 @@ describe("useStore", () => {
 
     expect(result.current.data).toEqual({ positions: ["out-of-band"] });
   });
+
+  it("reload(): a lock that happens WHILE the fetch is in flight must not repopulate the cache with stale decrypted data", async () => {
+    const base = memoryStorage();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider, setDek } = fakeKeys(cryptoHandle);
+    const cache = memoryCache();
+
+    // Gate the SECOND get() call (the mount effect's own load is the first,
+    // must resolve immediately) so the test controls exactly when reload()'s
+    // fetch resolves relative to the lock.
+    let getCalls = 0;
+    let releaseSecondGet!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecondGet = resolve;
+    });
+    const gatedStorage: StorageAdapter = {
+      ...base,
+      async get(...args) {
+        getCalls++;
+        if (getCalls === 2) await secondGate;
+        return base.get(...args);
+      },
+    };
+    configureSecureStore({ storage: gatedStorage, keys: provider, cache });
+
+    const store = defineStore({
+      name: "portfolio_blobs",
+      identity: "perUser",
+      encrypt: "all",
+      schema: Portfolio,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+    });
+
+    const { result } = renderHook(() => useStore(store));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await store.save("u1", cryptoHandle, { positions: ["out-of-band"] });
+
+    const reloadPromise = result.current.reload(); // fetch #2 now in flight, gated
+
+    act(() => setDek(null)); // lock happens WHILE the fetch is pending
+    expect(result.current.locked).toBe(true);
+
+    releaseSecondGet();
+    await act(async () => {
+      await reloadPromise;
+    });
+
+    // The lock's wipe-on-lock already cleared the cache; reload()'s own
+    // cache.set() must NOT have run after it (re-checked identity post-await).
+    expect(cache.get(`portfolio_blobs:u1`)).toBeUndefined();
+    expect(result.current.data).toBeUndefined();
+  });
 });
