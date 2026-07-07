@@ -566,16 +566,30 @@ test("scenario 9: an Aggregation as a source — a downstream aggregate reads th
   });
 
   // Establish each level in dependency order — same discipline scenario 2 uses to
-  // establish the subscription before the burst being measured.
+  // establish the subscription before the burst being measured. Waiting on the
+  // storage-layer put count too (not just the compute counter) matters here: the
+  // counter increments the instant `compute()` runs, BEFORE the result is actually
+  // persisted — reading a downstream level's `.get()` right after only the counter
+  // condition can race ahead of that persist and observe a stale/null value (see
+  // scenario 1's identical `adapter.putCallsFor(...)` discipline).
   await aggA.get();
-  await waitFor(() => computeCallsA === 1 && priceFetchCalls === 1);
+  await waitFor(
+    () =>
+      computeCallsA === 1 &&
+      priceFetchCalls === 1 &&
+      adapter.putCallsFor("s9_agg_a") === 1,
+  );
 
   await aggC.get();
-  await waitFor(() => computeCallsC === 1);
+  await waitFor(
+    () => computeCallsC === 1 && adapter.putCallsFor("s9_agg_c") === 1,
+  );
   assert.deepEqual((await aggC.get()).data, { total: 1010 }); // (1 + 100) * 10
 
   await aggD.get();
-  await waitFor(() => computeCallsD === 1);
+  await waitFor(
+    () => computeCallsD === 1 && adapter.putCallsFor("s9_agg_d") === 1,
+  );
   assert.deepEqual((await aggD.get()).data, { total: 1011 }); // 1010 + 1
 
   assert.equal(
@@ -587,9 +601,18 @@ test("scenario 9: an Aggregation as a source — a downstream aggregate reads th
   // 1. A really changes (its store source changes) -> A recomputes -> C (source = A)
   //    detects a different fingerprint -> C recomputes -> D (source = C) cascades too.
   await source.set({ value: 2 });
-  await waitFor(() => computeCallsA === 2, 3000);
-  await waitFor(() => computeCallsC === 2, 3000);
-  await waitFor(() => computeCallsD === 2, 3000);
+  await waitFor(
+    () => computeCallsA === 2 && adapter.putCallsFor("s9_agg_a") === 2,
+    3000,
+  );
+  await waitFor(
+    () => computeCallsC === 2 && adapter.putCallsFor("s9_agg_c") === 2,
+    3000,
+  );
+  await waitFor(
+    () => computeCallsD === 2 && adapter.putCallsFor("s9_agg_d") === 2,
+    3000,
+  );
   await settle();
 
   assert.equal(
