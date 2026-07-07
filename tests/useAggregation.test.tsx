@@ -236,10 +236,20 @@ describe("useAggregation", () => {
       return r;
     });
 
-    await waitFor(() => expect(result.current.data).toEqual({ total: 10 }));
+    // Synchronize on the mount's OWN recompute actually starting — `computeCalls` only
+    // increments when the mocked `compute()` itself runs, which (per `computeAndPersist`)
+    // can only happen strictly AFTER `triggerRecompute()` has already synchronously
+    // published `computing: true`/`stale: true` (for this SAME `lastEnvelope` snapshot) to
+    // the react-state cache slot. Waiting on `result.current.data` here instead would be
+    // racy: the seed's OWN `refresh()` call above (before mount) already published
+    // `{ data: { total: 10 }, computing: false, stale: false }` to the exact same cache
+    // slot the hook reads on its very first render, so a `waitFor` on `data` alone can be
+    // satisfied by that PRE-EXISTING snapshot before the mount's effect has done any work
+    // at all — a real, reproduced flake, see task-4-report.md's addendum.
+    await waitFor(() => expect(computeCalls).toBe(2));
+    expect(result.current.data).toEqual({ total: 10 });
     expect(result.current.stale).toBe(true);
     expect(result.current.computing).toBe(true); // recompute already kicked off in the background
-    expect(computeCalls).toBe(2);
 
     releaseCompute();
 
@@ -317,6 +327,10 @@ describe("useAggregation", () => {
     const source = makeSource("s6_source");
     await source.set({ value: 5 });
 
+    let releaseCompute!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseCompute = resolve;
+    });
     let computeCalls = 0;
     let externalLoads = 0;
     const agg = defineAggregation({
@@ -334,8 +348,9 @@ describe("useAggregation", () => {
           ttlMs: 10,
         },
       },
-      compute: ({ sources, externals }) => {
+      compute: async ({ sources, externals }) => {
         computeCalls++;
+        if (computeCalls === 2) await gate; // only the recompute (2nd call) is gated
         return { total: sources.src.value * externals.rate };
       },
     });
@@ -347,11 +362,26 @@ describe("useAggregation", () => {
     await settle(30); // TTL (10ms) is definitely expired by now — source unchanged
 
     const { result } = renderHook(() => useAggregation(agg));
-    await waitFor(() => expect(result.current.computing).toBe(false));
 
+    // Synchronize on the mount's OWN recompute actually starting, same reasoning as
+    // scenario 4 above: the seed's `refresh()` (before mount) already published
+    // `{ computing: false, data: { total: 10 } }` to the SAME react-state cache slot the
+    // hook reads on its very first render, so a `waitFor` on `result.current.computing`
+    // being `false` can be satisfied by that PRE-EXISTING snapshot before the mount's
+    // effect has done any work — a real, reproduced flake (`expected 1 to be 2` on
+    // `computeCalls`), see task-4-report.md's addendum. Gating the 2nd compute call lets
+    // us assert the intermediate "recompute genuinely in flight" state deterministically
+    // (compute() cannot resolve until we release it), instead of racing two independent
+    // promise chains against each other.
+    await waitFor(() => expect(computeCalls).toBe(2));
+    expect(result.current.computing).toBe(true); // the mount's recompute is definitely in flight (gated, hasn't resolved yet)
+    expect(externalLoads).toBe(2); // externals are re-fetched BEFORE compute() runs (see computeAndPersist) — already true here
+
+    releaseCompute();
+
+    await waitFor(() => expect(result.current.computing).toBe(false));
     expect(result.current.data).toEqual({ total: 10 }); // same source value -> same total
-    expect(computeCalls).toBe(2); // recomputed due to the expired external TTL alone
-    expect(externalLoads).toBe(2);
+    expect(result.current.error).toBeNull();
   });
 
   it("review finding: dedupes concurrent reads of the same aggregation's envelope across independent hook instances (regression: two mounted useAggregation(sameAgg) components must share ONE storage read, not one each)", async () => {
