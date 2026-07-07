@@ -69,6 +69,18 @@ export {
   type LabelDictDef,
 } from "./core/defineLabelDict.ts";
 
+export {
+  defineAggregation,
+  type Aggregation,
+  type AggregationDef,
+  type AggregationState,
+  type Source,
+  type ExternalInput,
+  type DataOf,
+  type ExternalsOf,
+  type ComputeFn,
+} from "./core/aggregation.ts";
+
 export type {
   StorageAdapter,
   BlobRecord,
