@@ -247,6 +247,20 @@ function aggregationSourceFingerprint(data: unknown): string {
   return JSON.stringify(data);
 }
 
+/**
+ * Cache key convention for the React binding's read-side state port
+ * (`datacloak/react/useAggregation.ts`) — same `${name}:${userId}` shape every other
+ * binding's CacheAdapter key already uses (see `react/useStore.ts`'s
+ * `${store.name}:${userId}`), with a `:react` segment so it never collides with THIS
+ * aggregation's own source-fingerprint publish key (`${name}:${userId}`, used when this
+ * aggregation is itself a `Source` for a downstream one — see
+ * `aggregationSourceFingerprint`). Exported so the binding never hardcodes/duplicates the
+ * convention — this module is the only writer, the binding is the only reader.
+ */
+export function aggregationStateCacheKey(name: string, userId: string): string {
+  return `${name}:react:${userId}`;
+}
+
 export function defineAggregation<
   TSchema extends z.ZodType,
   TSources extends Record<string, Source>,
@@ -330,6 +344,11 @@ export function defineAggregation<
     string,
     { value: unknown; fetchedAtMs: number; fetchedAtIso: string }
   >();
+  // Last envelope this instance has actually read/persisted THIS session — `null` means
+  // "never observed" (mirrors `currentSourceFingerprints`' `undefined` sentinel). This is
+  // the ONLY state `notifyReactState`/`computeCurrentState` need to derive a synchronous
+  // snapshot for the React binding without any I/O — see those two functions below.
+  let lastEnvelope: PersistedEnvelope<T> | null = null;
 
   function logBackgroundFailure(context: string, e: unknown): void {
     // Fire-and-forget background recomputes (debounce fire, initial-load kickoff, queued
@@ -373,6 +392,10 @@ export function defineAggregation<
       unsubscribeFns.push(
         cache.subscribe(cacheKey, () => {
           currentSourceFingerprints.set(sourceName, readHash());
+          // Mark stale immediately (before the debounce even fires) so a mounted
+          // `useAggregation` reflects the write right away, not only once the
+          // debounced recompute settles — see Task 4's scenario 4.
+          notifyReactState();
           scheduleDebouncedRecompute();
         }),
       );
@@ -402,6 +425,43 @@ export function defineAggregation<
       }
     }
     return true;
+  }
+
+  /** Pure, synchronous — never touches storage. The exact snapshot `notifyReactState`
+   * publishes to the CacheAdapter for the React binding to read via
+   * `useSyncExternalStore`. */
+  function computeCurrentState(): AggregationState<T> {
+    if (lastEnvelope === null) {
+      return {
+        data: null,
+        computing: inFlight !== null,
+        stale: true,
+        error: lastError,
+      };
+    }
+    return {
+      data: lastEnvelope.data,
+      computing: inFlight !== null,
+      stale: !isFresh(lastEnvelope),
+      error: lastError,
+    };
+  }
+
+  /**
+   * Publishes the current snapshot to the CacheAdapter, at the exact key
+   * `aggregationStateCacheKey(name, userId)` computes — the "port" the React binding
+   * (`datacloak/react/useAggregation.ts`) reads via plain `cache.get`/`cache.subscribe`,
+   * same as every other binding here (see `react/useStore.ts`). Ambient-identity-based
+   * (reads `keys.getUserId()`/`getCryptoHandle()` fresh, not a captured closure value) so
+   * it naturally no-ops while locked — never publishes on behalf of a session that isn't
+   * the CURRENT one, same discipline as the guard in `computeAndPersist` below.
+   */
+  function notifyReactState(): void {
+    const { keys, cache } = getSecureStoreConfig();
+    if (!keys || !cache) return;
+    const userId = keys.getUserId();
+    if (!userId || keys.getCryptoHandle() === null) return;
+    cache.set(aggregationStateCacheKey(name, userId), computeCurrentState());
   }
 
   async function computeAndPersist(): Promise<T> {
@@ -507,6 +567,25 @@ export function defineAggregation<
         JSON.stringify(sourceFingerprints) &&
       JSON.stringify(currentEnvelope.externalsFetchedAt) ===
         JSON.stringify(externalsFetchedAt);
+
+    // Fail-open (same discipline `react/useStore.ts`'s `reload()` already applies after
+    // its own await boundary): if the app locked, or switched to a different user, while
+    // any of the awaits above were in flight, never persist or publish content computed
+    // under a session that's no longer the active one. `userId`/`cryptoHandle` above are
+    // the ones captured at THIS call's start (`resolveAmbientIdentity`) — re-checking the
+    // AMBIENT identity now, after every await, is what catches a lock that happened
+    // mid-flight (Task 4's scenario 5). The read of `currentEnvelope` just above still
+    // used the stale identity, exactly like `reload()` performs its own read before
+    // checking — harmless (never surfaced), just discarded here.
+    const { keys } = getSecureStoreConfig();
+    if (
+      !keys ||
+      keys.getCryptoHandle() === null ||
+      keys.getUserId() !== userId
+    ) {
+      return validated;
+    }
+
     if (!fingerprintsUnchanged) {
       const envelope: PersistedEnvelope<T> = {
         v: def.version,
@@ -516,6 +595,7 @@ export function defineAggregation<
         data: validated,
       };
       await internalStore.save(userId, cryptoHandle, def.storage.key, envelope);
+      lastEnvelope = envelope;
       // Publish this aggregation's OWN fingerprint under the exact same
       // `${name}:${userId}` convention a Store source's ambient write already uses (see
       // `writeThroughCache` in store.ts) — this is the ONLY hook a downstream aggregation
@@ -529,6 +609,8 @@ export function defineAggregation<
         data: validated,
         hash: aggregationSourceFingerprint(validated),
       });
+    } else {
+      lastEnvelope = currentEnvelope;
     }
     return validated;
   }
@@ -552,6 +634,10 @@ export function defineAggregation<
       })
       .finally(() => {
         inFlight = null;
+        // Publish the settled state (success or failure) BEFORE possibly kicking off a
+        // queued rerun below — a listener must see `computing: false` at least once
+        // between two back-to-back recomputes, never a flag that stays stuck at `true`.
+        notifyReactState();
         if (rerunRequested) {
           rerunRequested = false;
           triggerRecompute().catch((e) =>
@@ -560,6 +646,9 @@ export function defineAggregation<
         }
       });
     inFlight = run;
+    // Publish `computing: true` right away — the React binding (Task 4) must reflect a
+    // recompute starting immediately, not only once it settles.
+    notifyReactState();
     return run;
   }
 
@@ -583,6 +672,7 @@ export function defineAggregation<
         cryptoHandle,
         def.storage.key,
       );
+      lastEnvelope = envelope;
 
       if (envelope.data === null) {
         if (!inFlight) {
@@ -590,6 +680,7 @@ export function defineAggregation<
             logBackgroundFailure("initial compute failed", e),
           );
         }
+        notifyReactState();
         return { data: null, computing: true, stale: true, error: lastError };
       }
 
@@ -599,6 +690,7 @@ export function defineAggregation<
           logBackgroundFailure("background recompute failed", e),
         );
       }
+      notifyReactState();
       return {
         data: envelope.data,
         computing: inFlight !== null,
