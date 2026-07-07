@@ -142,6 +142,20 @@ export interface StorageAdapter {
     to: string,
   ): Promise<Array<{ key: string; record: BlobRecord }>>;
   /**
+   * perKey bulk creation: writes N distinct keys in a single round-trip. A real
+   * INSERT, not an upsert — a key that already exists must make the WHOLE batch
+   * fail (unique-constraint violation), never silently overwrite it. Built for
+   * callers that create many brand-new keys at once and know none of them exist
+   * yet (e.g. seeding 36 months of demo transactions right after a full wipe) —
+   * `KeyedStore.createMany()` is the only caller. Optional: a keyed store can
+   * still `save`/`set`/`mutate` a single key without it.
+   */
+  insertMany?(
+    collection: string,
+    userId: string,
+    entries: Array<{ extraKeys: KeyColumn[]; record: BlobRecord }>,
+  ): Promise<void>;
+  /**
    * 'many': all rows for the user (generated id, one blob per row). `plainColumns`/`plain`
    * carry the plaintext columns (mixed enc() case) alongside the blob — empty array/object
    * when the store has no plaintext fields (pure encrypt:"all").

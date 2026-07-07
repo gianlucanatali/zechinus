@@ -154,3 +154,83 @@ test("supabaseStorageAdapter.list: selects content_hash and maps it alongside pl
     },
   ]);
 });
+
+test("supabaseStorageAdapter.insertMany: a single .insert() call with one row per entry, no upsert", async () => {
+  const inserted: Array<{ collection: string; rows: Row[] }> = [];
+  const client = {
+    from(collection: string) {
+      return {
+        async insert(rows: Row[]) {
+          inserted.push({ collection, rows });
+          return { error: null };
+        },
+      };
+    },
+  };
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  await adapter.insertMany!("transaction_blobs", "u1", [
+    {
+      extraKeys: [{ column: "year_month", value: "2026-06" }],
+      record: { schemaVersion: 1, blob: "enc:june", contentHash: "h1" },
+    },
+    {
+      extraKeys: [{ column: "year_month", value: "2026-07" }],
+      record: { schemaVersion: 1, blob: "enc:july", contentHash: "h2" },
+    },
+  ]);
+
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0].collection, "transaction_blobs");
+  assert.deepEqual(
+    inserted[0].rows.map((r) => r.year_month),
+    ["2026-06", "2026-07"],
+  );
+  assert.deepEqual(
+    inserted[0].rows.map((r) => r.blob),
+    ["enc:june", "enc:july"],
+  );
+});
+
+test("supabaseStorageAdapter.insertMany: surfaces a duplicate-key error instead of upserting", async () => {
+  const client = {
+    from() {
+      return {
+        async insert() {
+          return {
+            error: {
+              message: "duplicate key value violates unique constraint",
+            },
+          };
+        },
+      };
+    },
+  };
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  await assert.rejects(
+    () =>
+      adapter.insertMany!("transaction_blobs", "u1", [
+        {
+          extraKeys: [{ column: "year_month", value: "2026-06" }],
+          record: { schemaVersion: 1, blob: "enc:x" },
+        },
+      ]),
+    /duplicate key/,
+  );
+});
+
+test("supabaseStorageAdapter.insertMany: empty array is a no-op (no client call)", async () => {
+  let called = false;
+  const client = {
+    from() {
+      called = true;
+      return { async insert() {} };
+    },
+  };
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  await adapter.insertMany!("transaction_blobs", "u1", []);
+
+  assert.equal(called, false);
+});

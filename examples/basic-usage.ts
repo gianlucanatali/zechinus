@@ -18,6 +18,8 @@ import {
   asRawDekBytes,
   type StorageAdapter,
   type BlobRecord,
+  type CryptoHandle,
+  type KeyProvider,
 } from "../index.ts";
 
 // A real app derives its DEK from a `KeyProvider` adapter (WebAuthn, password KDF,
@@ -82,10 +84,29 @@ export function memoryAdapter(): StorageAdapter {
     async deleteById(collection, userId, id) {
       many.delete(`${collection}:${userId}:${id}`);
     },
+    async insertMany(collection, userId, entries) {
+      for (const { extraKeys } of entries) {
+        const key = rowKey(collection, userId, extraKeys);
+        if (rows.has(key)) throw new Error(`insertMany: ${key} already exists`);
+      }
+      for (const { extraKeys, record } of entries) {
+        rows.set(rowKey(collection, userId, extraKeys), record);
+      }
+    },
   };
 }
 
 const freshDek = () => createDekHandle(randomBytes(32));
+
+// Ambient calls (`get`/`set`/`mutate`/`createMany`) resolve the CryptoHandle from
+// a configured `KeyProvider` instead of taking it as a parameter — this fixed
+// provider mirrors a single already-unlocked session, like a real app's bridge
+// to its passkey/DEK controller.
+const fixedKeyProvider = (cryptoHandle: CryptoHandle): KeyProvider => ({
+  getCryptoHandle: () => cryptoHandle,
+  getUserId: () => "u1",
+  subscribe: () => () => {},
+});
 
 // ── 1. perUser — one blob per user (e.g. portfolio, asset) ─────────────────────────
 export async function perUserExample() {
@@ -110,8 +131,11 @@ export async function perUserExample() {
 
 // ── 2. perKey — one blob per (user, domain key) (e.g. transactions per month) ──────
 export async function perKeyExample() {
-  configureSecureStore({ storage: memoryAdapter() });
   const cryptoHandle = freshDek();
+  configureSecureStore({
+    storage: memoryAdapter(),
+    keys: fixedKeyProvider(cryptoHandle),
+  });
 
   const Batch = z.object({ transactions: z.array(z.string()).default([]) });
   const transactionStore = defineStore({
@@ -126,6 +150,15 @@ export async function perKeyExample() {
   await transactionStore.save("u1", cryptoHandle, "2026-07", {
     transactions: ["expense"],
   });
+
+  // Bulk-create N distinct brand-new keys in one round-trip (e.g. seeding many
+  // months at once) — a real INSERT, not an upsert: a key that already exists
+  // fails the whole batch instead of silently overwriting it.
+  await transactionStore.createMany([
+    { key: "2026-08", data: { transactions: ["august"] } },
+    { key: "2026-09", data: { transactions: ["september"] } },
+  ]);
+
   return transactionStore.load("u1", cryptoHandle, "2026-07");
 }
 
