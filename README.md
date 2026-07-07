@@ -648,6 +648,21 @@ configured `CacheAdapter` themselves, under the exact same key `useStore`/
 `patchPortfolioTransaction`) now keeps every mounted hook for that store in sync,
 same as if the write had gone through the hook's own `save()`.
 
+**In-flight fetch deduplication:** all three React bindings (`useStore`,
+`useKeyedStore`, `useKeyedStoreRange`) keep a module-level `Map<key, Promise>`
+registry — when two components mount at once and both need the SAME cache slot
+(same store, same user, same key/range), only the FIRST one actually calls
+`store.load*()`; the second awaits that same in-flight promise instead of
+firing its own fetch. Without this, two globally-mounted components reading
+the same `perUser`/`perKey` slot (e.g. a copilot widget and an import provider
+both reading the `budget_categories` label dict on every page) each see an
+empty cache and independently hit the network — a real regression, found via
+HAR analysis of a full-app tour (see `docs/PERFORMANCE_HAR_ANALYSIS.md` in the
+main repo) and fixed the same night `useKeyedStoreRange`'s own range-level
+dedup (`inflightRangeFetches`) was already covering the range case. Tests:
+"dedupes concurrent fetches across independent hook instances" in
+`useStore.test.tsx`/`useKeyedStore.test.tsx`/`useKeyedStoreRange.test.tsx`.
+
 **`useKeyedStoreRange(store, {from, to})`** is the range counterpart of
 `useKeyedStore` — read-only (no `save`), for showing several keys at once (e.g. a
 year of monthly batches). A `CacheAdapter` has no notion of "subscribe to every key
