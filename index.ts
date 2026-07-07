@@ -71,10 +71,12 @@ export {
 
 export {
   defineAggregation,
+  keyedSource,
   type Aggregation,
   type AggregationDef,
   type AggregationState,
   type Source,
+  type KeyedSourceRef,
   type ExternalInput,
   type DataOf,
   type ExternalsOf,

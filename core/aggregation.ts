@@ -33,6 +33,20 @@
  * everything below that point (`computeAndPersist` etc.) only ever calls the resulting
  * plain function and has no notion that a declarative form exists.
  *
+ * Task 5-pre-2 addition: a `sources` entry may ALSO be a `KeyedSourceRef` — a `KeyedStore`
+ * (`perKey` cardinality) paired with ONE fixed key via `keyedSource(store, key)` (see that
+ * function's doc comment). Two real read models (`snapshotStore`, `accountMetaStore`) are
+ * `perKey` stores always read through a single sentinel key, never `perUser` — this is the
+ * capability that lets them be a `Source` at all. Reading/subscribing to a
+ * `KeyedSourceRef` mirrors the `Store` path exactly, just with the key threaded through:
+ * `ref.store.loadWithHash(userId, cryptoHandle, ref.key)` instead of the 2-arg `Store`
+ * signature, and the cache subscription key is `${ref.store.name}:${userId}:${ref.key}` —
+ * the EXACT format `store.ts`'s `cacheKeyFor` (perKey) already uses for that store's own
+ * `set()`/`mutate()` write-through, so fingerprint-gating is isolated per-key (a write to a
+ * DIFFERENT key of the same `KeyedStore` is invisible to this aggregation), not per-store.
+ * Deliberately fixed-key-only — no range/collection source, see `KeyedSourceRef`'s doc
+ * comment.
+ *
  * NOT in this file (later tasks, see the plan): the React binding (Task 4), and
  * `onSourceWrite` (Task 6 — a different primitive, for a write-REACTION, not an
  * aggregate).
@@ -59,15 +73,53 @@ export interface ExternalInput<T = unknown> {
 }
 
 /**
- * What an aggregation can read from: a `perUser` `Store`, OR another `Aggregation`
- * (opt-in DAG composition — e.g. a dashboard aggregate sourcing an already-computed
- * portfolio-history aggregate, so the expensive fetch behind it never runs twice). See
- * `isAggregationSource` for how the two are told apart at runtime.
+ * A `KeyedStore` (`perKey` cardinality) paired with ONE fixed key — the `perKey` analogue
+ * of passing a `perUser` `Store` directly as a `sources` entry. Built ONLY via
+ * `keyedSource()` below, never constructed by hand, so `isKeyedSourceRef` has exactly one
+ * shape to recognize. Deliberately fixed-key-only: reading a RANGE or the whole collection
+ * of a `KeyedStore` as a single aggregation input is out of scope here (YAGNI — no real
+ * caller needs it; the two real cases, `snapshotStore`/`accountMetaStore`, are both always
+ * read through one sentinel key).
  */
-export type Source = Store<any> | Aggregation<any>;
+export interface KeyedSourceRef<T> {
+  readonly store: KeyedStore<T>;
+  readonly key: string;
+}
+
+/**
+ * Wraps a `KeyedStore` + a fixed key as a `defineAggregation` `sources` entry. Use this
+ * instead of passing the `KeyedStore` directly (which `Source` doesn't accept — a
+ * `KeyedStore`'s reads/writes always need a key, there's no key-less signature to fall
+ * back to the way a `perUser` `Store` has one).
+ *
+ * ```ts
+ * sources: { snapshots: keyedSource(snapshotStore, STORE_KEY) }
+ * ```
+ */
+export function keyedSource<T>(
+  store: KeyedStore<T>,
+  key: string,
+): KeyedSourceRef<T> {
+  return { store, key };
+}
+
+/**
+ * What an aggregation can read from: a `perUser` `Store`, another `Aggregation` (opt-in DAG
+ * composition — e.g. a dashboard aggregate sourcing an already-computed portfolio-history
+ * aggregate, so the expensive fetch behind it never runs twice), OR a `KeyedSourceRef` (a
+ * `perKey` `KeyedStore` read at one fixed key — see `keyedSource`). See
+ * `isAggregationSource`/`isKeyedSourceRef` for how the three are told apart at runtime.
+ */
+export type Source = Store<any> | Aggregation<any> | KeyedSourceRef<any>;
 
 type SourceData<S> =
-  S extends Store<infer D> ? D : S extends Aggregation<infer D> ? D : never;
+  S extends Store<infer D>
+    ? D
+    : S extends Aggregation<infer D>
+      ? D
+      : S extends KeyedSourceRef<infer D>
+        ? D
+        : never;
 /** The `sources` shape `compute()` receives: one field per `sources` entry, holding that
  * source's plain (decrypted) data — never the store object itself. */
 export type DataOf<TSources extends Record<string, Source>> = {
@@ -229,6 +281,21 @@ function resolveAmbientIdentity(name: string): {
 function isAggregationSource(source: Source): source is Aggregation<unknown> {
   return (
     typeof (source as Partial<Aggregation<unknown>>).refresh === "function"
+  );
+}
+
+/**
+ * Runtime discriminator for the `KeyedSourceRef` member of `Source` — the only member
+ * built with a `store` + `key` pair (see `keyedSource`'s doc comment: it's the sole
+ * constructor for this shape). Neither a `Store` nor an `Aggregation` ever exposes a
+ * `store` property, so this is a safe, unambiguous tag alongside `isAggregationSource`.
+ */
+function isKeyedSourceRef(source: Source): source is KeyedSourceRef<unknown> {
+  const candidate = source as Partial<KeyedSourceRef<unknown>>;
+  return (
+    typeof candidate.key === "string" &&
+    typeof candidate.store === "object" &&
+    candidate.store !== null
   );
 }
 
@@ -400,7 +467,10 @@ export function defineAggregation<
    * existing cross-module convention). A source write anywhere in the app (ambient
    * `set()`/`mutate()`) already pushes a fresh `{data,hash}` into that slot — this is the
    * "the core intercepts every write already" hook the plan calls out, no changes to
-   * `store.ts` needed. Re-subscribes if the ambient identity changes (user switch).
+   * `store.ts` needed. A `KeyedSourceRef` source uses `store.ts`'s `perKey` `cacheKeyFor`
+   * format instead — `${ref.store.name}:${userId}:${ref.key}` — so the subscription lands
+   * on exactly the slot that key's OWN `set()`/`mutate()` writes through to, never the
+   * whole store's. Re-subscribes if the ambient identity changes (user switch).
    */
   function ensureSubscribed(userId: string): void {
     const { cache } = getSecureStoreConfig();
@@ -409,8 +479,16 @@ export function defineAggregation<
     unsubscribeFns = [];
     currentSourceFingerprints.clear();
     subscribedUserId = userId;
-    for (const [sourceName, source] of Object.entries(def.sources)) {
-      const cacheKey = `${source.name}:${userId}`;
+    for (const [sourceName, source] of Object.entries(
+      def.sources as Record<string, Source>,
+    )) {
+      // Cast in the `else` arm for the same reason `computeAndPersist` casts explicitly
+      // (see its own comment): narrowing a union against a *generic* type predicate
+      // parameter (`unknown` here vs. the `any` this loop's `source` actually carries)
+      // doesn't reliably exclude `KeyedSourceRef` on its own.
+      const cacheKey = isKeyedSourceRef(source)
+        ? `${source.store.name}:${userId}:${source.key}`
+        : `${(source as Store<any> | Aggregation<any>).name}:${userId}`;
       const readHash = (): string | null | undefined =>
         cache.get<{ data: unknown; hash: string | null }>(cacheKey)?.hash;
       currentSourceFingerprints.set(sourceName, readHash());
@@ -551,11 +629,24 @@ export function defineAggregation<
               aggregationSourceFingerprint(state.data),
             ] as const;
           }
-          // Only a Store can reach here — `isAggregationSource` above already returned
-          // false — but TS can't fully exclude `Aggregation<any>` from this branch on its
-          // own (narrowing a union against a *generic* type predicate parameter has known
-          // limitations), hence the explicit cast rather than relying on control-flow
-          // narrowing alone.
+          if (isKeyedSourceRef(source)) {
+            // `perKey` analogue of the `Store` branch below — same `loadWithHash`
+            // preference, just with the fixed `key` threaded through as the 3rd arg (see
+            // `KeyedStore.loadWithHash`'s signature in store.ts).
+            const { store: keyedStore, key } = source;
+            const { data, hash } = keyedStore.loadWithHash
+              ? await keyedStore.loadWithHash(userId, cryptoHandle, key)
+              : {
+                  data: await keyedStore.load(userId, cryptoHandle, key),
+                  hash: null,
+                };
+            return [sourceName, data, hash] as const;
+          }
+          // Only a Store can reach here — `isAggregationSource`/`isKeyedSourceRef` above
+          // already returned false — but TS can't fully exclude `Aggregation<any>` (or
+          // `KeyedSourceRef<any>`) from this branch on its own (narrowing a union against a
+          // *generic* type predicate parameter has known limitations), hence the explicit
+          // cast rather than relying on control-flow narrowing alone.
           const storeSource = source as Store<any>;
           const { data, hash } = storeSource.loadWithHash
             ? await storeSource.loadWithHash(userId, cryptoHandle)
