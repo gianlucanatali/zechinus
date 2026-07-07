@@ -9,6 +9,7 @@
     ".": "./index.ts",
     "./react": "./react/index.ts",
     "./node": "./node/index.ts",
+    "./aggregate": "./aggregate/index.ts",
     "./adapters/*": "./adapters/*",
     "./core/*": "./core/*"
   },

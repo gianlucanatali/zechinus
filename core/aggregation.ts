@@ -25,10 +25,17 @@
  * the exact same CacheAdapter push/subscribe convention a `Store` source already uses (see
  * `aggregationSourceFingerprint`) — no special-casing needed in `ensureSubscribed`/`isFresh`.
  *
- * NOT in this file (later tasks, see the plan): the declarative `FieldOperators` form of
- * `compute` (Task 3 — `compute`'s type here is only the pure-function form, see
- * `ComputeFn`'s doc comment), the React binding (Task 4), and `onSourceWrite` (Task 6 — a
- * different primitive, for a write-REACTION, not an aggregate).
+ * Task 3 addition: `compute` may ALSO be the declarative `FieldOperators` record from
+ * `../aggregate` (`sum`/`sumWith`/`expr`/`lastDelta`/`custom`) instead of a hand-written
+ * function — see `ComputeFn`'s doc comment and `AggregationDef.compute`'s type below.
+ * `compileFieldOperators` (imported from `../aggregate/compile.ts`) turns that record into
+ * the exact same function shape at DEFINITION time, once, in `defineAggregation` itself —
+ * everything below that point (`computeAndPersist` etc.) only ever calls the resulting
+ * plain function and has no notion that a declarative form exists.
+ *
+ * NOT in this file (later tasks, see the plan): the React binding (Task 4), and
+ * `onSourceWrite` (Task 6 — a different primitive, for a write-REACTION, not an
+ * aggregate).
  */
 
 import { z } from "zod";
@@ -37,6 +44,10 @@ import { getSecureStoreConfig } from "./config.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
 import { LockedSessionError } from "./errors.ts";
 import type { CryptoHandle } from "./types.ts";
+import {
+  compileFieldOperators,
+  type FieldOperators,
+} from "../aggregate/compile.ts";
 
 /**
  * A non-store input to `compute()` — e.g. a market-data API call — refreshed on its own
@@ -69,11 +80,11 @@ export type ExternalsOf<TExt extends Record<string, ExternalInput<any>>> = {
 };
 
 /**
- * `compute`'s public type is deliberately ONLY the pure-function form for now. Task 3's
- * declarative operator kit (`sum`/`sumWith`/`expr`/`lastDelta`/`custom`) compiles down to
- * this exact same shape ("the core doesn't distinguish the two forms" — see the plan), so
- * widening this to a union (`ComputeFn<...> | FieldOperators<...>`) later is additive, not
- * a breaking change for anything written against this signature today.
+ * The pure-function form of `compute` — the ONLY form this type describes. `AggregationDef
+ * .compute` below widens to `ComputeFn<...> | FieldOperators<...>`, the second member being
+ * `../aggregate`'s declarative operator-record form (`sum`/`sumWith`/`expr`/`lastDelta`/
+ * `custom`); both compile to (or already are) this exact shape before anything in this file
+ * ever calls them — see `defineAggregation`'s `computeFn` local.
  */
 export type ComputeFn<
   TSchema extends z.ZodType,
@@ -112,7 +123,14 @@ export interface AggregationDef<
   storage: { table: string; key: string };
   sources: TSources;
   externals?: TExt;
-  compute: ComputeFn<TSchema, TSources, TExt>;
+  /** Either a hand-written pure function, OR the declarative operator-record form from
+   * `../aggregate` (`agg.sum`/`agg.sumWith`/`agg.expr`/`agg.lastDelta`/`agg.custom`) — see
+   * `ComputeFn`'s doc comment. `defineAggregation` compiles the latter to the former ONCE,
+   * at definition time; every recompute after that calls the same plain function either
+   * way. */
+  compute:
+    | ComputeFn<TSchema, TSources, TExt>
+    | FieldOperators<TSchema, TSources, TExt>;
   /** Debounce window for a source-write-triggered recompute — several rapid writes
    * inside this window coalesce into exactly one `compute()` call. Default 500ms. */
   debounceMs?: number;
@@ -252,6 +270,15 @@ export function defineAggregation<
         `on any shape/version change, they are never migrated in place.`,
     );
   }
+
+  // ── `compute`'s declarative form (see `AggregationDef.compute`'s doc comment) compiles
+  // to a plain function ONCE, here, at definition time — never per-recompute. From this
+  // point on, `computeAndPersist` below only ever calls `computeFn`, exactly like it
+  // called `def.compute` before Task 3; it has no notion that a second form exists.
+  const computeFn: ComputeFn<TSchema, TSources, TExt> =
+    typeof def.compute === "function"
+      ? def.compute
+      : compileFieldOperators<TSchema, TSources, TExt>(def.compute);
 
   // ── Internal persistence: a perKey store, framework-private (never returned to the
   // caller of defineAggregation). `optimisticLock: false` (a derived value — a clobber
@@ -450,7 +477,7 @@ export function defineAggregation<
 
     // Compute errors propagate as-is — nothing below this line runs, so the persisted
     // envelope (if any) is left completely untouched. Never caught/swallowed here.
-    const rawResult = await def.compute({
+    const rawResult = await computeFn({
       sources: sourcesData,
       externals: externalsData as ExternalsOf<TExt>,
     });
