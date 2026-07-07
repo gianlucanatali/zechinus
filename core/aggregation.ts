@@ -392,10 +392,26 @@ export function defineAggregation<
       cryptoHandle,
       def.storage.key,
     );
-    const unchanged =
+    // Skip-write (scenario 7) is about `data` only — but `isFresh()` gates on
+    // `sourceFingerprints`/`externalsFetchedAt`, which are populated from THIS
+    // recompute's live reads, not from `data`. A source can change (new fingerprint)
+    // while still producing byte-identical `data` (e.g. a bucketing/rounding compute).
+    // If we skip the write there too, the persisted envelope's fingerprints go stale
+    // forever while `currentSourceFingerprints` (kept live via the cache subscription)
+    // keeps moving — `isFresh()` would then never match again, forcing a background
+    // `compute()` on every subsequent `get()` even though nothing has changed since this
+    // recompute. So the write is skipped ONLY when data AND fingerprints AND external
+    // fetch timestamps are all unchanged — never when just `data` happens to match.
+    const dataUnchanged =
       currentEnvelope.data !== null &&
       JSON.stringify(currentEnvelope.data) === JSON.stringify(validated);
-    if (!unchanged) {
+    const fingerprintsUnchanged =
+      dataUnchanged &&
+      JSON.stringify(currentEnvelope.sourceFingerprints) ===
+        JSON.stringify(sourceFingerprints) &&
+      JSON.stringify(currentEnvelope.externalsFetchedAt) ===
+        JSON.stringify(externalsFetchedAt);
+    if (!fingerprintsUnchanged) {
       const envelope: PersistedEnvelope<T> = {
         v: def.version,
         computedAt: new Date().toISOString(),

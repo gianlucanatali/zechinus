@@ -362,6 +362,77 @@ test("scenario 7: a recompute that yields byte-identical content is never re-per
   );
 });
 
+test("regression: a skip-write (data unchanged) must still refresh the persisted fingerprints, or isFresh() is permanently stuck stale and recomputes forever", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("s7b_source");
+  await source.set({ value: 5 });
+
+  let computeCalls = 0;
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "s7b_agg", key: "__agg__" },
+    debounceMs: 20,
+    sources: { src: source },
+    // Deliberately ignores the source's exact value — a source write changes its
+    // fingerprint (contentHash) even though the COMPUTED output stays byte-identical,
+    // which is exactly the case the skip-write path must still keep the persisted
+    // sourceFingerprints in sync for.
+    compute: () => {
+      computeCalls++;
+      return { total: 100 };
+    },
+  });
+
+  await agg.get();
+  await waitFor(
+    () => computeCalls === 1 && adapter.putCallsFor("s7b_agg") === 1,
+  );
+
+  // Ambient write on the source: changes its fingerprint, but the recompute it triggers
+  // still yields {total: 100} — the skip-write scenario, now reached via a REAL
+  // fingerprint change rather than an unchanged source (scenario 7 never changes the
+  // source at all, so it can't exercise this).
+  await source.set({ value: 999 });
+  await waitFor(() => computeCalls === 2, 3000);
+  await settle();
+
+  // The critical assertion: after the skip-write recompute settles, a fresh get() must
+  // see the aggregate as fresh (its persisted sourceFingerprints must have been brought
+  // up to date even though `data` itself didn't change) and must NOT kick off yet
+  // another background recompute.
+  const state = await agg.get();
+  assert.equal(
+    state.stale,
+    false,
+    "sources haven't changed since the last (skip-write) recompute — must be fresh",
+  );
+
+  await settle(200);
+  assert.equal(
+    computeCalls,
+    2,
+    "a skip-write recompute must not leave the aggregate permanently stale and " +
+      "re-triggering compute() forever on every subsequent get()",
+  );
+
+  // A second, independent get() must also stay stable (not just the first one right
+  // after the fix landed).
+  const state2 = await agg.get();
+  assert.equal(state2.stale, false);
+  await settle(200);
+  assert.equal(computeCalls, 2);
+});
+
 test("scenario 8: a throwing compute() surfaces the error, leaves the previously persisted aggregate intact, and a later refresh() can still succeed", async () => {
   const adapter = memoryAdapter();
   const cache = memoryCache();
