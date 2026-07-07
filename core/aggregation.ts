@@ -351,18 +351,27 @@ export function defineAggregation<
   let lastEnvelope: PersistedEnvelope<T> | null = null;
   // In-flight read of this aggregation's OWN persisted envelope, deduped — mirrors
   // `react/useStore.ts`'s `inflightFetches`/`fetchDeduped` registry (same single-flight
-  // pattern, reused as-is): N mounted `useAggregation(sameAgg)` instances each run their
-  // own effect -> own `get()` call, which would otherwise each independently read/decrypt
-  // the SAME envelope row before any of them resolves (Task 4 review finding — the
-  // `inFlight` guard above only dedupes `compute()`, not this read). Unlike
-  // `useStore.ts`'s registry — a module-level Map keyed by `${store.name}:${userId}`,
-  // since ONE hook implementation serves many distinct stores — this closure is already
-  // scoped to a single aggregation instance, so a single variable gives the identical
-  // single-flight semantics without a Map that would only ever hold one entry.
-  let inflightRead: Promise<{
-    data: PersistedEnvelope<T>;
-    hash: string | null;
-  }> | null = null;
+  // pattern): N mounted `useAggregation(sameAgg)` instances each run their own effect ->
+  // own `get()` call, which would otherwise each independently read/decrypt the SAME
+  // envelope row before any of them resolves (Task 4 review finding — the `inFlight`
+  // guard above only dedupes `compute()`, not this read). Unlike `useStore.ts`'s
+  // registry — a module-level `Map` keyed by `${store.name}:${userId}`, since ONE hook
+  // implementation serves many distinct stores — this closure is already scoped to a
+  // single aggregation instance, so a single SLOT gives the identical single-flight
+  // semantics without a `Map` that would only ever hold one entry. That slot still
+  // carries the identity (`userId`/`cryptoHandle`) the read was started for, and is
+  // only ever reused when a NEW caller asks for that exact same identity — a live
+  // instance can see its ambient identity change mid-flight (user A logs out, user B
+  // logs in, in the same tab; see `ensureSubscribed`'s own "re-subscribes if the
+  // ambient identity changes" handling), and reusing user A's still-pending decrypted
+  // envelope for user B's `get()` would leak A's data across the user boundary (a
+  // second review finding on this exact fix — never repeat a bare, un-keyed single
+  // variable here).
+  let inflightRead: {
+    userId: string;
+    cryptoHandle: CryptoHandle;
+    promise: Promise<{ data: PersistedEnvelope<T>; hash: string | null }>;
+  } | null = null;
 
   function logBackgroundFailure(context: string, e: unknown): void {
     // Fire-and-forget background recomputes (debounce fire, initial-load kickoff, queued
@@ -480,23 +489,33 @@ export function defineAggregation<
 
   /**
    * Dedupes concurrent reads of this aggregation's OWN persisted envelope (see
-   * `inflightRead`'s doc comment above for why). Cleared in `.finally()` so the NEXT call
-   * after this one settles always does a real read again — this only collapses calls that
-   * overlap in time, never caches the result past the read that's actually in flight.
+   * `inflightRead`'s doc comment above for why) — but ONLY for the SAME identity the
+   * in-flight read was started for. A request for a different `userId`/`cryptoHandle`
+   * (the live-instance user-switch case) always starts its own fresh read rather than
+   * awaiting someone else's in-flight promise. Cleared in `.finally()` so the NEXT call
+   * for that identity after this one settles always does a real read again — this only
+   * collapses calls that overlap in time for the SAME user, never caches the result past
+   * the read that's actually in flight, and never past a user switch.
    */
   function loadEnvelopeDeduped(
     userId: string,
     cryptoHandle: CryptoHandle,
   ): Promise<{ data: PersistedEnvelope<T>; hash: string | null }> {
-    if (inflightRead) return inflightRead;
+    if (
+      inflightRead &&
+      inflightRead.userId === userId &&
+      inflightRead.cryptoHandle === cryptoHandle
+    ) {
+      return inflightRead.promise;
+    }
     const promise = internalStore.loadWithHash!(
       userId,
       cryptoHandle,
       def.storage.key,
     ).finally(() => {
-      inflightRead = null;
+      if (inflightRead?.promise === promise) inflightRead = null;
     });
-    inflightRead = promise;
+    inflightRead = { userId, cryptoHandle, promise };
     return promise;
   }
 

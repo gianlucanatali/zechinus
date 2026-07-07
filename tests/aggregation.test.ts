@@ -62,6 +62,30 @@ function mutableKeyProvider(initial: CryptoHandle | null): {
   };
 }
 
+/** Same shape as `mutableKeyProvider`, but `switchTo()` can move the ambient identity
+ * between TWO DIFFERENT users (not just unlock/lock the same one) — needed to
+ * reproduce a live-instance user switch (A logs out, B logs in in the same tab) while
+ * an async read started under A's identity is still in flight (see the
+ * "loadEnvelopeDeduped must not ignore identity" regression test below). */
+function switchableKeyProvider(): {
+  provider: KeyProvider;
+  switchTo: (userId: string, cryptoHandle: CryptoHandle | null) => void;
+} {
+  let userId: string | null = null;
+  let cryptoHandle: CryptoHandle | null = null;
+  return {
+    provider: {
+      getCryptoHandle: () => cryptoHandle,
+      getUserId: () => userId,
+      subscribe: () => () => {},
+    },
+    switchTo: (nextUserId, nextCryptoHandle) => {
+      userId = nextUserId;
+      cryptoHandle = nextCryptoHandle;
+    },
+  };
+}
+
 /**
  * One adapter instance backs BOTH the test's source store(s) AND the aggregation's own
  * internal table (real usage shares one physical Postgres/Supabase connection the same
@@ -751,6 +775,98 @@ test(
       seededFingerprint,
       "a lock firing during save()'s own internal await must not publish the downstream " +
         "fingerprint for a compute that finished after the session was superseded",
+    );
+  },
+);
+
+test(
+  "review finding: loadEnvelopeDeduped must not ignore identity — a user B get() call " +
+    "started while user A's read is still in flight must never be served A's decrypted " +
+    "envelope (the in-flight promise has to be keyed by userId/cryptoHandle, not a " +
+    "single un-keyed slot, mirroring react/useStore.ts's ${store.name}:${userId} registry)",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const handleA = createDekHandle(randomBytes(32));
+    const handleB = createDekHandle(randomBytes(32));
+    const { provider, switchTo } = switchableKeyProvider();
+
+    // Gate `get()` for the aggregation's OWN table only, and only its FIRST invocation
+    // once armed — reproducing user A's `get()` starting a real read that's still in
+    // flight when user B logs in on this SAME live instance and calls `get()` too.
+    let armed = false;
+    const raceGetCalls: string[] = []; // userId of every storage.get() on the race table while armed
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const gatedAdapter: StorageAdapter = {
+      ...adapter,
+      async get(collection, userId, extraKeys) {
+        if (armed && collection === "race_agg") {
+          raceGetCalls.push(userId);
+          if (raceGetCalls.length === 1) {
+            await gate; // hold ONLY the first (user A's) real read in flight
+          }
+        }
+        return adapter.get(collection, userId, extraKeys);
+      },
+    };
+    configureSecureStore({ storage: gatedAdapter, cache, keys: provider });
+
+    const source = makeSource("race_source");
+    const agg = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "race_agg", key: "__agg__" },
+      sources: { src: source },
+      compute: ({ sources }) => ({ total: sources.src.value }),
+    });
+
+    // Seed BOTH users' persisted envelopes up front — before arming the gate, so the
+    // seeds' own internal reads/writes are never intercepted by it.
+    switchTo("userA", handleA);
+    await source.set({ value: 1 });
+    await agg.refresh(); // persists { total: 1 } under userA
+
+    switchTo("userB", handleB);
+    await source.set({ value: 99 });
+    await agg.refresh(); // persists { total: 99 } under userB
+
+    // Drop every cache entry the seeds left behind (source fingerprint slots AND the
+    // internal envelope table's own revalidation cache) so the race below performs a
+    // REAL storage read for each identity, not a warm-cache hit — `loadRevalidated`
+    // (store.ts) skips `storage.get` entirely when its cache slot already holds a
+    // matching hash.
+    cache.clear();
+
+    armed = true;
+    switchTo("userA", handleA);
+    const getA = agg.get(); // starts a real read for A; storage.get() gated, hangs
+
+    switchTo("userB", handleB); // user B logs in on this SAME live instance, mid-read
+    const getB = agg.get(); // must start its OWN read for B, never reuse A's in-flight promise
+
+    releaseGate(); // let A's held-open read proceed
+    const [resultA, resultB] = await Promise.all([getA, getB]);
+
+    assert.deepEqual(
+      resultA.data,
+      { total: 1 },
+      "A's own get() must still resolve with A's own persisted value",
+    );
+    assert.deepEqual(
+      resultB.data,
+      { total: 99 },
+      "B's get() must resolve with B's OWN persisted value, never A's — a single " +
+        "un-keyed in-flight promise would serve A's decrypted envelope to B here",
+    );
+    assert.deepEqual(
+      raceGetCalls,
+      ["userA", "userB"],
+      "both identities must trigger their OWN real storage read — reusing A's in-flight " +
+        "promise for B would mean only ONE storage.get() call happened here",
     );
   },
 );
