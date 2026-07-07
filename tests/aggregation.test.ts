@@ -42,6 +42,26 @@ function fixedKeyProvider(cryptoHandle: CryptoHandle | null): KeyProvider {
   };
 }
 
+/** Same shape as `fixedKeyProvider`, but `lock()` can flip the ambient identity to
+ * "locked" mid-test — needed to reproduce a lock firing DURING an in-flight async
+ * operation (see the "review finding" test below), which `fixedKeyProvider` can't do. */
+function mutableKeyProvider(initial: CryptoHandle | null): {
+  provider: KeyProvider;
+  lock: () => void;
+} {
+  let cryptoHandle = initial;
+  return {
+    provider: {
+      getCryptoHandle: () => cryptoHandle,
+      getUserId: () => (cryptoHandle ? "u1" : null),
+      subscribe: () => () => {},
+    },
+    lock: () => {
+      cryptoHandle = null;
+    },
+  };
+}
+
 /**
  * One adapter instance backs BOTH the test's source store(s) AND the aggregation's own
  * internal table (real usage shares one physical Postgres/Supabase connection the same
@@ -643,3 +663,94 @@ test("scenario 9: an Aggregation as a source — a downstream aggregate reads th
     "forcing D to recompute must never cause A's external to be fetched again",
   );
 });
+
+test(
+  "review finding: a lock firing DURING internalStore.save()'s own internal await " +
+    "(not just before it starts) must not update lastEnvelope or publish the downstream " +
+    "fingerprint — a narrower race window than the guard's stated precedent, reload()",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider, lock } = mutableKeyProvider(cryptoHandle);
+
+    // Gate `put()` for the aggregation's OWN table only — pauses AFTER the ambient
+    // identity check inside `computeAndPersist` has already passed (that check runs
+    // strictly before this call), reproducing a lock that fires while `save()`'s own
+    // internal awaits (encrypt + storage put) are in flight, not before them.
+    let putGateActive = false;
+    let onPutEntered: (() => void) | null = null;
+    let releasePut!: () => void;
+    const gatedAdapter: StorageAdapter & {
+      putCallsFor: (c: string) => number;
+    } = {
+      ...adapter,
+      async put(collection, userId, extraKeys, record) {
+        if (collection === "rf1_agg" && putGateActive) {
+          onPutEntered?.();
+          await new Promise<void>((resolve) => {
+            releasePut = resolve;
+          });
+        }
+        return adapter.put(collection, userId, extraKeys, record);
+      },
+    };
+    configureSecureStore({ storage: gatedAdapter, cache, keys: provider });
+
+    const source = makeSource("rf1_source");
+    await source.set({ value: 1 });
+
+    const agg = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "rf1_agg", key: "__agg__" },
+      sources: { src: source },
+      compute: ({ sources }) => ({ total: sources.src.value * 10 }),
+    });
+
+    await agg.refresh(); // seed — unlocked throughout, completes normally
+    assert.equal(adapter.putCallsFor("rf1_agg"), 1);
+    const fingerprintKey = `rf1_agg:__agg__:u1`;
+    const seededFingerprint = cache.get(fingerprintKey);
+    assert.notEqual(
+      seededFingerprint,
+      undefined,
+      "the seed's own persist must have published its fingerprint",
+    );
+
+    // Second recompute must actually produce a DIFFERENT envelope (data + fingerprints),
+    // or `computeAndPersist` takes the skip-write branch and never calls
+    // `internalStore.save()` at all — nothing to gate. Gate the aggregation's OWN put()
+    // so we can lock exactly while internalStore.save()'s underlying storage write is in
+    // flight.
+    await source.set({ value: 2 });
+    putGateActive = true;
+    const entered = new Promise<void>((resolve) => {
+      onPutEntered = resolve;
+    });
+    const refreshPromise = agg.refresh();
+    await entered; // storage.put() has been called and is now paused mid-flight
+
+    lock(); // lock NOW — strictly after computeAndPersist's first identity check passed
+
+    releasePut();
+    await refreshPromise; // never throws — the guard fails open, it doesn't reject
+
+    // The storage write itself did complete (can't be undone once started) ...
+    assert.equal(
+      adapter.putCallsFor("rf1_agg"),
+      2,
+      "the underlying storage write completes even though the session locked mid-flight",
+    );
+    // ... but nothing computed under the now-superseded session may be treated as valid:
+    // the downstream fingerprint slot a future aggregation source would read from must
+    // still hold the SEEDED value, never resurrected/overwritten with the post-lock write.
+    assert.deepEqual(
+      cache.get(fingerprintKey),
+      seededFingerprint,
+      "a lock firing during save()'s own internal await must not publish the downstream " +
+        "fingerprint for a compute that finished after the session was superseded",
+    );
+  },
+);

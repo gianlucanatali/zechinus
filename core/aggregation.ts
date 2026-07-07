@@ -349,6 +349,20 @@ export function defineAggregation<
   // the ONLY state `notifyReactState`/`computeCurrentState` need to derive a synchronous
   // snapshot for the React binding without any I/O — see those two functions below.
   let lastEnvelope: PersistedEnvelope<T> | null = null;
+  // In-flight read of this aggregation's OWN persisted envelope, deduped — mirrors
+  // `react/useStore.ts`'s `inflightFetches`/`fetchDeduped` registry (same single-flight
+  // pattern, reused as-is): N mounted `useAggregation(sameAgg)` instances each run their
+  // own effect -> own `get()` call, which would otherwise each independently read/decrypt
+  // the SAME envelope row before any of them resolves (Task 4 review finding — the
+  // `inFlight` guard above only dedupes `compute()`, not this read). Unlike
+  // `useStore.ts`'s registry — a module-level Map keyed by `${store.name}:${userId}`,
+  // since ONE hook implementation serves many distinct stores — this closure is already
+  // scoped to a single aggregation instance, so a single variable gives the identical
+  // single-flight semantics without a Map that would only ever hold one entry.
+  let inflightRead: Promise<{
+    data: PersistedEnvelope<T>;
+    hash: string | null;
+  }> | null = null;
 
   function logBackgroundFailure(context: string, e: unknown): void {
     // Fire-and-forget background recomputes (debounce fire, initial-load kickoff, queued
@@ -464,6 +478,28 @@ export function defineAggregation<
     cache.set(aggregationStateCacheKey(name, userId), computeCurrentState());
   }
 
+  /**
+   * Dedupes concurrent reads of this aggregation's OWN persisted envelope (see
+   * `inflightRead`'s doc comment above for why). Cleared in `.finally()` so the NEXT call
+   * after this one settles always does a real read again — this only collapses calls that
+   * overlap in time, never caches the result past the read that's actually in flight.
+   */
+  function loadEnvelopeDeduped(
+    userId: string,
+    cryptoHandle: CryptoHandle,
+  ): Promise<{ data: PersistedEnvelope<T>; hash: string | null }> {
+    if (inflightRead) return inflightRead;
+    const promise = internalStore.loadWithHash!(
+      userId,
+      cryptoHandle,
+      def.storage.key,
+    ).finally(() => {
+      inflightRead = null;
+    });
+    inflightRead = promise;
+    return promise;
+  }
+
   async function computeAndPersist(): Promise<T> {
     const { cryptoHandle, userId } = resolveAmbientIdentity(name);
 
@@ -572,17 +608,21 @@ export function defineAggregation<
     // its own await boundary): if the app locked, or switched to a different user, while
     // any of the awaits above were in flight, never persist or publish content computed
     // under a session that's no longer the active one. `userId`/`cryptoHandle` above are
-    // the ones captured at THIS call's start (`resolveAmbientIdentity`) — re-checking the
-    // AMBIENT identity now, after every await, is what catches a lock that happened
-    // mid-flight (Task 4's scenario 5). The read of `currentEnvelope` just above still
-    // used the stale identity, exactly like `reload()` performs its own read before
-    // checking — harmless (never surfaced), just discarded here.
-    const { keys } = getSecureStoreConfig();
-    if (
-      !keys ||
-      keys.getCryptoHandle() === null ||
-      keys.getUserId() !== userId
-    ) {
+    // the ones captured at THIS call's start (`resolveAmbientIdentity`). This FIRST check
+    // only catches a lock that happened during the awaits ABOVE this point (source reads,
+    // externals, `compute()`, the `loadWithHash!` read of `currentEnvelope`) — it does
+    // NOT cover a lock firing during `internalStore.save()`'s OWN internal awaits (encrypt
+    // + storage `put`) just below; the SECOND check right after that await (Task 4 review
+    // finding) is what closes that narrower race window. The read of `currentEnvelope`
+    // above still used the stale identity, exactly like `reload()` performs its own read
+    // before checking — harmless (never surfaced), just discarded here.
+    const ambientIdentityStillMatches = (): boolean => {
+      const { keys } = getSecureStoreConfig();
+      return (
+        !!keys && keys.getCryptoHandle() !== null && keys.getUserId() === userId
+      );
+    };
+    if (!ambientIdentityStillMatches()) {
       return validated;
     }
 
@@ -595,6 +635,15 @@ export function defineAggregation<
         data: validated,
       };
       await internalStore.save(userId, cryptoHandle, def.storage.key, envelope);
+      // Re-check AGAIN, immediately before the synchronous state mutations/notify that
+      // follow: a lock (or user switch) firing DURING save()'s own internal awaits isn't
+      // caught by the check above, since that one already passed before this await even
+      // started. Mirrors `reload()`'s guarantee that nothing can interleave between the
+      // LAST identity check and the actual state mutation — not just the first check
+      // before starting the I/O (Task 4 review finding).
+      if (!ambientIdentityStillMatches()) {
+        return validated;
+      }
       lastEnvelope = envelope;
       // Publish this aggregation's OWN fingerprint under the exact same
       // `${name}:${userId}` convention a Store source's ambient write already uses (see
@@ -667,10 +716,12 @@ export function defineAggregation<
       }
       ensureSubscribed(userId);
 
-      const { data: envelope } = await internalStore.loadWithHash!(
+      // Deduped (see `loadEnvelopeDeduped`'s doc comment): several concurrently-mounted
+      // `useAggregation(sameAgg)` instances calling `get()` at once must share ONE read of
+      // this row, not one each.
+      const { data: envelope } = await loadEnvelopeDeduped(
         userId,
         cryptoHandle,
-        def.storage.key,
       );
       lastEnvelope = envelope;
 

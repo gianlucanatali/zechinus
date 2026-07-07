@@ -354,6 +354,43 @@ describe("useAggregation", () => {
     expect(externalLoads).toBe(2);
   });
 
+  it("review finding: dedupes concurrent reads of the same aggregation's envelope across independent hook instances (regression: two mounted useAggregation(sameAgg) components must share ONE storage read, not one each)", async () => {
+    const storage = memoryAdapter();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    const cache = memoryCache();
+    configureSecureStore({ storage, keys: provider, cache });
+
+    const source = makeSource("dedup_source");
+    await source.set({ value: 5 });
+
+    const agg = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "dedup_agg", key: "__agg__" },
+      sources: { src: source },
+      compute: ({ sources }) => ({ total: sources.src.value }),
+    });
+
+    await agg.refresh(); // seed — fresh relative to the (unchanged) source afterwards
+    storage.resetCounts();
+
+    // Two independent components mounting the SAME aggregation at once — each runs its
+    // own effect -> own agg.get() call.
+    const first = renderHook(() => useAggregation(agg));
+    const second = renderHook(() => useAggregation(agg));
+
+    await waitFor(() => expect(first.result.current.computing).toBe(false));
+    await waitFor(() => expect(second.result.current.computing).toBe(false));
+
+    expect(first.result.current.data).toEqual({ total: 5 });
+    expect(second.result.current.data).toEqual({ total: 5 });
+    // The explicit assertion this finding is about: only ONE real read of the
+    // aggregation's own persisted envelope, not one per mounted hook instance.
+    expect(storage.getCallsFor("dedup_agg")).toBe(1);
+  });
+
   it("respects the lock from mount: never calls get(), shows the locked defaults, refresh() throws", async () => {
     const storage = memoryAdapter();
     const { provider } = fakeKeys(null);
