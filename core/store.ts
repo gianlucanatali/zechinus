@@ -216,6 +216,14 @@ export interface KeyedStore<T> {
   set(key: string, data: T): Promise<void>;
   /** Load → transform → save for the given key, no `userId`/`CryptoHandle` in sight — see `Store.mutate`. */
   mutate(key: string, fn: (current: T) => T | Promise<T>): Promise<T>;
+  /**
+   * Ambient bulk creation for N distinct keys in a single round-trip — needs
+   * `insertMany` on the adapter. A real INSERT, not an upsert: any key that
+   * already exists fails the WHOLE batch (never silently overwrites it). For
+   * callers that know every key is brand-new (e.g. seeding many months right
+   * after a full wipe) — updating an EXISTING key still goes through `mutate`/`set`.
+   */
+  createMany(entries: Array<{ key: string; data: T }>): Promise<void>;
   /** Range query over sortable keys (e.g. `year_month`) — needs `listByKeyRange` on the adapter. */
   list(
     userId: string,
@@ -613,6 +621,33 @@ function buildKeyedStore<S extends z.ZodType>(
       writeThroughCache(cacheKeyFor(userId, key), next, nextHash);
       bumpRangeEpoch(userId);
       return next;
+    },
+    async createMany(entries) {
+      if (!entries.length) return;
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      const { storage } = getSecureStoreConfig();
+      if (!storage.insertMany) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support bulk keyed creation (insertMany missing).`,
+        );
+      }
+      const rows = await Promise.all(
+        entries.map(async ({ key, data }) => {
+          const valid = validateWrite(data, `createMany(key=${key})`);
+          const record = await encodeBlob(
+            cryptoHandle,
+            canonicalAADFor(cryptoHandle, key),
+            valid,
+            def.version,
+            def.contentHash,
+          );
+          return {
+            extraKeys: [{ column: keyColumn, value: key }],
+            record,
+          };
+        }),
+      );
+      await storage.insertMany(def.name, userId, rows);
     },
     async list(userId, cryptoHandle, range) {
       const { storage } = getSecureStoreConfig();

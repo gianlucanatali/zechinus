@@ -140,6 +140,16 @@ entries whose key falls in `[from, to]` (lexicographic — works for sortable ke
 adapter (both shipped adapters have it); throws explicitly if the configured adapter
 doesn't.
 
+**`perKey` bulk creation:** `keyedStore.createMany([{ key, data }, ...])` writes N distinct
+keys in a single round-trip — a real INSERT, not an upsert: a key that already exists
+fails the WHOLE batch instead of silently overwriting it. Ambient (no `userId`/
+`cryptoHandle`, like `get`/`set`/`mutate`). Built for callers that create many brand-new
+keys at once and know none of them exist yet (e.g. seeding 36 months of demo transactions
+right after a full wipe) — N `mutate()` calls in parallel each pay their own round-trip
+(read + conditional write), which doesn't scale past a handful of keys. Updating an
+existing key still goes through `mutate`/`set`. Needs `insertMany` on the adapter (both
+shipped adapters have it); throws explicitly if the configured adapter doesn't.
+
 ## Recipe: `defineLabelDict` — dictionaries of labels
 
 ```ts

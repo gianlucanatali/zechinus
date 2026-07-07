@@ -127,6 +127,68 @@ test("pgStorageAdapter.get / put with extraKeys: quote the dynamic key column, u
   assert.deepEqual(calls[1].params.slice(0, 2), ["u1", "2026-07"]);
 });
 
+test("pgStorageAdapter.insertMany: a single plain INSERT (no ON CONFLICT) with one VALUES tuple per entry", async () => {
+  const { client, calls } = fakeClient();
+  const adapter = pgStorageAdapter(() => client);
+
+  await adapter.insertMany!("transaction_blobs", "u1", [
+    {
+      extraKeys: [{ column: "year_month", value: "2026-06" }],
+      record: { schemaVersion: 1, blob: "enc:june", contentHash: "h1" },
+    },
+    {
+      extraKeys: [{ column: "year_month", value: "2026-07" }],
+      record: { schemaVersion: 1, blob: "enc:july", contentHash: "h2" },
+    },
+  ]);
+
+  assert.equal(calls.length, 1);
+  const { text, params } = calls[0];
+  assert.match(text, /INSERT INTO "transaction_blobs"/);
+  assert.ok(!text.includes("ON CONFLICT"));
+  // Two VALUES tuples, one per entry.
+  assert.equal((text.match(/\(\$/g) ?? []).length, 2);
+  assert.deepEqual(
+    params.filter((p) => typeof p === "string" && p.startsWith("enc:")),
+    ["enc:june", "enc:july"],
+  );
+  assert.deepEqual(
+    params.filter((p) => p === "2026-06" || p === "2026-07"),
+    ["2026-06", "2026-07"],
+  );
+});
+
+test("pgStorageAdapter.insertMany: a duplicate key surfaces as a rejected unique-constraint violation, not silently overwritten", async () => {
+  const client: PgClient = {
+    async query() {
+      throw new Error(
+        'duplicate key value violates unique constraint "transaction_blobs_pkey"',
+      );
+    },
+  };
+  const adapter = pgStorageAdapter(() => client);
+
+  await assert.rejects(
+    () =>
+      adapter.insertMany!("transaction_blobs", "u1", [
+        {
+          extraKeys: [{ column: "year_month", value: "2026-06" }],
+          record: { schemaVersion: 1, blob: "enc:june" },
+        },
+      ]),
+    /unique constraint/,
+  );
+});
+
+test("pgStorageAdapter.insertMany: empty array is a no-op (no query issued)", async () => {
+  const { client, calls } = fakeClient();
+  const adapter = pgStorageAdapter(() => client);
+
+  await adapter.insertMany!("transaction_blobs", "u1", []);
+
+  assert.equal(calls.length, 0);
+});
+
 test("pgStorageAdapter.listByKeyRange: quotes the key column, binds from/to, orders by key", async () => {
   const { client, calls } = fakeClient([
     { year_month: "2026-06", schema_version: 1, blob: "enc:a" },

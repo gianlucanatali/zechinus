@@ -37,6 +37,20 @@ function mapBlobRow(data: Record<string, unknown> | null): BlobRecord | null {
   };
 }
 
+function rowFromRecord(
+  userId: string,
+  extraKeys: KeyColumn[],
+  record: BlobRecord,
+): Record<string, unknown> {
+  const row: Record<string, unknown> = { user_id: userId };
+  for (const k of extraKeys) row[k.column] = k.value;
+  row.blob = record.blob;
+  row.schema_version = record.schemaVersion;
+  row.updated_at = new Date().toISOString();
+  if (record.contentHash !== undefined) row.content_hash = record.contentHash;
+  return row;
+}
+
 function upsertRow(
   client: SupabaseClient,
   collection: string,
@@ -83,13 +97,7 @@ export function supabaseStorageAdapter(
     },
 
     async put(collection, userId, extraKeys, record): Promise<void> {
-      const row: Record<string, unknown> = { user_id: userId };
-      for (const k of extraKeys) row[k.column] = k.value;
-      row.blob = record.blob;
-      row.schema_version = record.schemaVersion;
-      row.updated_at = new Date().toISOString();
-      if (record.contentHash !== undefined)
-        row.content_hash = record.contentHash;
+      const row = rowFromRecord(userId, extraKeys, record);
       const { error } = await upsertRow(getClient(), collection, row, [
         "user_id",
         ...extraKeys.map((k) => k.column),
@@ -97,6 +105,20 @@ export function supabaseStorageAdapter(
       if (error)
         throw new Error(
           `supabaseStorageAdapter.put(${collection}, ${userId}${describeKeys(extraKeys)}): ${error.message}`,
+        );
+    },
+
+    async insertMany(collection, userId, entries): Promise<void> {
+      if (!entries.length) return;
+      const rows = entries.map(({ extraKeys, record }) =>
+        rowFromRecord(userId, extraKeys, record),
+      );
+      // Plain INSERT, not upsert: a key that already exists must reject the
+      // whole batch (unique-constraint violation), never silently overwrite it.
+      const { error } = await getClient().from(collection).insert(rows);
+      if (error)
+        throw new Error(
+          `supabaseStorageAdapter.insertMany(${collection}, ${userId}, count=${entries.length}): ${error.message}`,
         );
     },
 

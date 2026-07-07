@@ -93,6 +93,50 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
     },
 
     /**
+     * Plain multi-row INSERT — no `ON CONFLICT`, unlike `put` above. A key that
+     * already exists surfaces as a unique-constraint violation, failing the
+     * whole statement (Postgres inserts are all-or-nothing) rather than
+     * silently overwriting it.
+     */
+    async insertMany(collection, userId, entries): Promise<void> {
+      if (!entries.length) return;
+      const keyColumns = entries[0].extraKeys.map((k) => k.column);
+      const hasContentHash = entries.some(
+        ({ record }) => record.contentHash !== undefined,
+      );
+      const columns = [
+        "user_id",
+        ...keyColumns,
+        "blob",
+        "schema_version",
+        "updated_at",
+        ...(hasContentHash ? ["content_hash"] : []),
+      ];
+
+      const values: unknown[] = [];
+      const tuples: string[] = [];
+      let paramIndex = 1;
+      for (const { extraKeys, record } of entries) {
+        const rowValues: unknown[] = [
+          userId,
+          ...extraKeys.map((k) => k.value),
+          record.blob,
+          record.schemaVersion,
+          new Date().toISOString(),
+        ];
+        if (hasContentHash) rowValues.push(record.contentHash ?? null);
+        tuples.push(`(${paramList(paramIndex, rowValues.length)})`);
+        values.push(...rowValues);
+        paramIndex += rowValues.length;
+      }
+
+      await getClient().query(
+        `INSERT INTO ${quoteIdent(collection)} (${columns.map(quoteIdent).join(", ")}) VALUES ${tuples.join(", ")}`,
+        values,
+      );
+    },
+
+    /**
      * `expectedHash: null` means "I believe there's no REAL content yet" — either the row
      * doesn't exist, or it exists but was never hashed (legacy data from before
      * `content_hash` existed). Both succeed via a conditional upsert: `ON CONFLICT DO
