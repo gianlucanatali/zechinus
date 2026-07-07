@@ -176,6 +176,27 @@ test("expr: a dependency cycle produces an error naming every field involved, ne
   );
 });
 
+test("expr: referencing a `custom` field produces a phase-ordering error, never a false 'circular' claim", async () => {
+  // `custom` always runs AFTER phase 2 (`expr`), so `e` can never see `c`'s value — this
+  // is NOT a cycle (there is no `expr` field that `c` depends on in return), it's a fixed
+  // phase-ordering constraint. The error must name BOTH the blocked field (`e`) and the
+  // real cause (`c`), and must NOT claim a "circular dependency".
+  const compute = compileFieldOperators({
+    c: custom((f) => (f.e as number) ?? 0), // irrelevant body — `custom` never even runs here
+    e: expr((f) => (f.c as number) + 1),
+  });
+  assert.throws(
+    () => compute({ sources: {}, externals: {} }),
+    (err: Error) => {
+      assert.doesNotMatch(err.message, /circular/i);
+      assert.match(err.message, /\be\b/);
+      assert.match(err.message, /\bc\b/);
+      assert.match(err.message, /custom/i);
+      return true;
+    },
+  );
+});
+
 test("expr: referencing a field name that isn't declared in the record fails fast with context", async () => {
   const compute = compileFieldOperators({
     total: expr((f) => (f.doesNotExist as number) + 1),

@@ -85,10 +85,14 @@ function readRows(
  *     the operator's doc comment.
  *
  * Note: an `expr` cannot depend on a `custom` field — `custom` runs strictly after phase
- * 2, so that field never becomes available during the retry loop, and the loop reports it
- * the same way it reports a genuine cycle (a real field name, never a hang or a silent
- * `undefined`). If this ordering constraint ever needs lifting, it is a deliberate,
- * separate change — not a bug in this phase's retry logic.
+ * 2, so that field never becomes available during the retry loop. This is a phase-ordering
+ * constraint, NOT a cycle, so the stall is reported with a distinct error naming both the
+ * blocked `expr` field and the `custom` field it actually depends on (never a hang, never
+ * mislabeled as "circular dependency" — see the `blockedOn` tracking below). A genuine
+ * cycle among `expr` fields only (e.g. `a` depends on `b`, `b` depends on `a`) still gets
+ * the original "circular dependency" message. If the custom-after-expr ordering constraint
+ * ever needs lifting, that is a deliberate, separate change — not a bug in this phase's
+ * retry logic.
  */
 export function compileFieldOperators<
   TSchema extends z.ZodType,
@@ -167,6 +171,9 @@ export function compileFieldOperators<
     });
     while (pending.size > 0) {
       let progressed = false;
+      // Reset every pass: only the LAST pass's blockers are relevant to the stall
+      // diagnosis below (an earlier pass's blocker may have since resolved).
+      const blockedOn = new Map<string, string>();
       for (const name of pending) {
         const op = operators[name] as ExprOperatorLike;
         try {
@@ -175,13 +182,40 @@ export function compileFieldOperators<
           progressed = true;
         } catch (e) {
           if (!(e instanceof FieldNotReadyError)) throw e;
-          // Still blocked on `e.fieldName` — retried next pass.
+          blockedOn.set(name, e.fieldName);
         }
       }
       if (!progressed) {
-        throw new Error(
-          `aggregate.expr: circular dependency detected among fields: ${[...pending].join(", ")}.`,
+        // A stall has two distinct causes, and conflating them misdirects debugging:
+        //  - blocked on a `custom` field: NOT a cycle — `custom` always runs in phase 3,
+        //    so that dependency can never resolve during this loop no matter how many
+        //    passes run. Name both the stuck field and the real (custom) cause.
+        //  - blocked on another still-pending `expr` field: a genuine cycle among `expr`
+        //    fields — keep the original message/wording for this case unchanged.
+        const customBlocked = [...pending].filter((name) =>
+          customNames.includes(blockedOn.get(name)!),
         );
+        const cycleBlocked = [...pending].filter(
+          (name) => !customNames.includes(blockedOn.get(name)!),
+        );
+        const parts: string[] = [];
+        if (customBlocked.length > 0) {
+          const details = customBlocked
+            .map((name) => {
+              const dep = blockedOn.get(name)!;
+              return `field "${name}" depends on "${dep}", but "${dep}" is a custom field`;
+            })
+            .join("; ");
+          parts.push(
+            `${details} — custom always runs after expr, reorder or use sum/sumWith/expr only for the dependency.`,
+          );
+        }
+        if (cycleBlocked.length > 0) {
+          parts.push(
+            `circular dependency detected among fields: ${cycleBlocked.join(", ")}.`,
+          );
+        }
+        throw new Error(`aggregate.expr: ${parts.join(" ")}`);
       }
     }
 
