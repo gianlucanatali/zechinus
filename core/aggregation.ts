@@ -811,6 +811,30 @@ export function defineAggregation<
         notifyReactState();
         if (rerunRequested) {
           rerunRequested = false;
+          // CT6 fix (real-graph single-pass gate): a rerun was requested because
+          // SOME trigger arrived while this run was in flight — but that trigger is
+          // not necessarily a NEW change. A diamond-shaped DAG (e.g. `dashboardAgg`
+          // sourcing BOTH `portfolioSeriesAgg` directly AND `netWorthSeriesAgg`,
+          // which itself sources `portfolioSeriesAgg`) has a downstream aggregation
+          // read an upstream one EAGERLY on every `computeAndPersist()` attempt
+          // (`source.get()` in the sourceEntries loop above) — a second path into
+          // the upstream aggregation besides its OWN `ensureSubscribed` debounce
+          // timer reacting to the exact SAME staleness event. Without this guard,
+          // that debounce timer firing later (finding `inFlight` already set by the
+          // eager read) unconditionally requests a rerun, which then fires
+          // unconditionally too — a real second `compute()` call for data that
+          // never changed since the run that JUST settled. Skip the rerun when the
+          // just-persisted (or just-confirmed-unchanged, on skip-write) envelope is
+          // ALREADY fresh relative to the sources' CURRENT fingerprints — the exact
+          // same check `.get()` already applies before ever calling
+          // `triggerRecompute()` in the first place (`isFresh`, above). A genuinely
+          // NEW change since then (a real second write) still has
+          // `currentSourceFingerprints` reflect it, so `isFresh` correctly returns
+          // `false` and the rerun still proceeds — this only suppresses the
+          // REDUNDANT case, never a real one.
+          if (lastEnvelope !== null && isFresh(lastEnvelope)) {
+            return;
+          }
           triggerRecompute().catch((e) =>
             logBackgroundFailure("queued recompute failed", e),
           );

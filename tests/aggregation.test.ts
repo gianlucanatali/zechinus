@@ -873,6 +873,118 @@ test(
 );
 
 test(
+  "diamond DAG (D sources BOTH A directly AND C, which itself sources A — the exact " +
+    "shape of dashboardAgg's real 'portfolioSeries' + 'netWorthSeries' sources): a " +
+    "single upstream change must still recompute C exactly ONCE, never twice, even " +
+    "though D's OWN sourceEntries read C eagerly (via aggC.get()) on every attempt, " +
+    "racing C's own debounce-scheduled recompute for the SAME staleness event",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    configureSecureStore({
+      storage: adapter,
+      cache,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+
+    const source = makeSource("diamond_source");
+    await source.set({ value: 3 });
+
+    let computeCallsA = 0;
+    const aggA = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "diamond_agg_a", key: "__agg__" },
+      debounceMs: 20,
+      sources: { src: source },
+      compute: ({ sources }) => {
+        computeCallsA++;
+        return { total: sources.src.value * 2 };
+      },
+    });
+
+    let computeCallsC = 0;
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "diamond_agg_c", key: "__agg__" },
+      debounceMs: 20,
+      sources: { a: aggA },
+      compute: ({ sources }) => {
+        computeCallsC++;
+        return { total: sources.a.total + 100 };
+      },
+    });
+
+    // D sources BOTH `a` (aggA) AND `c` (aggC) directly — the diamond shape that
+    // `dashboardAggregation.ts` actually has (`portfolioSeries: portfolioSeriesAgg`
+    // + `netWorthSeries: netWorthSeriesAgg`, where netWorthSeriesAgg itself sources
+    // portfolioSeriesAgg). Every time D's OWN `computeAndPersist()` assembles its
+    // sources it calls `aggC.get()` (the `c` entry) EAGERLY — a second path into C
+    // besides C's own `ensureSubscribed` debounce timer reacting to the same A
+    // publish.
+    let computeCallsD = 0;
+    const aggD = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "diamond_agg_d", key: "__agg__" },
+      debounceMs: 20,
+      sources: { a: aggA, c: aggC },
+      compute: ({ sources }) => {
+        computeCallsD++;
+        return { total: sources.a.total + sources.c.total + 1000 };
+      },
+    });
+
+    const loggedErrors: unknown[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      loggedErrors.push(args);
+    };
+
+    try {
+      // Cold start, exactly like the "cold start" test above — the very first read
+      // of the whole DAG is at the top (D), nobody has visited A or C directly yet.
+      await aggD.get();
+
+      await waitFor(
+        () => computeCallsD === 1 && adapter.putCallsFor("diamond_agg_d") === 1,
+        3000,
+      );
+      // Hold well past convergence — this is where a redundant rerun (queued while
+      // C's in-flight compute settles, then fired unconditionally regardless of
+      // whether anything is ACTUALLY still stale) would show up as computeCallsC
+      // ticking past 1.
+      await settle(500);
+
+      assert.equal(
+        computeCallsA,
+        1,
+        "A must compute exactly once for a single upstream change",
+      );
+      assert.equal(
+        computeCallsC,
+        1,
+        "C must compute exactly once for a single upstream change — a redundant " +
+          "rerun (D's eager aggC.get() racing C's own pending debounce timer for " +
+          "the SAME staleness event) must never cause a second real compute()",
+      );
+      assert.equal(
+        computeCallsD,
+        1,
+        "D must compute exactly once for a single upstream change",
+      );
+    } finally {
+      console.error = originalConsoleError;
+    }
+  },
+);
+
+test(
   "refresh({ bypassExternalsTtl: true }): forces a fresh external fetch even inside its " +
     "TTL window; a plain refresh() keeps reusing the cached value (Task 5 review, Finding " +
     "3 — a worker that just wrote new market data needs the NEXT recompute to see it now, " +
