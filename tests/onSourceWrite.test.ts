@@ -50,6 +50,32 @@ function fixedKeyProvider(cryptoHandle: CryptoHandle): KeyProvider {
   };
 }
 
+/** A `KeyProvider` whose ambient user can change mid-test (`switchTo`), notifying
+ * every subscriber synchronously — the same same-tab, no-page-reload shape as a
+ * real user switch (`logout()` in `UserContext.tsx` is a plain React state reset;
+ * demo-persona switching is an established same-tab flow too). Used to reproduce
+ * the reviewer's cross-user isolation finding: a scheduled retry must never fire
+ * against a DIFFERENT, already-switched-in identity. */
+function switchableKeyProvider(
+  cryptoHandle: CryptoHandle,
+  initialUserId: string,
+): KeyProvider & { switchTo(userId: string): void } {
+  let userId = initialUserId;
+  const subs = new Set<() => void>();
+  return {
+    getCryptoHandle: () => cryptoHandle,
+    getUserId: () => userId,
+    subscribe: (cb) => {
+      subs.add(cb);
+      return () => subs.delete(cb);
+    },
+    switchTo(newUserId: string) {
+      userId = newUserId;
+      for (const cb of [...subs]) cb();
+    },
+  };
+}
+
 /** Real subscribable in-memory CacheAdapter — `set()` synchronously invokes
  * subscribers, exactly like `tanstackAdapter`'s production `QueryCache` behavior
  * (see `keyedWriteKeysCacheKey`'s doc comment in `core/store.ts` for why this
@@ -584,6 +610,132 @@ test("onSourceWrite retry: after exhausting the retry budget the failure stays c
   assert.ok(
     loggedErrors.some(([, e]) => e === conflictError),
     "giving up must still be logged loudly, not silently",
+  );
+
+  console.error = originalConsoleError;
+  handle();
+});
+
+// ─── Cross-user isolation — a scheduled retry must never fire against a ──────
+// ─── DIFFERENT, already-switched-in identity (reviewer finding, post-c4b1530a) ─
+
+test("onSourceWrite: a genuine identity switch cancels u1's pending scheduled retry — it must never fire against u2", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const keyProvider = switchableKeyProvider(cryptoHandle, "u1");
+  configureSecureStore({ storage: adapter, keys: keyProvider, cache });
+  const { txStore, snapshotStore } = makeStores();
+
+  const originalConsoleError = console.error;
+  const loggedErrors: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  // Fixed marker value per month (same simplification as CT3) — if a stale
+  // retry for u1's failed month ever fires against u2's ambient identity, u2's
+  // snapshot will unambiguously show "2026-01": 999, which u2 never wrote.
+  const monthValue: Record<string, number> = { "2026-01": 999, "2026-02": 7 };
+  let callCount = 0;
+  const handlerCalls: { keys: string[]; userIdAtCall: string | null }[] = [];
+  const handle = onSourceWrite(
+    txStore,
+    async ({ keys }) => {
+      callCount++;
+      const sorted = [...keys].sort();
+      handlerCalls.push({
+        keys: sorted,
+        userIdAtCall: keyProvider.getUserId(),
+      });
+      if (callCount === 1) {
+        // u1's write fails with a genuine cross-writer conflict — a retry gets
+        // scheduled (baseDelayMs below).
+        throw new OptimisticLockConflictError("toy_snapshot_blobs");
+      }
+      await snapshotStore.mutate(SNAP_KEY, (current) => {
+        const next = { months: { ...current.months } };
+        for (const m of sorted) next.months[m] = monthValue[m];
+        return next;
+      });
+    },
+    {
+      debounceMs: 5,
+      coalesce: true,
+      retry: { baseDelayMs: 40, maxDelayMs: 100 },
+    },
+  );
+
+  await txStore.mutate("2026-01", () => [{ id: "a", amount: 1 }]);
+  await waitFor(() => handlerCalls.length === 1, 1000);
+
+  const pendingForU1 = handle.getLastError();
+  assert.ok(
+    pendingForU1,
+    "u1's failed month must be pending retry right before the switch",
+  );
+  assert.deepEqual(pendingForU1!.keys, ["2026-01"]);
+
+  // A REAL, genuine identity switch — same-tab, no reload — happens BEFORE the
+  // scheduled retry (40ms) fires.
+  keyProvider.switchTo("u2");
+
+  // Wait well past the original retry delay: without the fix, the scheduled
+  // retryTimer would fire `handler({keys:["2026-01"]})` while the ambient
+  // identity is now "u2".
+  await new Promise((r) => setTimeout(r, 150));
+
+  assert.equal(
+    handlerCalls.length,
+    1,
+    "the retry for u1's failed month must NOT fire after switching to u2 — it " +
+      "must be cancelled by the identity switch, never run against a different user",
+  );
+
+  assert.equal(
+    handle.getLastError(),
+    null,
+    "u1's pending failure must not leak into u2's ambient error state after the switch",
+  );
+
+  const u2Snapshot = await snapshotStore.loadWithHash!(
+    "u2",
+    cryptoHandle,
+    SNAP_KEY,
+  );
+  assert.deepEqual(
+    u2Snapshot.data.months,
+    {},
+    "u2's snapshot must never receive u1's failed retry data — the exact " +
+      "cross-user corruption the reviewer flagged",
+  );
+
+  // Sanity: u2's OWN writes still work normally post-switch (the subscription
+  // correctly re-pointed to u2's write-keys slot, not left dangling on u1's).
+  // `handlerCalls.length` increments the instant the call STARTS, not once its
+  // own internal `await snapshotStore.mutate(...)` settles (same subtlety as
+  // CT2) — wait for the actually-persisted value instead.
+  await txStore.mutate("2026-02", () => [{ id: "z", amount: 42 }]);
+  await waitFor(async () => {
+    const { data } = await snapshotStore.loadWithHash!(
+      "u2",
+      cryptoHandle,
+      SNAP_KEY,
+    );
+    return data.months["2026-02"] === 7;
+  }, 1000);
+  assert.equal(handlerCalls.length, 2);
+  assert.deepEqual(handlerCalls[1], { keys: ["2026-02"], userIdAtCall: "u2" });
+  const u2SnapshotAfter = await snapshotStore.loadWithHash!(
+    "u2",
+    cryptoHandle,
+    SNAP_KEY,
+  );
+  assert.deepEqual(u2SnapshotAfter.data.months, { "2026-02": 7 });
+
+  assert.ok(
+    loggedErrors.length > 0,
+    "the discarded retry must still be logged loudly, never silently dropped",
   );
 
   console.error = originalConsoleError;

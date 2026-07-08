@@ -257,15 +257,47 @@ export function onSourceWrite(
    * concurrent `handler` run; it merges its keys into `rerunKeys` and shares the
    * in-flight promise. Once that settles (success OR failure — `finally`), a
    * queued rerun fires exactly once more with the accumulated keys (folding in
-   * any still-pending failed months first — CT3 fix). */
+   * any still-pending failed months first — CT3 fix).
+   *
+   * Cross-user isolation (reviewer finding, post-`c4b1530a`): `handler` resolves
+   * its OWN ambient identity fresh at call time (e.g. `rebuildMonths` in
+   * `src/lib/secureStore.ts` reads `KeyProvider.getUserId()` when it actually
+   * runs, not when it was scheduled). Because JS is single-threaded, a
+   * SCHEDULED `retryTimer`/`debounceTimer` is reliably cancelled by
+   * `ensureSubscribed` the instant a genuine identity switch is observed (see
+   * below) — it can never fire after the switch. The one case that survives a
+   * switch regardless is a `handler` call that was ALREADY in flight
+   * (awaiting inside `handler({keys})`) when the switch happened: its
+   * `.then()`/`.catch()` only run once `handler`'s own promise settles, which
+   * can be well after `ensureSubscribed` already rebound everything to the
+   * new user. `callUserId` captures which identity this specific call was
+   * dispatched for, so that settling logic below can tell "this result belongs
+   * to a user we've since switched away from" and refuse to let it write into
+   * the CURRENT (different) user's retry/error bookkeeping — the keys it
+   * carries are never retried against a different identity, and its success
+   * never clears a failure that may legitimately belong to the new user. */
   function runHandler(keys: string[]): Promise<void> {
     if (inFlight) {
       rerunKeys ??= new Set<string>();
       for (const k of keys) rerunKeys.add(k);
       return inFlight;
     }
+    const callUserId = subscribedUserId;
     const run = handler({ keys })
       .then(() => {
+        if (callUserId !== subscribedUserId) {
+          // Stale success from a call dispatched for a PREVIOUS identity,
+          // settling after a genuine user switch — must not clear the (new)
+          // current identity's own lastError, which this result knows nothing
+          // about.
+          logFailure(
+            `an in-flight call for a previous identity succeeded after an ` +
+              `identity switch — ignoring it for retry/error bookkeeping ` +
+              `(months [${keys.join(", ")}] belonged to that previous identity)`,
+            new Error("identity switched while handler call was in flight"),
+          );
+          return;
+        }
         // A successful call always includes whatever failed months were folded
         // into it (see `foldFailedKeysIntoNewWrite`, and the retry timer above) —
         // so any success clears the last failure, exactly like
@@ -274,6 +306,25 @@ export function onSourceWrite(
       })
       .catch((e: unknown) => {
         const error = e instanceof Error ? e : new Error(String(e));
+        if (callUserId !== subscribedUserId) {
+          // CRITICAL cross-user isolation guard: never schedule a retry for
+          // months that belonged to a DIFFERENT, already-switched-away-from
+          // identity. `scheduleRetry` would otherwise arm a timer that later
+          // calls `handler({keys})` while today's ambient identity is a
+          // different (real, logged-in) user — `handler` would resolve THAT
+          // user's fresh identity and silently recompute their snapshot using
+          // the previous user's failed months. Log and drop instead: this is
+          // a legitimate cancellation, not a lost error — the previous
+          // identity's own failure was already logged when it was cleared in
+          // `ensureSubscribed`.
+          logFailure(
+            `discarding failed months [${keys.join(", ")}] — the ambient ` +
+              `identity switched away before this call settled; never retried ` +
+              `against a different user`,
+            error,
+          );
+          throw error;
+        }
         scheduleRetry(keys, error);
         throw error;
       })
@@ -318,11 +369,62 @@ export function onSourceWrite(
    * tears down the previous subscription and observes nothing until a real
    * identity appears — no write can happen against this store while locked
    * anyway (every `KeyedStore` write resolves its own ambient identity and
-   * throws `LockedSessionError` if it's missing), so there is nothing to miss. */
+   * throws `LockedSessionError` if it's missing), so there is nothing to miss.
+   *
+   * Cross-user isolation (reviewer finding, post-`c4b1530a`): on a GENUINE
+   * identity change (we were subscribed to a real, non-null user and the
+   * ambient identity is now something else — a same-tab user switch/logout,
+   * e.g. `logout()` in `UserContext.tsx` does a plain React state reset with
+   * NO page reload, and demo-persona switching is an established same-tab
+   * flow too) every piece of state that is scoped to the OLD identity must be
+   * discarded here, synchronously, BEFORE the new subscription is wired up:
+   * `pendingKeys` (months queued but not yet dispatched), `debounceTimer` and
+   * `retryTimer` (both cancelled — a scheduled retry that fires later would
+   * call `handler({keys})` with the OLD identity's months while `handler`
+   * resolves the fresh, NEW ambient identity, corrupting the new user's
+   * snapshot), and `failedKeys`/`retryAttempt`/`lastError` (the old identity's
+   * retry/error bookkeeping — never carried over to the new user, who has no
+   * such failure). `rerunKeys` is cleared too, for the same reason: those are
+   * months queued to rerun once the currently in-flight call settles, and they
+   * belong to the OLD identity. None of this is a silent drop — it's logged
+   * via `logFailure` below so the cancellation is visible, not swallowed. An
+   * in-flight `handler` call already running for the old identity can't be
+   * cancelled here (JS can't abort a promise it doesn't own) — that case is
+   * guarded separately in `runHandler`'s `.then()`/`.catch()` via
+   * `callUserId`, so its eventual settlement can never write into the NEW
+   * identity's bookkeeping either. */
   function ensureSubscribed(userId: string | null): void {
     if (subscribedUserId === userId) return;
+    const isGenuineSwitch = subscribedUserId !== null;
     unsubCache?.();
     unsubCache = null;
+    if (isGenuineSwitch) {
+      pendingKeys = new Set();
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      if (failedKeys) {
+        logFailure(
+          `discarding pending retry state for identity "${subscribedUserId}" on ` +
+            `switch to "${userId}" — months [${[...failedKeys].join(", ")}] were ` +
+            `never recomputed for that identity and will NOT be retried against ` +
+            `the new one`,
+          lastError?.error ??
+            new Error(
+              `identity switched from "${subscribedUserId}" to "${userId}" before retry completed`,
+            ),
+        );
+      }
+      failedKeys = null;
+      retryAttempt = 0;
+      lastError = null;
+      rerunKeys = null;
+    }
     subscribedUserId = userId;
     if (!userId) return;
     const { cache } = getSecureStoreConfig();
