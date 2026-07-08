@@ -86,6 +86,9 @@ export {
 export {
   onSourceWrite,
   type OnSourceWriteOptions,
+  type OnSourceWriteRetryOptions,
+  type OnSourceWriteFailure,
+  type OnSourceWriteHandle,
   type Unsubscribe,
 } from "./core/onSourceWrite.ts";
 

@@ -323,9 +323,9 @@ test("CT2: a write arriving while the handler is in flight never runs a second c
   unsubscribe();
 });
 
-// ─── CT3 — fail-loud conflict, never swallowed, retry succeeds ────────────────
+// ─── CT3 — fail-loud conflict, never swallowed, requeued for retry, recovered ──
 
-test("CT3: a cross-writer optimistic-lock conflict propagates (never swallowed) and a subsequent write retries successfully", async () => {
+test("CT3: a cross-writer optimistic-lock conflict propagates (never swallowed), is queued for retry, and a subsequent write folds the failed month back in and recovers it", async () => {
   const adapter = memoryAdapter();
   const cache = memoryCache();
   const cryptoHandle = createDekHandle(randomBytes(32));
@@ -347,26 +347,34 @@ test("CT3: a cross-writer optimistic-lock conflict propagates (never swallowed) 
     releaseGate = resolve;
   });
 
+  // Maps each toy month to the delta value the (simplified) test handler applies
+  // — a stand-in for `computeMonthDelta`, so a MERGED retry call (several months
+  // in one `keys` array — see the fix below) applies every month it carries, not
+  // just the first, the same shape a real `rebuildMonths([...])` would.
+  const monthValue: Record<string, number> = { "2026-01": 999, "2026-02": 5 };
+
   const handlerCalls: string[][] = [];
-  const unsubscribe = onSourceWrite(
+  const handle = onSourceWrite(
     txStore,
     async ({ keys }) => {
-      handlerCalls.push([...keys].sort());
+      const sorted = [...keys].sort();
+      handlerCalls.push(sorted);
       // Same shape `rebuildMonths` uses (mutate() over the fresh snapshot) — the
       // `fn` callback is awaited BETWEEN mutate()'s own internal read and its
       // conditional write, so pausing here (only on the FIRST call) opens the
       // exact race window a genuinely concurrent "other writer" would exploit.
       await snapshotStore.mutate(SNAP_KEY, async (current) => {
         if (handlerCalls.length === 1) await gate;
-        return {
-          months: {
-            ...current.months,
-            [keys[0]]: keys[0] === "2026-01" ? 999 : 5,
-          },
-        };
+        const next = { months: { ...current.months } };
+        for (const m of sorted) next.months[m] = monthValue[m];
+        return next;
       });
     },
-    { debounceMs: 10, coalesce: true },
+    // Retry base delay set well above this test's own timings (tens of ms) so the
+    // module's OWN backoff timer never fires in this test — recovery here comes
+    // from the explicit "2026-02" write below folding "2026-01" back in, not from
+    // automatic backoff (that path has its own dedicated test further down).
+    { debounceMs: 10, coalesce: true, retry: { baseDelayMs: 5_000 } },
   );
 
   await txStore.mutate("2026-01", () => [{ id: "a", amount: 1 }]);
@@ -401,8 +409,18 @@ test("CT3: a cross-writer optimistic-lock conflict propagates (never swallowed) 
   );
   assert.deepEqual(afterConflict.data.months, { "2026-09": 1 });
 
-  // Retry: a fresh write triggers the reaction again; this time nothing else
-  // races it, so it must succeed normally.
+  // The failure must be consultable while the retry is pending — mirrors
+  // `defineAggregation`'s `AggregationState.error`.
+  const pending = handle.getLastError();
+  assert.ok(pending, "getLastError() must expose the pending failure");
+  assert.ok(pending!.error instanceof OptimisticLockConflictError);
+  assert.deepEqual(pending!.keys, ["2026-01"]);
+  assert.equal(pending!.attempt, 1);
+  assert.equal(pending!.exhausted, false);
+
+  // Retry: a fresh write on a DIFFERENT month triggers the reaction again. The
+  // fix: this must fold the still-pending "2026-01" back into the SAME call,
+  // not just recompute "2026-02" and leave "2026-01" lost forever.
   await txStore.mutate("2026-02", () => [{ id: "b", amount: 2 }]);
   await waitFor(async () => {
     const { data } = await snapshotStore.loadWithHash!(
@@ -413,16 +431,163 @@ test("CT3: a cross-writer optimistic-lock conflict propagates (never swallowed) 
     return data.months["2026-02"] === 5;
   }, 1000);
   assert.equal(handlerCalls.length, 2);
+  assert.deepEqual(
+    handlerCalls[1],
+    ["2026-01", "2026-02"],
+    "the retry call must carry BOTH the previously-failed month and the new one",
+  );
 
   const afterRetry = await snapshotStore.loadWithHash!(
     "u1",
     cryptoHandle,
     SNAP_KEY,
   );
-  assert.deepEqual(afterRetry.data.months, { "2026-09": 1, "2026-02": 5 });
+  assert.deepEqual(
+    afterRetry.data.months,
+    { "2026-09": 1, "2026-01": 999, "2026-02": 5 },
+    "2026-01 must be recovered, never permanently dropped by the conflict",
+  );
+  assert.equal(
+    handle.getLastError(),
+    null,
+    "the failure must clear once the retried months are successfully recomputed",
+  );
 
   console.error = originalConsoleError;
-  unsubscribe();
+  handle();
+});
+
+// ─── CT3-retry-auto — failed months requeue on their OWN, no new write needed ──
+
+test("onSourceWrite retry: a failed call's OWN months are automatically requeued via backoff, even with no new write on the store", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+    cache,
+  });
+  const { txStore, snapshotStore, rebuildMonths } = makeStores();
+
+  let failFirstAttempt = true;
+  const handlerCalls: string[][] = [];
+  const handle = onSourceWrite(
+    txStore,
+    async ({ keys }) => {
+      handlerCalls.push([...keys].sort());
+      if (failFirstAttempt) {
+        failFirstAttempt = false;
+        throw new OptimisticLockConflictError("toy_snapshot_blobs");
+      }
+      await rebuildMonths([...keys].sort());
+    },
+    {
+      debounceMs: 5,
+      coalesce: true,
+      retry: { baseDelayMs: 15, maxDelayMs: 50 },
+    },
+  );
+
+  const originalConsoleError = console.error;
+  console.error = () => {}; // this test is about requeueing, not logging (covered by CT3)
+
+  await txStore.mutate("2026-06", () => [{ id: "a", amount: 7 }]);
+  await waitFor(() => handlerCalls.length === 1, 1000);
+
+  const pending = handle.getLastError();
+  assert.ok(pending, "the failed month must be recorded as a pending retry");
+  assert.deepEqual(pending!.keys, ["2026-06"]);
+  assert.equal(pending!.attempt, 1);
+  assert.equal(pending!.exhausted, false);
+
+  // No further write happens on txStore — recovery must come from the module's
+  // OWN scheduled backoff retry, not from a coincidental future write.
+  await waitFor(() => handlerCalls.length === 2, 1000);
+  assert.deepEqual(handlerCalls[1], ["2026-06"]);
+
+  await waitFor(async () => {
+    const { data } = await snapshotStore.loadWithHash!(
+      "u1",
+      cryptoHandle,
+      SNAP_KEY,
+    );
+    return data.months["2026-06"] === 7;
+  }, 1000);
+
+  assert.equal(
+    handle.getLastError(),
+    null,
+    "the failure must clear once the automatic retry succeeds",
+  );
+
+  console.error = originalConsoleError;
+  handle();
+});
+
+// ─── CT3-retry-exhausted — budget exhausted, error stays visible, never lost ──
+
+test("onSourceWrite retry: after exhausting the retry budget the failure stays consultable and auto-retry stops (never silently discarded)", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+    cache,
+  });
+  const { txStore } = makeStores();
+
+  const conflictError = new OptimisticLockConflictError("toy_snapshot_blobs");
+  const handlerCalls: string[][] = [];
+  const handle = onSourceWrite(
+    txStore,
+    async ({ keys }) => {
+      handlerCalls.push([...keys].sort());
+      throw conflictError; // simulates a persistent, never-resolving conflict
+    },
+    {
+      debounceMs: 5,
+      coalesce: true,
+      retry: { maxAttempts: 2, baseDelayMs: 10, maxDelayMs: 20 },
+    },
+  );
+
+  const originalConsoleError = console.error;
+  const loggedErrors: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  await txStore.mutate("2026-08", () => [{ id: "a", amount: 3 }]);
+  await waitFor(() => handlerCalls.length === 2, 2000);
+
+  // Give a settle window well past what a 3rd attempt's backoff would need, to
+  // confirm the module really stopped scheduling further retries.
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(
+    handlerCalls.length,
+    2,
+    "auto-retry must stop once maxAttempts is reached, never retry forever",
+  );
+
+  const pending = handle.getLastError();
+  assert.ok(pending, "the failure must remain consultable after giving up");
+  assert.equal(pending!.exhausted, true);
+  assert.equal(pending!.attempt, 2);
+  assert.deepEqual(pending!.keys, ["2026-08"]);
+  assert.equal(
+    pending!.error,
+    conflictError,
+    "the REAL error object must still be reachable, never replaced by a generic one",
+  );
+  assert.ok(
+    loggedErrors.some(([, e]) => e === conflictError),
+    "giving up must still be logged loudly, not silently",
+  );
+
+  console.error = originalConsoleError;
+  handle();
 });
 
 // ─── CT4 — byte parity: reaction-triggered vs. manual rebuild ─────────────────
