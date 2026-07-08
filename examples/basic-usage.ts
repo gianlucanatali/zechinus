@@ -6,6 +6,12 @@
  * changes, these examples stop compiling or the test fails. It's the source of
  * truth for the snippets shown in `datacloak/README.md` — if you change the API,
  * update this file FIRST, get it passing, THEN mirror the README.
+ *
+ * This file is real code you'd write in an app. The `memoryAdapter`/`memoryCache`/
+ * `fixedKeyProvider` helpers it imports below are NOT — they are fake port
+ * implementations that exist only to let this file run standalone. See
+ * `./testFixtures.ts` for what they are and why a real app never rewrites them
+ * per store.
  */
 
 import { z } from "zod";
@@ -17,13 +23,13 @@ import {
   fingerprintSchema,
   createKeyHandle,
   asRawDekBytes,
-  type StorageAdapter,
-  type BlobRecord,
-  type CacheAdapter,
-  type CryptoHandle,
-  type KeyProvider,
 } from "../index.ts";
 import * as agg from "../aggregate/index.ts";
+import {
+  memoryAdapter,
+  memoryCache,
+  fixedKeyProvider,
+} from "./testFixtures.ts";
 
 // A real app derives its DEK from a `KeyProvider` adapter (WebAuthn, password KDF,
 // hardware token, ...) and picks its own salt/info for `createKeyHandle` — these
@@ -36,104 +42,7 @@ const createDekHandle = (rawBytes: Uint8Array) =>
     "example-pid-info",
   );
 
-/**
- * Minimal in-memory adapter, supports all 3 cardinalities. Examples/tests only.
- * `get`/`put` cover BOTH perUser (`extraKeys: []`) and perKey (`extraKeys: [key]`)
- * — same row-address, one map, keyed by however many extra columns were given.
- */
-export function memoryAdapter(): StorageAdapter {
-  const rows = new Map<string, BlobRecord>();
-  const many = new Map<string, BlobRecord>();
-  const rowKey = (
-    collection: string,
-    userId: string,
-    extraKeys: { value: string }[],
-  ) => [collection, userId, ...extraKeys.map((k) => k.value)].join(":");
-  return {
-    async get(collection, userId, extraKeys) {
-      return rows.get(rowKey(collection, userId, extraKeys)) ?? null;
-    },
-    async put(collection, userId, extraKeys, record) {
-      rows.set(rowKey(collection, userId, extraKeys), record);
-    },
-    async putIfMatch(collection, userId, extraKeys, record, expectedHash) {
-      const key = rowKey(collection, userId, extraKeys);
-      const current = rows.get(key) ?? null;
-      if (expectedHash === null) {
-        if (current) return false; // row already exists — caller's belief was stale
-        rows.set(key, record);
-        return true;
-      }
-      if (!current || current.contentHash !== expectedHash) return false;
-      rows.set(key, record);
-      return true;
-    },
-    async list(collection, userId) {
-      const prefix = `${collection}:${userId}:`;
-      return [...many]
-        .filter(([key]) => key.startsWith(prefix))
-        .map(([key, record]) => ({
-          id: key.slice(prefix.length),
-          record,
-          plain: {},
-        }));
-    },
-    async insert(collection, userId, id, record) {
-      many.set(`${collection}:${userId}:${id}`, record);
-    },
-    async updateById(collection, userId, id, record) {
-      many.set(`${collection}:${userId}:${id}`, record);
-    },
-    async deleteById(collection, userId, id) {
-      many.delete(`${collection}:${userId}:${id}`);
-    },
-    async insertMany(collection, userId, entries) {
-      for (const { extraKeys } of entries) {
-        const key = rowKey(collection, userId, extraKeys);
-        if (rows.has(key)) throw new Error(`insertMany: ${key} already exists`);
-      }
-      for (const { extraKeys, record } of entries) {
-        rows.set(rowKey(collection, userId, extraKeys), record);
-      }
-    },
-  };
-}
-
-/** Real subscribable in-memory CacheAdapter — required by `defineAggregation` (it
- * detects a source write through this port, not by re-fetching every source on every
- * read). See `datacloak/tests/aggregation.test.ts`'s identical fixture. */
-function memoryCache(): CacheAdapter {
-  const data = new Map<string, unknown>();
-  const subs = new Map<string, Set<() => void>>();
-  return {
-    get: (key) => data.get(key) as never,
-    set: (key, value) => {
-      data.set(key, value);
-      for (const cb of subs.get(key) ?? []) cb();
-    },
-    subscribe: (key, cb) => {
-      if (!subs.has(key)) subs.set(key, new Set());
-      subs.get(key)!.add(cb);
-      return () => subs.get(key)?.delete(cb);
-    },
-    clear: () => {
-      data.clear();
-      for (const set of subs.values()) for (const cb of set) cb();
-    },
-  };
-}
-
 const freshDek = () => createDekHandle(randomBytes(32));
-
-// Ambient calls (`get`/`set`/`mutate`/`createMany`) resolve the CryptoHandle from
-// a configured `KeyProvider` instead of taking it as a parameter — this fixed
-// provider mirrors a single already-unlocked session, like a real app's bridge
-// to its passkey/DEK controller.
-const fixedKeyProvider = (cryptoHandle: CryptoHandle): KeyProvider => ({
-  getCryptoHandle: () => cryptoHandle,
-  getUserId: () => "u1",
-  subscribe: () => () => {},
-});
 
 // ── 1. perUser — one blob per user (e.g. portfolio, asset) ─────────────────────────
 export async function perUserExample() {
