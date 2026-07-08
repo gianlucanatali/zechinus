@@ -47,9 +47,9 @@
  * Deliberately fixed-key-only — no range/collection source, see `KeyedSourceRef`'s doc
  * comment.
  *
- * NOT in this file (later tasks, see the plan): the React binding (Task 4), and
- * `onSourceWrite` (Task 6 — a different primitive, for a write-REACTION, not an
- * aggregate).
+ * NOT in this file: the React binding (`react/useAggregation.ts`), and
+ * `onSourceWrite` (`core/onSourceWrite.ts` — a different primitive, for a write-REACTION,
+ * not an aggregate).
  */
 
 import { z } from "zod";
