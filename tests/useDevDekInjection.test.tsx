@@ -29,6 +29,7 @@ function fakeController(): PasskeyDekController & {
     getCryptoHandle: () => null,
     getUserId: () => null,
     getSetupStatus: () => "done",
+    getUnlockMethod: () => null,
     subscribe: () => () => {},
     setDek: async (userId, rawBytes) => {
       setDekCalls.push({ userId, bytes: new Uint8Array(rawBytes) });
@@ -44,6 +45,9 @@ function fakeController(): PasskeyDekController & {
       throw new Error("not used in this test");
     },
     addPasskeyToExistingDek: async () => {
+      throw new Error("not used in this test");
+    },
+    regenerateRecoveryWords: async () => {
       throw new Error("not used in this test");
     },
   } as PasskeyDekController & {

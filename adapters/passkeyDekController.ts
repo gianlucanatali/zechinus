@@ -57,6 +57,11 @@ export interface PasskeyWrapStorage {
  */
 export type PasskeySetupStatus = "pending" | "needed" | "done";
 
+/** How the DEK became active in the current session — drives app-level policy
+ * decisions (e.g. requiring the strongest factor before an irreversible action
+ * like invalidating a recovery phrase). `null` when locked. */
+export type UnlockMethod = "passkey" | "recovery";
+
 export interface PasskeyDekControllerConfig {
   provider: WebauthnKeyProvider;
   recovery: MnemonicRecovery;
@@ -72,11 +77,20 @@ export interface PendingPasskeySetup {
   confirm(): Promise<void>;
 }
 
+/** Returned by `regenerateRecoveryWords` — same "show once, persist on confirm"
+ * shape as `PendingPasskeySetup`. */
+export interface PendingRecoveryRegeneration {
+  recoveryWords: string;
+  confirm(): Promise<void>;
+}
+
 export interface PasskeyDekController {
   /** Matches the `KeyProvider` port shape — usable directly as one. */
   getCryptoHandle(): KeyHandle | null;
   getUserId(): string | null;
   getSetupStatus(): PasskeySetupStatus;
+  /** How the DEK was unlocked this session — `null` when locked. See `UnlockMethod`. */
+  getUnlockMethod(): UnlockMethod | null;
   subscribe(callback: () => void): () => void;
 
   /** Activates a caller-supplied raw DEK directly — dev/test injection, or after a
@@ -117,6 +131,16 @@ export interface PasskeyDekController {
     userId: string,
     userName: string,
   ): Promise<{ credentialId: string }>;
+
+  /**
+   * Regenerates the recovery phrase for the CURRENTLY UNLOCKED dek (rewrap, not
+   * rotation — same shape as `addPasskeyToExistingDek`, the dek's bytes never
+   * change). Requires `getCryptoHandle()` to be non-null; throws otherwise.
+   * Nothing is persisted until `confirm()` is called — mirrors `registerPasskey`
+   * so the caller can require the user acknowledge the new words first. The old
+   * recovery wrap is replaced (storage keeps exactly one recovery wrap per user).
+   */
+  regenerateRecoveryWords(userId: string): Promise<PendingRecoveryRegeneration>;
 }
 
 export function createPasskeyDekController(
@@ -127,18 +151,24 @@ export function createPasskeyDekController(
   let cryptoHandle: KeyHandle | null = null;
   let userId: string | null = null;
   let setupStatus: PasskeySetupStatus = "pending";
+  let unlockMethod: UnlockMethod | null = null;
   const listeners = new Set<() => void>();
 
   function notify(): void {
     for (const cb of listeners) cb();
   }
 
-  async function activate(uid: string, rawBytes: RawDekBytes): Promise<void> {
+  async function activate(
+    uid: string,
+    rawBytes: RawDekBytes,
+    method: UnlockMethod,
+  ): Promise<void> {
     const handle = await createHandle(rawBytes);
     clean(rawBytes);
     cryptoHandle = handle;
     userId = uid;
     setupStatus = "done";
+    unlockMethod = method;
     notify();
   }
 
@@ -146,13 +176,14 @@ export function createPasskeyDekController(
     getCryptoHandle: () => cryptoHandle,
     getUserId: () => userId,
     getSetupStatus: () => setupStatus,
+    getUnlockMethod: () => unlockMethod,
     subscribe(callback) {
       listeners.add(callback);
       return () => listeners.delete(callback);
     },
 
     async setDek(uid, rawBytes) {
-      await activate(uid, rawBytes);
+      await activate(uid, rawBytes, "passkey");
     },
 
     lock() {
@@ -161,6 +192,7 @@ export function createPasskeyDekController(
         cryptoHandle = null;
       }
       userId = null;
+      unlockMethod = null;
       notify();
     },
 
@@ -190,7 +222,7 @@ export function createPasskeyDekController(
       const kek = provider.deriveKEKFromPRF(prfOutput);
       try {
         const rawBytes = unwrapKey(kek, wrap);
-        await activate(uid, asRawDekBytes(rawBytes));
+        await activate(uid, asRawDekBytes(rawBytes), "passkey");
       } catch {
         throw new Error(
           "passkeyDekController.unlockWithPasskey: passkey not recognized — data cannot be decrypted.",
@@ -216,7 +248,7 @@ export function createPasskeyDekController(
       const kek = recovery.deriveKEK(words);
       try {
         const rawBytes = unwrapKey(kek, wrap);
-        await activate(uid, asRawDekBytes(rawBytes));
+        await activate(uid, asRawDekBytes(rawBytes), "recovery");
       } catch {
         throw new Error(
           "passkeyDekController.unlockWithRecovery: incorrect words — no data was decrypted.",
@@ -249,7 +281,11 @@ export function createPasskeyDekController(
           try {
             await storage.savePasskeyWrap(uid, credentialId, wrappedPasskey);
             await storage.saveRecoveryWrap(uid, wrappedRecovery);
-            await activate(uid, asRawDekBytes(new Uint8Array(masterKey)));
+            await activate(
+              uid,
+              asRawDekBytes(new Uint8Array(masterKey)),
+              "passkey",
+            );
           } finally {
             clean(masterKey);
           }
@@ -272,9 +308,32 @@ export function createPasskeyDekController(
       try {
         const wrapped = await cryptoHandle.wrapWithKek(kek);
         await storage.savePasskeyWrap(uid, credentialId, wrapped);
+        unlockMethod = "passkey";
+        notify();
         return { credentialId };
       } finally {
         clean(kek);
+      }
+    },
+
+    async regenerateRecoveryWords(uid) {
+      if (!cryptoHandle) {
+        throw new Error(
+          "passkeyDekController.regenerateRecoveryWords: no crypto handle currently unlocked — unlock first.",
+        );
+      }
+      const recoveryWords = recovery.generateWords();
+      const kekRecovery = recovery.deriveKEK(recoveryWords);
+      try {
+        const wrapped = await cryptoHandle.wrapWithKek(kekRecovery);
+        return {
+          recoveryWords,
+          async confirm() {
+            await storage.saveRecoveryWrap(uid, wrapped);
+          },
+        };
+      } finally {
+        clean(kekRecovery);
       }
     },
   };

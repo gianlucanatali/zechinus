@@ -79,12 +79,20 @@ function fakeWebauthnProvider(): WebauthnKeyProvider {
 
 /** Fake BIP39 recovery: "words" is just a plain string used as the entropy source. */
 function fakeMnemonicRecovery(): MnemonicRecovery {
+  let generatedCount = 0;
   return {
     generateWords() {
-      return "fixed test recovery words";
+      generatedCount++;
+      return generatedCount === 1
+        ? "fixed test recovery words"
+        : `fixed test recovery words ${generatedCount}`;
     },
     validateWords(words) {
-      return words === "fixed test recovery words" || words === "";
+      return (
+        words === "fixed test recovery words" ||
+        /^fixed test recovery words \d+$/.test(words) ||
+        words === ""
+      );
     },
     deriveKEK(words) {
       if (!this.validateWords(words) || words === "") {
@@ -371,4 +379,114 @@ test("subscribe: fires on unlock and on lock, not spuriously", async () => {
     asRawDekBytes(bytesFromRange(32, (i) => i)),
   );
   assert.equal(fired, 2, "unsubscribed callback must not fire again");
+});
+
+test("regenerateRecoveryWords: replaces the recovery wrap — old words stop unlocking, new words do", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const originalPid = controller.getCryptoHandle()!.pid;
+
+  const { recoveryWords: newWords, confirm: confirmRegen } =
+    await controller.regenerateRecoveryWords("user-1");
+  assert.notEqual(newWords, "fixed test recovery words");
+  await confirmRegen();
+
+  controller.lock();
+
+  await assert.rejects(
+    () => controller.unlockWithRecovery("user-1", "fixed test recovery words"),
+    "old recovery words must stop working after regeneration",
+  );
+
+  await controller.unlockWithRecovery("user-1", newWords);
+  assert.equal(
+    controller.getCryptoHandle()!.pid,
+    originalPid,
+    "new recovery words must unlock the SAME dek",
+  );
+});
+
+test("regenerateRecoveryWords: throws if no dek is currently unlocked", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await assert.rejects(() => controller.regenerateRecoveryWords("user-1"));
+});
+
+test("getUnlockMethod: null before unlock, 'passkey' after registerPasskey/unlockWithPasskey, 'recovery' after unlockWithRecovery, null after lock", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  assert.equal(controller.getUnlockMethod(), null);
+
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  assert.equal(controller.getUnlockMethod(), "passkey");
+
+  controller.lock();
+  assert.equal(controller.getUnlockMethod(), null);
+
+  await controller.unlockWithPasskey("user-1");
+  assert.equal(controller.getUnlockMethod(), "passkey");
+
+  controller.lock();
+  await controller.unlockWithRecovery("user-1", "fixed test recovery words");
+  assert.equal(controller.getUnlockMethod(), "recovery");
+});
+
+test("getUnlockMethod: 'passkey' again after addPasskeyToExistingDek following a recovery unlock", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  controller.lock();
+
+  await controller.unlockWithRecovery("user-1", "fixed test recovery words");
+  assert.equal(controller.getUnlockMethod(), "recovery");
+
+  await controller.addPasskeyToExistingDek("user-1", "u@test.example");
+  assert.equal(controller.getUnlockMethod(), "passkey");
+});
+
+test("getUnlockMethod: 'passkey' after setDek (dev/test injection path)", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+  assert.equal(controller.getUnlockMethod(), "passkey");
 });
