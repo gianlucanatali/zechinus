@@ -14,6 +14,7 @@ export {
   type UseCollectionStoreResult,
 } from "./useCollectionStore.ts";
 export { useAggregation, type UseAggregationResult } from "./useAggregation.ts";
+export { useIsAnyAggregationComputing } from "./useIsAnyAggregationComputing.ts";
 export { tanstackAdapter } from "../adapters/tanstackAdapter.ts";
 export { OptimisticLockConflictError } from "./errors.ts";
 export { usePasskeyDek, type UsePasskeyDekResult } from "./usePasskeyDek.ts";
