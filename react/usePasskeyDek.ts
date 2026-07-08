@@ -10,6 +10,8 @@ import type {
   PasskeyDekController,
   PasskeySetupStatus,
   PendingPasskeySetup,
+  PendingRecoveryRegeneration,
+  UnlockMethod,
 } from "../adapters/passkeyDekController.ts";
 import type { KeyHandle, RawDekBytes } from "../core/keyDerivation.ts";
 
@@ -17,6 +19,7 @@ export interface UsePasskeyDekResult {
   cryptoHandle: KeyHandle | null;
   userId: string | null;
   setupStatus: PasskeySetupStatus;
+  unlockMethod: UnlockMethod | null;
   checkSetupNeeded: (userId: string) => Promise<void>;
   markSetupDone: () => void;
   setDek: (userId: string, rawBytes: RawDekBytes) => Promise<void>;
@@ -31,6 +34,9 @@ export interface UsePasskeyDekResult {
     userId: string,
     userName: string,
   ) => Promise<{ credentialId: string }>;
+  regenerateRecoveryWords: (
+    userId: string,
+  ) => Promise<PendingRecoveryRegeneration>;
 }
 
 export function usePasskeyDek(
@@ -48,11 +54,16 @@ export function usePasskeyDek(
     controller.subscribe,
     controller.getSetupStatus,
   );
+  const unlockMethod = useSyncExternalStore(
+    controller.subscribe,
+    controller.getUnlockMethod,
+  );
 
   return {
     cryptoHandle,
     userId,
     setupStatus,
+    unlockMethod,
     checkSetupNeeded: controller.checkSetupNeeded,
     markSetupDone: controller.markSetupDone,
     setDek: controller.setDek,
@@ -61,5 +72,6 @@ export function usePasskeyDek(
     unlockWithRecovery: controller.unlockWithRecovery,
     registerPasskey: controller.registerPasskey,
     addPasskeyToExistingDek: controller.addPasskeyToExistingDek,
+    regenerateRecoveryWords: controller.regenerateRecoveryWords,
   };
 }
