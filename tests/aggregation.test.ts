@@ -709,6 +709,170 @@ test("scenario 9: an Aggregation as a source — a downstream aggregate reads th
 });
 
 test(
+  "cold start: a brand-new user's very first read is the BOTTOM of a 3-level DAG " +
+    "(D sources C, C sources A, none of the three has EVER computed anything for this " +
+    "user — the exact 'first-ever /dashboard visit, never been to /investimenti' shape) " +
+    "— must self-heal to the correct value in a small, bounded number of rounds, never " +
+    "loop or stall",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    configureSecureStore({
+      storage: adapter,
+      cache,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+
+    const source = makeSource("cold_source");
+    await source.set({ value: 3 });
+
+    // A: bottom of the DAG, sourced only from a plain Store — never fails, since a Store
+    // source always has schema-default data even when never written (unlike an
+    // Aggregation source, which is null until its OWN first compute lands).
+    let computeCallsA = 0;
+    const aggA = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_agg_a", key: "__agg__" },
+      debounceMs: 20,
+      sources: { src: source },
+      compute: ({ sources }) => {
+        computeCallsA++;
+        return { total: sources.src.value * 2 };
+      },
+    });
+
+    // C: middle of the DAG, sources A (an Aggregation, not a Store) — this is the shape
+    // that CAN throw "has no persisted value yet" on a cold read.
+    let computeCallsC = 0;
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_agg_c", key: "__agg__" },
+      debounceMs: 20,
+      sources: { a: aggA },
+      compute: ({ sources }) => {
+        computeCallsC++;
+        return { total: sources.a.total + 100 };
+      },
+    });
+
+    // D: top of the DAG (the thing `Dashboard.tsx` actually mounts) — sources C.
+    let computeCallsD = 0;
+    const aggD = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_agg_d", key: "__agg__" },
+      debounceMs: 20,
+      sources: { c: aggC },
+      compute: ({ sources }) => {
+        computeCallsD++;
+        return { total: sources.c.total + 1000 };
+      },
+    });
+
+    // Intercept console.error (the channel `logBackgroundFailure` uses for every
+    // fire-and-forget background failure) so this test can prove the cold cascade fails
+    // AT MOST ONCE per intermediate level — never a retry storm — instead of merely
+    // trusting that it eventually converges.
+    const loggedErrors: unknown[] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      loggedErrors.push(args);
+    };
+
+    try {
+      // Simulate `Dashboard.tsx` mounting for a user who has NEVER visited
+      // `/investimenti` (aggA) or any intermediate page (aggC) — `aggD.get()` is the
+      // very first call to `.get()`/`.refresh()` on ANY of the three aggregations.
+      const first = await aggD.get();
+      assert.deepEqual(
+        first,
+        { data: null, computing: true, stale: true, error: null },
+        "first-ever read of the bottom of a totally cold DAG must be null+computing, " +
+          "never throw synchronously to the caller",
+      );
+
+      // Bounded poll: the engine mechanics (read `datacloak/core/aggregation.ts`)
+      // predict convergence in exactly 3 rounds — A's own first compute (no aggregation
+      // sources of its own, so it can never throw on this path) succeeds immediately;
+      // A's persist-and-publish (`computeAndPersist`'s `cache?.set` at the end) wakes
+      // C's subscription (`ensureSubscribed`'s `cache.subscribe` callback) and schedules
+      // C's debounced recompute, which now succeeds; C's own persist-and-publish then
+      // wakes D's subscription the same way. Cap the wait well above what two
+      // sequential 20ms debounces need, far below "would indicate a stall". Waiting on
+      // `adapter.putCallsFor(...)` too (not just the compute counters) matters here,
+      // same discipline as scenario 9 above: the counter increments the instant
+      // `compute()` runs, BEFORE the result is actually persisted — reading `aggD.get()`
+      // right after only the counter condition can race ahead of D's own persist and
+      // observe a still-null value.
+      await waitFor(
+        () =>
+          computeCallsA === 1 &&
+          computeCallsC === 1 &&
+          computeCallsD === 1 &&
+          adapter.putCallsFor("cold_agg_a") === 1 &&
+          adapter.putCallsFor("cold_agg_c") === 1 &&
+          adapter.putCallsFor("cold_agg_d") === 1,
+        3000,
+      );
+
+      const final = await aggD.get();
+      assert.deepEqual(
+        final.data,
+        { total: 3 * 2 + 100 + 1000 },
+        "the converged value must come from the REAL fixture data at the bottom of the " +
+          "DAG, not a placeholder/default",
+      );
+      assert.equal(final.computing, false);
+      assert.equal(final.stale, false);
+      assert.equal(final.error, null);
+
+      // No loop / no stall: hold steady well past convergence and confirm nothing
+      // recomputes again — the cascade settles, it never oscillates.
+      await settle(200);
+      assert.equal(
+        computeCallsA,
+        1,
+        "A must never recompute again once the DAG has converged",
+      );
+      assert.equal(
+        computeCallsC,
+        1,
+        "C must never recompute again once the DAG has converged",
+      );
+      assert.equal(
+        computeCallsD,
+        1,
+        "D must never recompute again once the DAG has converged",
+      );
+
+      // Exactly one failed FIRST attempt each for C (reading a still-empty A) and D
+      // (reading a still-empty C) is the expected, self-healing shape — more than one
+      // each would mean an uncontrolled retry storm rather than a clean one-shot cascade.
+      const noPersistedValueErrors = loggedErrors.filter((args) =>
+        String((args as unknown[])[1] ?? "").includes(
+          "has no persisted value yet",
+        ),
+      );
+      assert.equal(
+        noPersistedValueErrors.length,
+        2,
+        "exactly one logged 'has no persisted value yet' failure each for C and D — " +
+          "never more (a retry storm) and never fewer (the cold-read guard silently " +
+          "swallowed instead of surfacing)",
+      );
+    } finally {
+      console.error = originalConsoleError;
+    }
+  },
+);
+
+test(
   "refresh({ bypassExternalsTtl: true }): forces a fresh external fetch even inside its " +
     "TTL window; a plain refresh() keeps reusing the cached value (Task 5 review, Finding " +
     "3 — a worker that just wrote new market data needs the NEXT recompute to see it now, " +
