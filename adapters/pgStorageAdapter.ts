@@ -67,6 +67,29 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
       return rows[0]?.content_hash ?? null;
     },
 
+    async getHashesByKeys(
+      collection,
+      userId,
+      keyColumn,
+      keys,
+    ): Promise<Record<string, string | null>> {
+      const result: Record<string, string | null> = {};
+      for (const k of keys) result[k] = null;
+      if (!keys.length) return result;
+      const { rows } = await getClient().query<{
+        [k: string]: unknown;
+        content_hash: string | null;
+      }>(
+        `SELECT ${quoteIdent(keyColumn)}, content_hash FROM ${quoteIdent(collection)} ` +
+          `WHERE user_id = $1 AND ${quoteIdent(keyColumn)} = ANY($2)`,
+        [userId, keys],
+      );
+      for (const row of rows) {
+        result[row[keyColumn] as string] = row.content_hash ?? null;
+      }
+      return result;
+    },
+
     async put(collection, userId, extraKeys, record): Promise<void> {
       const columns = ["user_id", ...extraKeys.map((k) => k.column)];
       const values: unknown[] = [userId, ...extraKeys.map((k) => k.value)];

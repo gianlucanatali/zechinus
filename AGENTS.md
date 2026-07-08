@@ -282,6 +282,38 @@ If a new access pattern needs a capability the adapter doesn't have:
    4+ cases (roundtrip, AAD-per-row not movable across rows/keys/ids,
    adapter-missing-capability → explicit error, Zod validation rejects bad writes).
 
+`getHashesByKeys` (`core/types.ts`) is a real, already-shipped example of this exact
+recipe — a batch hash-only read for several keys of one `perKey` store in one round trip,
+implemented in both shipped adapters (`supabaseStorageAdapter.ts`/`pgStorageAdapter.ts`),
+consumed by `defineAggregation`'s cold-session check below. Use it as the template.
+
+## Aggregation extras: `flush()`, `invalidateOn`/`invalidateChannel`, cold-session check
+
+Three capabilities layered on top of the core `defineAggregation`/`onSourceWrite`
+mechanics — full rationale and code examples in `README.md`'s own sections (same
+headings), this is just "when do I reach for which":
+
+- **`OnSourceWriteHandle.flush()`** (`core/onSourceWrite.ts`) — a caller that just
+  finished a known batch of writes (an import, a bulk edit) and needs the reaction's
+  effect (a derived snapshot) visible RIGHT NOW, without waiting out `debounceMs` or
+  duplicating the reaction's own logic at the call site. Never build a second "rebuild"
+  call site in app code for this — that's exactly what `flush()` replaces.
+- **`ExternalInput.invalidateOn` / `invalidateChannel(name)`** (`core/aggregation.ts`) —
+  an `external` whose data lives OUTSIDE any DataCloak `Store` (a plaintext table read
+  via plain REST, e.g. "which account ids exist") has no write-interception hook at all;
+  nothing marks the aggregation stale until the external's own `ttlMs` expires. Declare
+  the channel(s) the external depends on, then call `invalidateChannel(name)` ONCE, at
+  the single app-level place the underlying mutation happens (never scattered across
+  every caller of that mutation).
+- **Cold-session hash verification** — automatic, nothing to configure. `.get()` verifies
+  every source never observed live THIS session against the real current hash before
+  trusting the persisted envelope, the first time a fresh identity subscribes. Batches
+  `KeyedSourceRef` sources sharing one physical table into one `getHashesByKeys` call.
+  Know its real limit: it closes the "a write I never saw live gets missed on a NEW
+  session" gap (a reload self-heals) — it does NOT make an already-open idle tab pick up
+  another tab/device's write without a fresh `.get()` call (no server push/polling; the
+  `CacheAdapter` is in-memory, per tab/process).
+
 ## `tanstackAdapter` requires `gcTime: Infinity` — enforced, not just documented
 
 `tanstackAdapter` (`adapters/tanstackAdapter.ts`) writes via `setQueryData`/`getQueryData`

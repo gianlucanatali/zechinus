@@ -959,6 +959,34 @@ Scoped to just the ONE external that declared the channel — an unrelated exter
 same aggregation, or one with no `invalidateOn` at all, is never refetched by it. A channel
 nobody subscribed to is a safe no-op.
 
+### Cold-session freshness verification
+
+`isFresh()` normally trusts the persisted envelope for any source never OBSERVED live
+this session (`currentSourceFingerprints.get(name) === undefined` → "no signal, assume
+unchanged") — correct if the source genuinely hasn't changed, wrong if it changed via a
+path this session's live subscriptions never saw (a previous session's recompute
+interrupted after a source write landed but before persisting, or another device/tab
+writing while this one was closed/idle).
+
+`.get()` now verifies every such never-observed source against the REAL current hash
+before trusting the envelope, the first time a fresh identity subscribes — a no-op (zero
+network calls) once every source has a real tracked value, which converges after the
+first check. `KeyedSourceRef` sources sharing one physical table (e.g. `dashboardAgg`'s
+`snapshots`/`portfolioSeries`-as-source/`netWorthSeries`-as-source/
+`currentPortfolioMetrics`-as-source, all in `account_snapshot_blobs`) are verified with
+ONE batched call via the adapter's optional `getHashesByKeys`, not one `getHash` per
+source. `Aggregation` sources delegate to the upstream's own `.get()` (recursing its own
+cold check if it's also cold) and compare via the same `aggregationSourceFingerprint`
+`computeAndPersist` already persists — no new fingerprint convention.
+
+This closes the "did a change I never observed live get missed" gap for a NEW session
+(a page reload/reopen self-heals reliably now) — it does NOT make an already-open,
+idle tab reactively pick up a write from a different tab/device without a fresh `.get()`
+call (no server push/polling loop; `CacheAdapter` is in-memory, per tab/process, and
+`ensureSubscribed`'s check happens once per identity, not on every `.get()`). Adapters
+without `getHashesByKeys` (or without `getHash`/`loadWithHash` at all) fall back to more
+round trips, never break correctness — see `StorageAdapter.getHashesByKeys`'s doc comment.
+
 ### Write-reaction — `onSourceWrite`
 
 **A different primitive from `defineAggregation`, not a variant of it.** An aggregation

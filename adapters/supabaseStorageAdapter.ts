@@ -96,6 +96,34 @@ export function supabaseStorageAdapter(
       return (data?.content_hash as string | null) ?? null;
     },
 
+    async getHashesByKeys(
+      collection,
+      userId,
+      keyColumn,
+      keys,
+    ): Promise<Record<string, string | null>> {
+      const result: Record<string, string | null> = {};
+      for (const k of keys) result[k] = null;
+      if (!keys.length) return result;
+      const { data, error } = await getClient()
+        .from(collection)
+        .select(`${keyColumn}, content_hash`)
+        .eq("user_id", userId)
+        .in(keyColumn, keys);
+      if (error)
+        throw new Error(
+          `supabaseStorageAdapter.getHashesByKeys(${collection}, ${userId}, ${keyColumn} in [${keys.join(",")}]): ${error.message}`,
+        );
+      // Dynamic `keyColumn` in the select string → GenericStringError, same as
+      // listByKeyRange's identical cast below.
+      const rows = (data ?? []) as unknown as Record<string, unknown>[];
+      for (const row of rows) {
+        result[row[keyColumn] as string] =
+          (row.content_hash as string | null) ?? null;
+      }
+      return result;
+    },
+
     async put(collection, userId, extraKeys, record): Promise<void> {
       const row = rowFromRecord(userId, extraKeys, record);
       const { error } = await upsertRow(getClient(), collection, row, [

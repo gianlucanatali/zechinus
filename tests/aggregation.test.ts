@@ -27,6 +27,7 @@ import {
   defineStore,
   defineAggregation,
   invalidateChannel,
+  keyedSource,
   fingerprintSchema,
   type StorageAdapter,
   type CacheAdapter,
@@ -102,10 +103,17 @@ function memoryAdapter(): StorageAdapter & {
    * (e.g. `"key"` vs a configured `keyColumn` like `"year_month"`), not just that
    * read/write round-tripped correctly. */
   columnsUsedFor: (collection: string) => Set<string>;
+  /** Number of `getHashesByKeys` calls for a given collection — lets a test assert
+   * that N sources sharing one physical table cost ONE batched call, not N. */
+  getHashesByKeysCallsFor: (collection: string) => number;
+  /** Number of single-key `getHash` calls for a given collection. */
+  getHashCallsFor: (collection: string) => number;
 } {
   const rows = new Map<string, BlobRecord>();
   const putCallsByCollection = new Map<string, number>();
   const columnsByCollection = new Map<string, Set<string>>();
+  const getHashesByKeysCallsByCollection = new Map<string, number>();
+  const getHashCallsByCollection = new Map<string, number>();
   const rowKey = (
     collection: string,
     userId: string,
@@ -124,11 +132,17 @@ function memoryAdapter(): StorageAdapter & {
     rows: typeof rows;
     putCallsFor: (collection: string) => number;
     columnsUsedFor: (collection: string) => Set<string>;
+    getHashesByKeysCallsFor: (collection: string) => number;
+    getHashCallsFor: (collection: string) => number;
   } = {
     rows,
     putCallsFor: (collection) => putCallsByCollection.get(collection) ?? 0,
     columnsUsedFor: (collection) =>
       columnsByCollection.get(collection) ?? new Set(),
+    getHashesByKeysCallsFor: (collection) =>
+      getHashesByKeysCallsByCollection.get(collection) ?? 0,
+    getHashCallsFor: (collection) =>
+      getHashCallsByCollection.get(collection) ?? 0,
     async get(collection, userId, extraKeys) {
       recordColumns(collection, extraKeys);
       return rows.get(rowKey(collection, userId, extraKeys)) ?? null;
@@ -143,9 +157,27 @@ function memoryAdapter(): StorageAdapter & {
     },
     async getHash(collection, userId, extraKeys) {
       recordColumns(collection, extraKeys);
+      getHashCallsByCollection.set(
+        collection,
+        (getHashCallsByCollection.get(collection) ?? 0) + 1,
+      );
       return (
         rows.get(rowKey(collection, userId, extraKeys))?.contentHash ?? null
       );
+    },
+    async getHashesByKeys(collection, userId, keyColumn, keys) {
+      getHashesByKeysCallsByCollection.set(
+        collection,
+        (getHashesByKeysCallsByCollection.get(collection) ?? 0) + 1,
+      );
+      const result: Record<string, string | null> = {};
+      for (const key of keys) {
+        result[key] =
+          rows.get(
+            rowKey(collection, userId, [{ column: keyColumn, value: key }]),
+          )?.contentHash ?? null;
+      }
+      return result;
     },
   };
   return adapter;
@@ -178,11 +210,11 @@ function memoryCache(): CacheAdapter {
 /** Same polling pattern as `aadLazyUpgrade.test.ts`'s `waitFor` — this module's
  * recomputes are fire-and-forget background work, not awaited by the triggering call. */
 async function waitFor(
-  predicate: () => boolean,
+  predicate: () => boolean | Promise<boolean>,
   timeoutMs = 2000,
 ): Promise<void> {
   const start = Date.now();
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() - start > timeoutMs) {
       throw new Error(
         "waitFor: timed out waiting for the background recompute",
@@ -1669,4 +1701,301 @@ test("invalidateChannel: an unused channel name is a safe no-op", async () => {
   assert.doesNotThrow(() =>
     invalidateChannel("nobody-subscribes-to-this-channel"),
   );
+});
+
+// ─── Cold-session freshness verification — hash check against the real server ──
+//
+// `isFresh()` normally trusts the persisted envelope blindly for any source never
+// OBSERVED live in this session (`currentSourceFingerprints.get(name) === undefined`
+// -> "no signal, assume unchanged"). That's correct for a source that genuinely
+// hasn't changed, but wrong if it changed via a path this session's live
+// subscriptions never saw — e.g. a previous session's write succeeded but its
+// OWN recompute was interrupted (tab closed) before persisting, or another
+// device/tab wrote it. A brand-new `.get()` (first call for a fresh instance/
+// identity) now verifies any never-observed source against the REAL current hash
+// before trusting the envelope, instead of trusting it unconditionally.
+
+test("cold get(): a perUser Store source changed via a path never observed live is detected via a real hash check and forces a recompute", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+
+  // "Session A": establishes the aggregate, persisted with value 1.
+  {
+    const cacheA = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheA,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const source = makeSource("cold_perUser_source");
+    await source.set({ value: 1 });
+    const aggA = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_perUser_agg", key: "__agg__" },
+      debounceMs: 20,
+      sources: { src: source },
+      compute: ({ sources }) => ({ total: sources.src.value }),
+    });
+    await aggA.get();
+    await waitFor(() => adapter.putCallsFor("cold_perUser_agg") === 1);
+    assert.deepEqual((await aggA.get()).data, { total: 1 });
+  }
+
+  // The source changes via a DIFFERENT session (own cache) — session A's cache
+  // (and any future fresh instance's empty cache) never observes this write live.
+  {
+    const cacheB = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheB,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const source = makeSource("cold_perUser_source");
+    await source.set({ value: 2 });
+  }
+
+  // "Session C": brand-new cache + brand-new aggregation instance — must
+  // self-heal via the cold hash check, not serve session A's stale total:1.
+  {
+    const cacheC = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheC,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const source = makeSource("cold_perUser_source");
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_perUser_agg", key: "__agg__" },
+      debounceMs: 20,
+      sources: { src: source },
+      compute: ({ sources }) => ({ total: sources.src.value }),
+    });
+    await waitFor(async () => (await aggC.get()).data?.total === 2, 3000);
+  }
+});
+
+test("cold get(): nothing changed since the persisted envelope -> no unnecessary recompute, just the verification read", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+
+  {
+    const cacheA = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheA,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const source = makeSource("cold_nochange_source");
+    await source.set({ value: 5 });
+    const aggA = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_nochange_agg", key: "__agg__" },
+      debounceMs: 20,
+      sources: { src: source },
+      compute: ({ sources }) => ({ total: sources.src.value }),
+    });
+    await aggA.get();
+    await waitFor(() => adapter.putCallsFor("cold_nochange_agg") === 1);
+  }
+
+  // "Session B": fresh instance, but NOTHING changed since session A persisted.
+  {
+    const cacheB = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheB,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const source = makeSource("cold_nochange_source");
+    const aggB = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_nochange_agg", key: "__agg__" },
+      debounceMs: 20,
+      sources: { src: source },
+      compute: ({ sources }) => ({ total: sources.src.value }),
+    });
+    const state = await aggB.get();
+    assert.deepEqual(state.data, { total: 5 });
+    await settle(50);
+    assert.equal(
+      adapter.putCallsFor("cold_nochange_agg"),
+      1,
+      "the cold verification confirmed the source is unchanged — no second, " +
+        "unnecessary recompute/persist should happen",
+    );
+  }
+});
+
+test("cold get(): several KeyedSourceRef sources sharing ONE physical table are verified with ONE batched getHashesByKeys call, not one per source", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+
+  function makeKeyedSource(name: string) {
+    return defineStore({
+      name,
+      identity: { perKey: "k" as const },
+      encrypt: "all",
+      schema: SourceSchema,
+      version: 1,
+      contentHash: true,
+      schemaFingerprint: fingerprintSchema(SourceSchema, "all"),
+    });
+  }
+
+  {
+    const cacheA = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheA,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const keyedStore = makeKeyedSource("cold_keyed_shared_table");
+    await keyedStore.set("k1", { value: 1 });
+    await keyedStore.set("k2", { value: 10 });
+    const aggA = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_keyed_agg", key: "__agg__" },
+      debounceMs: 20,
+      sources: {
+        a: keyedSource(keyedStore, "k1"),
+        b: keyedSource(keyedStore, "k2"),
+      },
+      compute: ({ sources }) => ({ total: sources.a.value + sources.b.value }),
+    });
+    await aggA.get();
+    await waitFor(() => adapter.putCallsFor("cold_keyed_agg") === 1);
+    assert.deepEqual((await aggA.get()).data, { total: 11 });
+  }
+
+  // Session B changes k2 via a path session C will never observe live.
+  {
+    const cacheB = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheB,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const keyedStore = makeKeyedSource("cold_keyed_shared_table");
+    await keyedStore.set("k2", { value: 20 });
+  }
+
+  // Session C: fresh instance, both `a` and `b` share ONE physical table
+  // (cold_keyed_shared_table) -> ONE getHashesByKeys call verifies both.
+  {
+    const cacheC = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheC,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const keyedStore = makeKeyedSource("cold_keyed_shared_table");
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_keyed_agg", key: "__agg__" },
+      debounceMs: 20,
+      sources: {
+        a: keyedSource(keyedStore, "k1"),
+        b: keyedSource(keyedStore, "k2"),
+      },
+      compute: ({ sources }) => ({ total: sources.a.value + sources.b.value }),
+    });
+    await waitFor(async () => (await aggC.get()).data?.total === 21, 3000);
+    assert.equal(
+      adapter.getHashesByKeysCallsFor("cold_keyed_shared_table"),
+      1,
+      "two KeyedSourceRef sources sharing one physical table must cost ONE " +
+        "batched getHashesByKeys call, not one getHash call per source",
+    );
+  }
+});
+
+test("cold get(): an Aggregation-as-source that changed upstream (never observed live) is detected via its own fingerprint", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+
+  function buildUpstreamAndDownstream() {
+    const upSource = makeSource("cold_agg_source_upstream_src");
+    const upstream = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_agg_source_upstream", key: "__agg__" },
+      debounceMs: 20,
+      sources: { src: upSource },
+      compute: ({ sources }) => ({ total: sources.src.value }),
+    });
+    const downstream = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "cold_agg_source_downstream", key: "__agg__" },
+      debounceMs: 20,
+      sources: { up: upstream },
+      compute: ({ sources }) => ({ total: sources.up.total * 10 }),
+    });
+    return { upSource, upstream, downstream };
+  }
+
+  {
+    const cacheA = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheA,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const { upSource, upstream, downstream } = buildUpstreamAndDownstream();
+    await upSource.set({ value: 1 });
+    await upstream.get();
+    await waitFor(() => adapter.putCallsFor("cold_agg_source_upstream") === 1);
+    await downstream.get();
+    await waitFor(
+      () => adapter.putCallsFor("cold_agg_source_downstream") === 1,
+    );
+    assert.deepEqual((await downstream.get()).data, { total: 10 });
+  }
+
+  // Session B changes the upstream's OWN source and recomputes upstream, via a
+  // path session C's downstream instance never observes live.
+  {
+    const cacheB = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheB,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const { upSource, upstream } = buildUpstreamAndDownstream();
+    await upSource.set({ value: 2 });
+    await upstream.get();
+    await waitFor(() => adapter.putCallsFor("cold_agg_source_upstream") === 2);
+  }
+
+  // Session C: fresh downstream instance must detect the upstream's persisted
+  // fingerprint changed and recompute, even though downstream's OWN cache never
+  // saw any write on the upstream's table.
+  {
+    const cacheC = memoryCache();
+    configureSecureStore({
+      storage: adapter,
+      cache: cacheC,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+    const { downstream } = buildUpstreamAndDownstream();
+    await waitFor(
+      async () => (await downstream.get()).data?.total === 20,
+      3000,
+    );
+  }
 });

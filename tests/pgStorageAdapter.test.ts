@@ -189,6 +189,52 @@ test("pgStorageAdapter.insertMany: empty array is a no-op (no query issued)", as
   assert.equal(calls.length, 0);
 });
 
+test("pgStorageAdapter.getHashesByKeys: quotes the key column, binds userId + key array via = ANY($2)", async () => {
+  const { client, calls } = fakeClient([
+    { year_month: "__dashboard__", content_hash: "hash-a" },
+    { year_month: "__net_worth_series__", content_hash: "hash-b" },
+  ]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const result = await adapter.getHashesByKeys!(
+    "account_snapshot_blobs",
+    "u1",
+    "year_month",
+    ["__dashboard__", "__net_worth_series__", "__portfolio_series__"],
+  );
+
+  assert.match(
+    calls[0].text,
+    /SELECT "year_month", content_hash FROM "account_snapshot_blobs" WHERE user_id = \$1 AND "year_month" = ANY\(\$2\)/,
+  );
+  assert.deepEqual(calls[0].params, [
+    "u1",
+    ["__dashboard__", "__net_worth_series__", "__portfolio_series__"],
+  ]);
+  // Every requested key gets an entry — "__portfolio_series__" wasn't in the
+  // fake result set, so it must come back null, never omitted.
+  assert.deepEqual(result, {
+    __dashboard__: "hash-a",
+    __net_worth_series__: "hash-b",
+    __portfolio_series__: null,
+  });
+});
+
+test("pgStorageAdapter.getHashesByKeys: empty keys array is a no-op (no query issued)", async () => {
+  const { client, calls } = fakeClient([]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const result = await adapter.getHashesByKeys!(
+    "account_snapshot_blobs",
+    "u1",
+    "year_month",
+    [],
+  );
+
+  assert.deepEqual(result, {});
+  assert.equal(calls.length, 0);
+});
+
 test("pgStorageAdapter.listByKeyRange: quotes the key column, binds from/to, orders by key", async () => {
   const { client, calls } = fakeClient([
     { year_month: "2026-06", schema_version: 1, blob: "enc:a" },

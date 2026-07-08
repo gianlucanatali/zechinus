@@ -129,6 +129,22 @@ export interface StorageAdapter {
     extraKeys: KeyColumn[],
   ): Promise<string | null>;
   /**
+   * perKey batch hash-only read: `content_hash` for SEVERAL keys of the same perKey
+   * store in ONE round trip — used by `defineAggregation`'s cold-session freshness
+   * check (`datacloak/core/aggregation.ts`) to verify several never-observed-this-
+   * session `KeyedSourceRef` sources sharing one physical table without one `getHash`
+   * call per source. Returns an entry for EVERY requested key (`null` for a missing
+   * row or a row with no real hash) — never omits a key from the result. Optional:
+   * an adapter that doesn't implement it makes `defineAggregation` fall back to one
+   * `getHash` call per key (same correctness, more round trips).
+   */
+  getHashesByKeys?(
+    collection: string,
+    userId: string,
+    keyColumn: string,
+    keys: string[],
+  ): Promise<Record<string, string | null>>;
+  /**
    * perKey range query: all rows for the user whose key falls in `[from, to]`
    * (lexicographic comparison — works for sortable keys like `year_month`). Optional:
    * a perKey store can still `load`/`save` a single key without this; only

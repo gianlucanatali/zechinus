@@ -590,14 +590,18 @@ export function defineAggregation<
 
   /** Freshness check using ONLY already-known fingerprints (no source fetch — the
    * mechanism a future binding needs for "fresh, no recompute necessary", see the
-   * plan/brief; the OBSERVABLE behavior this enables is Task 4's scenario 3/4). */
+   * plan/brief; the OBSERVABLE behavior this enables is Task 4's scenario 3/4).
+   * `current === undefined` ("never observed this session") is treated as "no
+   * signal, assume unchanged" — safe ONLY because `.get()` calls
+   * `verifyUnobservedSourcesAgainstServer` first on a cold session, which
+   * populates a REAL value (hash or `null`) for every such source before this
+   * function ever runs; by the time `isFresh` executes, `undefined` should
+   * remain only for a source whose adapter can't support any hash-only check at
+   * all (extremely unlikely — every shipped adapter does). */
   function isFresh(envelope: PersistedEnvelope<T>): boolean {
     if (envelope.v !== def.version) return false;
     for (const sourceName of Object.keys(def.sources)) {
       const current = currentSourceFingerprints.get(sourceName);
-      // Never observed this session: no signal either way. A REAL change would have
-      // gone through an ambient write, which fires the subscription above — so "never
-      // observed" here means "unchanged since the last persisted compute", not "unknown".
       if (current === undefined) continue;
       if (current !== (envelope.sourceFingerprints[sourceName] ?? null)) {
         return false;
@@ -611,6 +615,118 @@ export function defineAggregation<
       }
     }
     return true;
+  }
+
+  /**
+   * Cold-session freshness verification: for every source `ensureSubscribed` has
+   * NOT yet observed live this session (`currentSourceFingerprints.get(name) ===
+   * undefined`), actively fetch its CURRENT hash from the real server — instead of
+   * `isFresh()` blindly trusting the persisted envelope, which would otherwise miss
+   * a change that happened via a path this session's cache subscriptions never saw
+   * (a previous session's recompute interrupted after a source write landed but
+   * before persisting, or another device/tab writing while this one was closed).
+   * Called once per genuinely fresh identity subscription from `.get()`, right
+   * before the very first `isFresh()` check — a no-op (zero network calls) once
+   * every source has a real tracked value, which every source will after this
+   * runs once, converging to a fast path for the rest of the session exactly like
+   * before this existed.
+   *
+   * `KeyedSourceRef` sources are grouped by their underlying store and verified
+   * with ONE batched `getHashesForKeys` call per store (see `StorageAdapter.
+   * getHashesByKeys`'s doc comment) — several sources sharing one physical table
+   * (`dashboardAgg`'s real shape: `snapshots`/`portfolioSeries`-as-source's own
+   * row/`netWorthSeries`-as-source's own row/`currentPortfolioMetrics`-as-
+   * source's own row all live in `account_snapshot_blobs`) cost ONE round trip,
+   * not one per source. `Store` (perUser) sources have no batching to do (one row
+   * per user already) — `loadWithHash` doubles as the hash check. `Aggregation`
+   * sources delegate to the upstream's own `.get()` (which runs its OWN cold
+   * check recursively if it's also cold) and compare via `aggregationSourceFingerprint`,
+   * the exact same fingerprint `computeAndPersist`'s own `isAggregationSource`
+   * branch already persists — no new fingerprint convention introduced.
+   */
+  async function verifyUnobservedSourcesAgainstServer(
+    userId: string,
+    cryptoHandle: CryptoHandle,
+  ): Promise<void> {
+    const unobserved = Object.entries(
+      def.sources as Record<string, Source>,
+    ).filter(
+      ([sourceName]) => currentSourceFingerprints.get(sourceName) === undefined,
+    );
+    if (!unobserved.length) return;
+
+    const keyedGroups = new Map<
+      string,
+      {
+        store: KeyedStore<any>;
+        items: Array<{ sourceName: string; key: string }>;
+      }
+    >();
+    const checks: Array<Promise<void>> = [];
+
+    for (const [sourceName, source] of unobserved) {
+      if (isKeyedSourceRef(source)) {
+        const group = keyedGroups.get(source.store.name) ?? {
+          store: source.store,
+          items: [],
+        };
+        group.items.push({ sourceName, key: source.key });
+        keyedGroups.set(source.store.name, group);
+      } else if (isAggregationSource(source)) {
+        checks.push(
+          source.get().then((state) => {
+            currentSourceFingerprints.set(
+              sourceName,
+              state.data === null
+                ? null
+                : aggregationSourceFingerprint(state.data),
+            );
+          }),
+        );
+      } else {
+        // perUser Store — one row per user, nothing to batch; loadWithHash already
+        // IS the cheapest hash-carrying read this cardinality has.
+        const storeSource = source as Store<any>;
+        checks.push(
+          (storeSource.loadWithHash
+            ? storeSource.loadWithHash(userId, cryptoHandle)
+            : storeSource
+                .load(userId, cryptoHandle)
+                .then((data) => ({ data, hash: null }))
+          ).then(({ hash }) => {
+            currentSourceFingerprints.set(sourceName, hash);
+          }),
+        );
+      }
+    }
+
+    for (const group of keyedGroups.values()) {
+      checks.push(
+        (async () => {
+          const keys = group.items.map((i) => i.key);
+          if (!group.store.getHashesForKeys) {
+            // Adapter (or a store without contentHash) can't batch — fall back to
+            // one loadWithHash per key, same correctness, more round trips.
+            await Promise.all(
+              group.items.map(async ({ sourceName, key }) => {
+                const hash = group.store.loadWithHash
+                  ? (await group.store.loadWithHash(userId, cryptoHandle, key))
+                      .hash
+                  : null;
+                currentSourceFingerprints.set(sourceName, hash);
+              }),
+            );
+            return;
+          }
+          const hashes = await group.store.getHashesForKeys(userId, keys);
+          for (const { sourceName, key } of group.items) {
+            currentSourceFingerprints.set(sourceName, hashes[key] ?? null);
+          }
+        })(),
+      );
+    }
+
+    await Promise.all(checks);
   }
 
   /** Pure, synchronous — never touches storage. The exact snapshot `notifyReactState`
@@ -1003,6 +1119,14 @@ export function defineAggregation<
         notifyReactState();
         return { data: null, computing: true, stale: true, error: lastError };
       }
+
+      await verifyUnobservedSourcesAgainstServer(userId, cryptoHandle).catch(
+        (e) =>
+          logBackgroundFailure(
+            "cold-session server verification failed — falling back to the existing live-observation trust",
+            e,
+          ),
+      );
 
       const fresh = isFresh(envelope);
       if (!fresh && !inFlight) {

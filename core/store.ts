@@ -242,6 +242,17 @@ export interface KeyedStore<T> {
     key: string,
   ): Promise<{ data: T; hash: string | null }>;
   /**
+   * Present only when the store declares `contentHash: true` AND the configured
+   * adapter supports `getHashesByKeys` — batch hash-only read for SEVERAL keys in
+   * one round trip (see `StorageAdapter.getHashesByKeys`'s doc comment). Used by
+   * `defineAggregation`'s cold-session freshness check; not a general-purpose app
+   * API (an app wanting a single key's hash already has `loadWithHash`).
+   */
+  getHashesForKeys?(
+    userId: string,
+    keys: string[],
+  ): Promise<Record<string, string | null>>;
+  /**
    * Present only when the store declares `optimisticLock: true`. See `StoreDef.optimisticLock`.
    * On success, `hash` is the new content_hash — pass it straight into the next
    * `saveIfMatch` call, no extra fetch needed. `null` on conflict (`ok:false`).
@@ -743,6 +754,15 @@ function buildKeyedStore<S extends z.ZodType>(
 
   if (def.contentHash) {
     keyed.loadWithHash = keyedLoadInternal;
+    keyed.getHashesForKeys = async (userId, keys) => {
+      const { storage } = getSecureStoreConfig();
+      if (!storage.getHashesByKeys) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support batch hash reads (getHashesByKeys missing).`,
+        );
+      }
+      return storage.getHashesByKeys(def.name, userId, keyColumn, keys);
+    };
   }
 
   if (def.optimisticLock) {

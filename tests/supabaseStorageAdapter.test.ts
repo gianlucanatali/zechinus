@@ -18,6 +18,7 @@ type Row = Record<string, unknown>;
 /** Minimal fake mirroring the chain shape supabaseStorageAdapter actually calls. */
 function fakeSupabase(rows: Row[] | Row | null) {
   const calls: Array<{ collection: string; columns: string }> = [];
+  const inCalls: Array<{ column: string; values: unknown[] }> = [];
   const builder = {
     _collection: "",
     _columns: "",
@@ -33,6 +34,10 @@ function fakeSupabase(rows: Row[] | Row | null) {
       return this;
     },
     lte() {
+      return this;
+    },
+    in(column: string, values: unknown[]) {
+      inCalls.push({ column, values });
       return this;
     },
     order() {
@@ -51,7 +56,7 @@ function fakeSupabase(rows: Row[] | Row | null) {
       return builder;
     },
   };
-  return { client, calls };
+  return { client, calls, inCalls };
 }
 
 test("supabaseStorageAdapter.get: selects content_hash and maps it", async () => {
@@ -125,6 +130,49 @@ test("supabaseStorageAdapter.listByKeyRange: selects content_hash and maps it pe
       record: { schemaVersion: 1, blob: "enc:b", contentHash: "hb" },
     },
   ]);
+});
+
+test("supabaseStorageAdapter.getHashesByKeys: selects content_hash for the given key column with .in(), maps every requested key", async () => {
+  const { client, calls, inCalls } = fakeSupabase([
+    { year_month: "__dashboard__", content_hash: "hash-a" },
+    { year_month: "__net_worth_series__", content_hash: "hash-b" },
+  ]);
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  const result = await adapter.getHashesByKeys!(
+    "account_snapshot_blobs",
+    "u1",
+    "year_month",
+    ["__dashboard__", "__net_worth_series__", "__portfolio_series__"],
+  );
+
+  assert.match(calls[0].columns, /year_month, content_hash/);
+  assert.deepEqual(inCalls[0], {
+    column: "year_month",
+    values: ["__dashboard__", "__net_worth_series__", "__portfolio_series__"],
+  });
+  // Every requested key gets an entry — "__portfolio_series__" wasn't in the
+  // fake result set, so it must come back null, never omitted.
+  assert.deepEqual(result, {
+    __dashboard__: "hash-a",
+    __net_worth_series__: "hash-b",
+    __portfolio_series__: null,
+  });
+});
+
+test("supabaseStorageAdapter.getHashesByKeys: empty keys array is a no-op (no client call)", async () => {
+  const { client, calls } = fakeSupabase([]);
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  const result = await adapter.getHashesByKeys!(
+    "account_snapshot_blobs",
+    "u1",
+    "year_month",
+    [],
+  );
+
+  assert.deepEqual(result, {});
+  assert.equal(calls.length, 0);
 });
 
 test("supabaseStorageAdapter.list: selects content_hash and maps it alongside plain columns", async () => {
