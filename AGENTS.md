@@ -282,6 +282,28 @@ If a new access pattern needs a capability the adapter doesn't have:
    4+ cases (roundtrip, AAD-per-row not movable across rows/keys/ids,
    adapter-missing-capability → explicit error, Zod validation rejects bad writes).
 
+## `tanstackAdapter` requires `gcTime: Infinity` — enforced, not just documented
+
+`tanstackAdapter` (`adapters/tanstackAdapter.ts`) writes via `setQueryData`/`getQueryData`
+and never mounts a real `useQuery` observer — every entry it creates has zero observers
+for its whole life. TanStack schedules that entry's garbage collection unconditionally at
+creation time (a separate axis from `staleTime`) and evicts it once `gcTime` elapses, no
+matter how many times it was refreshed in between. With the default 5-minute `gcTime`,
+cached decrypted data silently disappears from every DataCloak-backed hook after that long
+of the consuming app sitting idle — no error, since `CacheAdapter` has no "refetch" concept
+for a caller to notice or recover from. This is a real bug that shipped once (the host app's
+Dashboard going blank after ~5 minutes idle, filling again only on remount).
+
+Following the same idiom as the encryption guardrail above (`defineStore` throwing on a
+missing `encrypt` declaration): **`tanstackAdapter` throws immediately at construction**
+if `queryClient.getDefaultOptions().queries?.gcTime !== Infinity`. Documentation alone
+(a README note nobody reads before it bites them 5 minutes into a real session) was
+judged insufficient — the fix must fail loud at wiring time (app boot / `configureSecureStore`
+call), not silently at 3am in a real user's idle tab. If you extend or replace this
+adapter, or write a new `CacheAdapter` backed by anything with its own eviction/TTL
+concept, apply the same principle: assert the safe configuration at construction, don't
+just document it.
+
 ## Node scripts & multi-user concurrency — which `KeyProvider` to use
 
 `configureSecureStore`'s ambient identity is one module-level variable — correct for a

@@ -622,7 +622,7 @@ import { tanstackAdapter } from "datacloak/react";
 
 configureSecureStore({
   storage: supabaseStorageAdapter(getSupabaseClient),
-  cache: tanstackAdapter(queryClient),     // reference CacheAdapter, real TanStack Query
+  cache: tanstackAdapter(queryClient),     // requires queryClient's defaultOptions.queries.gcTime: Infinity — see below
   keys: {                                  // KeyProvider: plain subscribable snapshot,
     getCryptoHandle: () => /* your app's current key handle | null — only needs to satisfy CryptoHandle: { pid, encryptJson, decryptJson } */,
     getUserId: () => /* your app's current userId | null */,
@@ -639,6 +639,19 @@ invisible component that calls your context's hooks and forwards their values in
 module-level `KeyProvider` — see the host app's own
 `src/lib/datacloakKeyProvider.ts` + `src/components/DataCloakKeyBridge.tsx` for a
 concrete, working reference (bridges `PasskeyContext`/`UserContext`).
+
+**`tanstackAdapter`'s `queryClient` must set `defaultOptions.queries.gcTime: Infinity`
+— the adapter throws immediately at construction if it doesn't.** This adapter writes
+via `setQueryData`/`getQueryData` and never mounts a real `useQuery` observer, so every
+entry it creates has zero observers for its whole life; TanStack schedules that entry's
+garbage collection unconditionally at creation time (a separate axis from `staleTime`)
+and evicts it once `gcTime` elapses, no matter how many times it was refreshed in
+between. With the default 5-minute `gcTime`, cached decrypted data would silently
+disappear from every DataCloak-backed hook after that long of the app sitting idle —
+with no error, since the `CacheAdapter` contract has no "refetch" concept for a caller to
+notice or recover from. `staleTime: Infinity` alone does **not** cover this — it only
+stops automatic refetch, not garbage collection. Bounded lifetime still comes from your
+app calling `queryClient.clear()` on logout/lock, same as today.
 
 **Ambient writes (`store.set()`/`store.mutate()`, called directly from a service —
 not through a hook's `save()`) are cache-aware too:** after a successful persist,
