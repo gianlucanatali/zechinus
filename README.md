@@ -828,6 +828,25 @@ computed once. A change in `portfolioSeriesAgg` still propagates: its own finger
 it, marking them stale through the exact same `ensureSubscribed`/`isFresh` machinery a
 `Store` source already uses — no special-casing needed for the aggregate-as-source case.
 
+**Gotcha: a cold aggregate-as-source throws, then self-heals — it never blocks or waits.**
+An aggregation never waits on another aggregation's very first compute — if the upstream
+source (e.g. `portfolioSeriesAgg` above) has never itself persisted a value in this
+session, `computeAndPersist` throws immediately (`"source aggregation ... has no
+persisted value yet"`). Reading that source (`source.get()`) is what kicks off the
+upstream's OWN background compute as a side effect, though — so once it finishes and
+publishes, the downstream aggregation (already `ensureSubscribed` to it like any other
+source) reacts exactly like it would to any other source write, and recomputes
+successfully. In practice this means: the FIRST page load of a session that reads a
+multi-level aggregation DAG (e.g. a dashboard sourcing three other lazy aggregates) can
+throw once and settle a moment later — usually well under a second, but a UI that only
+destructures `data` from `useAggregation` and ignores `computing`/`error` will show its
+"nothing here yet" empty state during that window even when real data exists and just
+hasn't finished computing. See "Cross-aggregation activity signal" below for how a test
+(E2E or otherwise) waits this out deterministically instead of guessing with a fixed
+timeout, and make sure any UI reading such an aggregation treats `data === null` as
+"unknown yet", not "confirmed empty" (`src/pages/Dashboard.tsx`'s `isCompletelyEmpty`
+is the reference fix for this exact gotcha).
+
 ### Declarative operator kit — `datacloak/aggregate`
 
 A second, declarative form for `compute`, alongside the plain-function form used by every
@@ -913,6 +932,44 @@ data, and the caller — not the TTL clock — knows it's time to see it now. A 
 showing stale prices right after an explicit "refresh". One-shot: only that ONE recompute's
 external fetches are forced; the refreshed value re-enters the normal TTL-gated cache
 afterward.
+
+### Cross-aggregation activity signal — `isAnyAggregationComputing()`
+
+`useAggregation(agg).computing` tells you whether ONE specific aggregation is mid-recompute
+— useful when a component already knows which aggregation it cares about. Sometimes a
+caller doesn't: an E2E test that just wrote data (created an account, imported a
+transaction, added an investment) doesn't know — and shouldn't need to know — which
+aggregation(s) that write marks stale, only that it should wait for ALL of them to settle
+before asserting on the resulting UI (see the "cold aggregate-as-source throws, then
+self-heals" gotcha above — a fixed `sleep()` before asserting is exactly the wrong tool
+here, since it's either too short, racing a real recompute, or an arbitrary guess that's
+too long).
+
+`isAnyAggregationComputing()` (plus `subscribeGlobalAggregationActivity(cb)` to react to
+changes) is a single counter, incremented while ANY aggregation defined anywhere in the
+process has a compute in flight and decremented when it settles — not per-aggregation-name,
+so a caller never needs to enumerate which aggregations exist:
+
+```ts
+import {
+  isAnyAggregationComputing,
+  subscribeGlobalAggregationActivity,
+} from "datacloak";
+import { useIsAnyAggregationComputing } from "datacloak/react";
+
+// React: reactive boolean, same useSyncExternalStore pattern as useIsUnlocked.
+const computing = useIsAnyAggregationComputing();
+```
+
+The intended shape for a host app: render the React binding once, in a hidden DOM node
+somewhere always-mounted (the host app's `src/components/AggregationActivityIndicator.tsx`
+— `data-testid="aggregations-status"` + `data-computing="true"|"false"`), then have an E2E
+helper poll that attribute (the host app's `tests/e2e/_helpers.ts`,
+`waitForAggregationsIdle(page)`) after any write that could trigger a recompute, before
+asserting on the downstream effect. Deliberately NOT a per-aggregation registry: a caller
+that already knows which aggregation to wait on already has `useAggregation(agg).computing`
+directly — this primitive is for the "I don't know or care which ones, just tell me when
+it's quiet" case only.
 
 ### `invalidateOn` / `invalidateChannel` — externals sourced from non-Store data
 

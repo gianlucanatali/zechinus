@@ -313,6 +313,29 @@ headings), this is just "when do I reach for which":
   session" gap (a reload self-heals) — it does NOT make an already-open idle tab pick up
   another tab/device's write without a fresh `.get()` call (no server push/polling; the
   `CacheAdapter` is in-memory, per tab/process).
+- **`isAnyAggregationComputing()` / `subscribeGlobalAggregationActivity(cb)`** — a single
+  cross-aggregation "is anything computing right now" counter, for a caller that doesn't
+  know or care WHICH aggregation(s) a write affects (typically an E2E test, or a host app's
+  hidden DOM indicator that test waits on — see README's own section for the exact wiring).
+  Do not reach for this when the caller already knows the specific aggregation — that's
+  `useAggregation(agg).computing` directly.
+
+**⚠️ Aggregate-as-source cold start throws once, then self-heals — this is expected, not a
+bug to "fix" with a retry loop.** A downstream aggregation reading an upstream one that has
+never itself computed in this session gets `data === null` and the downstream's compute
+throws (`computeAndPersist`, `core/aggregation.ts`) — it never waits on another
+aggregation's first compute. Reading the source is what kicks off ITS OWN background
+compute as a side effect, though; once that persists, the downstream (already subscribed to
+it like any other source) reacts and recomputes successfully, usually well under a second.
+**Consequence for any UI reading such an aggregation:** treat `data === null` as "not known
+yet", never as "confirmed empty" — a component that derives an empty/onboarding state from
+zero-valued fields without checking `data !== null` first will flash that empty state on
+every cold session, even when real data exists (`src/pages/Dashboard.tsx`'s
+`isCompletelyEmpty` in the the host app app is the reference fix). **Consequence for tests
+(E2E, tutorial recordings, anything driving a real browser):** after a write that could
+mark an aggregation stale, wait for `isAnyAggregationComputing()` to go false (or the app's
+hidden DOM indicator built on it) before asserting/screenshotting — never a fixed `sleep()`,
+which is either too short (races the recompute) or an arbitrary guess.
 
 ## `tanstackAdapter` requires `gcTime: Infinity` — enforced, not just documented
 
