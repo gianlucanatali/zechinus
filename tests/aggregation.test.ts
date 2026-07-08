@@ -29,6 +29,9 @@ import {
   invalidateChannel,
   keyedSource,
   fingerprintSchema,
+  isAnyAggregationComputing,
+  subscribeGlobalAggregationActivity,
+  __resetGlobalAggregationActivity,
   type StorageAdapter,
   type CacheAdapter,
   type BlobRecord,
@@ -242,7 +245,10 @@ function makeSource(name: string) {
   });
 }
 
-test.beforeEach(() => __resetSecureStoreConfig());
+test.beforeEach(() => {
+  __resetSecureStoreConfig();
+  __resetGlobalAggregationActivity();
+});
 
 test("scenario 1: never persisted -> first get() is {data:null, computing:true}, background compute settles and swaps in atomically", async () => {
   const adapter = memoryAdapter();
@@ -410,6 +416,140 @@ test("single-flight: a debounce firing while a recompute is already running does
     state.data,
     { total: 2 },
     "the queued re-run must reflect the latest source value",
+  );
+});
+
+test("isAnyAggregationComputing: true while ANY aggregation has a compute in flight, across independent aggregations, false only once ALL have settled", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  assert.equal(
+    isAnyAggregationComputing(),
+    false,
+    "nothing computing before any aggregation is even read",
+  );
+
+  const source1 = makeSource("gac_source1");
+  const source2 = makeSource("gac_source2");
+  await source1.set({ value: 1 });
+  await source2.set({ value: 2 });
+
+  let releaseA: () => void = () => {};
+  const gateA = new Promise<void>((resolve) => {
+    releaseA = resolve;
+  });
+  const aggA = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "gac_agg_a", key: "__agg__" },
+    sources: { src: source1 },
+    compute: async ({ sources }) => {
+      await gateA;
+      return { total: sources.src.value };
+    },
+  });
+
+  let releaseB: () => void = () => {};
+  const gateB = new Promise<void>((resolve) => {
+    releaseB = resolve;
+  });
+  const aggB = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "gac_agg_b", key: "__agg__" },
+    sources: { src: source2 },
+    compute: async ({ sources }) => {
+      await gateB;
+      return { total: sources.src.value };
+    },
+  });
+
+  void aggA.get();
+  await waitFor(() => isAnyAggregationComputing());
+  assert.equal(isAnyAggregationComputing(), true, "A's compute is in flight");
+
+  void aggB.get();
+  await settle(10);
+  assert.equal(
+    isAnyAggregationComputing(),
+    true,
+    "still true while B starts — A hasn't finished yet",
+  );
+
+  releaseA();
+  await waitFor(async () => (await aggA.get()).computing === false);
+  assert.equal(
+    isAnyAggregationComputing(),
+    true,
+    "A finished but B is still in flight — must stay true",
+  );
+
+  releaseB();
+  await waitFor(async () => (await aggB.get()).computing === false);
+  assert.equal(
+    isAnyAggregationComputing(),
+    false,
+    "both settled — must go back to false",
+  );
+});
+
+test("subscribeGlobalAggregationActivity: notifies on every transition, unsubscribes cleanly", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("gac_sub_source");
+  await source.set({ value: 5 });
+
+  let releaseCompute: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    releaseCompute = resolve;
+  });
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "gac_sub_agg", key: "__agg__" },
+    sources: { src: source },
+    compute: async ({ sources }) => {
+      await gate;
+      return { total: sources.src.value };
+    },
+  });
+
+  let notifications = 0;
+  const unsubscribe = subscribeGlobalAggregationActivity(() => {
+    notifications++;
+  });
+
+  void agg.get();
+  await waitFor(() => notifications >= 1);
+  assert.equal(isAnyAggregationComputing(), true);
+
+  releaseCompute();
+  await waitFor(() => notifications >= 2);
+  assert.equal(isAnyAggregationComputing(), false);
+
+  const countAfterUnsub = notifications;
+  unsubscribe();
+  await agg.refresh({ bypassExternalsTtl: true }).catch(() => {});
+  assert.equal(
+    notifications,
+    countAfterUnsub,
+    "no further notifications after unsubscribe — listener must be gone",
   );
 });
 

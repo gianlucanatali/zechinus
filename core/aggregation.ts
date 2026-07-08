@@ -109,6 +109,46 @@ export function invalidateChannel(channel: string): void {
 }
 
 /**
+ * Cross-aggregation "is anything computing right now" signal — a single global counter,
+ * incremented when ANY aggregation instance starts a `triggerRecompute()` and decremented
+ * when it settles (success or failure), never per-aggregation-name. A host app renders
+ * this once (e.g. a hidden DOM node reflecting `isAnyAggregationComputing()`) so an E2E
+ * test can wait for "everything settled" after a write, instead of guessing with a fixed
+ * timeout — without needing to enumerate every aggregation the app happens to define.
+ * Deliberately NOT per-aggregation: a caller wanting one specific aggregation's status
+ * already has it via `useAggregation(agg).computing`/`.stale`/`.error` — this is for the
+ * "I don't know or care which aggregations exist, just tell me when it's quiet" case.
+ */
+let globalInFlightCount = 0;
+const globalActivityListeners = new Set<() => void>();
+
+function notifyGlobalActivity(): void {
+  for (const cb of globalActivityListeners) cb();
+}
+
+/** True if at least one aggregation, anywhere in the app, currently has a compute in flight. */
+export function isAnyAggregationComputing(): boolean {
+  return globalInFlightCount > 0;
+}
+
+/** Subscribes to every transition of `isAnyAggregationComputing()`'s value. Returns an
+ * unsubscribe function. Mirrors the plain callback-set pattern `channelSubscribers` above
+ * already uses — no per-listener payload, callers re-read `isAnyAggregationComputing()`
+ * themselves on notification (same contract as every other `subscribe()` in this file). */
+export function subscribeGlobalAggregationActivity(cb: () => void): () => void {
+  globalActivityListeners.add(cb);
+  return () => globalActivityListeners.delete(cb);
+}
+
+/** Test-only reset — mirrors `__resetSecureStoreConfig`'s naming/purpose. Aggregations are
+ * permanent app-wide singletons with no dispose (see `channelSubscribers`' own doc comment),
+ * so nothing else ever clears this counter between test cases. */
+export function __resetGlobalAggregationActivity(): void {
+  globalInFlightCount = 0;
+  globalActivityListeners.clear();
+}
+
+/**
  * A `KeyedStore` (`perKey` cardinality) paired with ONE fixed key — the `perKey` analogue
  * of passing a `perUser` `Store` directly as a `sources` entry. Built ONLY via
  * `keyedSource()` below, never constructed by hand, so `isKeyedSourceRef` has exactly one
@@ -1012,6 +1052,8 @@ export function defineAggregation<
       rerunRequested = true;
       return inFlight;
     }
+    globalInFlightCount++;
+    notifyGlobalActivity();
     const run = computeAndPersist()
       .then((result) => {
         lastError = null;
@@ -1023,10 +1065,12 @@ export function defineAggregation<
       })
       .finally(() => {
         inFlight = null;
+        globalInFlightCount--;
         // Publish the settled state (success or failure) BEFORE possibly kicking off a
         // queued rerun below — a listener must see `computing: false` at least once
         // between two back-to-back recomputes, never a flag that stays stuck at `true`.
         notifyReactState();
+        notifyGlobalActivity();
         if (rerunRequested) {
           rerunRequested = false;
           // CT6 fix (real-graph single-pass gate): a rerun was requested because
