@@ -275,7 +275,25 @@ export function onSourceWrite(
    * to a user we've since switched away from" and refuse to let it write into
    * the CURRENT (different) user's retry/error bookkeeping — the keys it
    * carries are never retried against a different identity, and its success
-   * never clears a failure that may legitimately belong to the new user. */
+   * never clears a failure that may legitimately belong to the new user.
+   *
+   * EXACT scope of that guard — do not read it as more than this: `callUserId`
+   * prevents a stale settlement from polluting `onSourceWrite`'s OWN internal
+   * state (`lastError`, scheduling a retry) for the wrong identity. It does
+   * NOT — and structurally cannot — prevent the underlying DB write itself
+   * (`rebuildMonths` / `snapshotStore.mutate` in
+   * `src/services/snapshotService.ts`) from landing under the wrong identity
+   * if the switch happens in the window between when `handler({keys})` was
+   * dispatched and `handler`'s own internal `mutate()` call: `mutate()`
+   * resolves its OWN ambient identity fresh at ITS invocation, not pinned to
+   * whatever was ambient when `handler` started (`rebuildMonths` has exactly
+   * one `await` — `loadTransactionsRange` — before that `mutate()` call). If a
+   * genuine user switch lands inside that gap, `mutate()` will merge the
+   * stale identity's month deltas into the NEW identity's live snapshot row.
+   * That is a pre-existing architectural limitation of how `rebuildMonths`
+   * resolves ambient identity, out of scope for this module (which treats
+   * `rebuildMonths` as invariant, per this task's brief) — tracked as a
+   * follow-up for the branch's final review, not fixed here. */
   function runHandler(keys: string[]): Promise<void> {
     if (inFlight) {
       rerunKeys ??= new Set<string>();
@@ -399,6 +417,24 @@ export function onSourceWrite(
     unsubCache?.();
     unsubCache = null;
     if (isGenuineSwitch) {
+      if (pendingKeys.size) {
+        // Debounced-but-not-yet-dispatched months for the OLD identity — never
+        // silently dropped, see this function's doc comment ("None of this is
+        // a silent drop"). Logged BEFORE clearing so the discarded keys are
+        // captured.
+        logFailure(
+          `discarding pending (debounced, not yet dispatched) months ` +
+            `[${[...pendingKeys].join(", ")}] for identity "${subscribedUserId}" on ` +
+            `switch to "${userId}" — these writes were queued inside the debounce ` +
+            `window but never reached handler for that identity, and will NOT be ` +
+            `recomputed unless a future write on the new identity happens to touch ` +
+            `the same months`,
+          new Error(
+            `identity switched from "${subscribedUserId}" to "${userId}" before the ` +
+              `debounced write was dispatched`,
+          ),
+        );
+      }
       pendingKeys = new Set();
       if (debounceTimer) {
         clearTimeout(debounceTimer);
@@ -423,6 +459,23 @@ export function onSourceWrite(
       failedKeys = null;
       retryAttempt = 0;
       lastError = null;
+      if (rerunKeys && rerunKeys.size) {
+        // Months queued to rerun once the currently in-flight `handler` call
+        // settles — accumulated while that call was already running for the
+        // OLD identity. Also never a silent drop: logged for the same reason
+        // as `pendingKeys`/`failedKeys` above.
+        logFailure(
+          `discarding queued rerun months [${[...rerunKeys].join(", ")}] for ` +
+            `identity "${subscribedUserId}" on switch to "${userId}" — these were ` +
+            `queued to rerun after the in-flight handler call settles, but that ` +
+            `call (and these months) belonged to the OLD identity, and will NOT ` +
+            `be retried against the new one`,
+          new Error(
+            `identity switched from "${subscribedUserId}" to "${userId}" while a ` +
+              `rerun was queued`,
+          ),
+        );
+      }
       rerunKeys = null;
     }
     subscribedUserId = userId;

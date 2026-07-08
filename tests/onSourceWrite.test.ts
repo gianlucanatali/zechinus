@@ -742,6 +742,130 @@ test("onSourceWrite: a genuine identity switch cancels u1's pending scheduled re
   handle();
 });
 
+// ─── Boundary test — a handler ALREADY in flight when identity switches ──────
+// ─── (task-6-report finding: what `callUserId` protects vs. what it can't) ───
+//
+// The test above covers a SCHEDULED retry timer, which `ensureSubscribed`
+// reliably cancels via a synchronous `clearTimeout`. This test covers the one
+// case that survives a switch regardless — `runHandler`'s own doc comment
+// calls it out explicitly: a `handler` call already awaiting *inside*
+// `handler({keys})` when the identity switch happens. `callUserId` (in
+// `runHandler`) keeps `onSourceWrite`'s OWN bookkeeping (`lastError`, whether
+// a retry gets scheduled) scoped to the CORRECT identity even here — but it
+// cannot, and does not try to, stop `handler`'s own internal DB write
+// (`rebuildMonths` -> `snapshotStore.mutate` in the real app) from resolving
+// a FRESH ambient identity at its own call time and landing under the new
+// user. This test asserts BOTH halves explicitly, so the boundary is
+// documented, not implied.
+test("onSourceWrite: a handler already in flight through a genuine identity switch keeps u1's retry bookkeeping out of u2's state, but its own write still lands under u2 (documented architectural gap — NOT fixed here, see runHandler's doc comment)", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const keyProvider = switchableKeyProvider(cryptoHandle, "u1");
+  configureSecureStore({ storage: adapter, keys: keyProvider, cache });
+  const { txStore, snapshotStore } = makeStores();
+
+  const originalConsoleError = console.error;
+  const loggedErrors: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  let releaseFirst: (() => void) | null = null;
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let handlerStarted = false;
+
+  const handle = onSourceWrite(
+    txStore,
+    async ({ keys }) => {
+      handlerStarted = true;
+      // Dispatched while ambient identity was u1 — held "in flight" past the
+      // identity switch below, same shape as CT2's `firstGate`.
+      await firstGate;
+      // Toy analogue of `rebuildMonths`'s own internal
+      // `snapshotStore.mutate(...)` call (`rebuildMonths` has exactly one
+      // `await` — `loadTransactionsRange` — before its own `mutate()` call,
+      // matching the single `await firstGate` here). `mutate()` resolves its
+      // OWN ambient identity FRESH at THIS call, not pinned to whichever
+      // identity was ambient when `handler({keys})` was dispatched — so
+      // because the switch has already happened by the time `firstGate`
+      // releases, this write lands under u2 even though it is computing
+      // stale months dispatched for u1. NOT protected by anything in
+      // `onSourceWrite` — that is exactly what this test documents.
+      await snapshotStore.mutate(SNAP_KEY, (current) => {
+        const next = { months: { ...current.months } };
+        for (const k of keys) next.months[k] = 999; // distinctive marker
+        return next;
+      });
+      // Fails afterward with a genuine cross-writer conflict, exercising the
+      // catch-branch's `callUserId !== subscribedUserId` guard too
+      // (protected side: no retry gets scheduled against u2 for u1's months).
+      throw new OptimisticLockConflictError("toy_snapshot_blobs");
+    },
+    { debounceMs: 5, coalesce: true },
+  );
+
+  await txStore.mutate("2026-06", () => [{ id: "a", amount: 1 }]);
+  await waitFor(() => handlerStarted, 1000);
+
+  // A REAL, genuine identity switch happens WHILE the handler is already in
+  // flight (blocked on `firstGate`) — the one case `ensureSubscribed`'s
+  // synchronous `clearTimeout` cannot reach.
+  keyProvider.switchTo("u2");
+  releaseFirst!();
+
+  // Wait for the in-flight call to fully settle (its write, then its throw).
+  await waitFor(async () => {
+    const { data } = await snapshotStore.loadWithHash!(
+      "u2",
+      cryptoHandle,
+      SNAP_KEY,
+    );
+    return data.months["2026-06"] === 999;
+  }, 1000);
+
+  // ── PROTECTED: onSourceWrite's OWN bookkeeping stays clean for u2 ──
+  assert.equal(
+    handle.getLastError(),
+    null,
+    "the stale u1-dispatched failure must NOT be scheduled as a retry or " +
+      "surfaced as u2's lastError — callUserId guards ONLY this bookkeeping",
+  );
+  assert.ok(
+    loggedErrors.some(([msg]) =>
+      String(msg).includes("discarding failed months"),
+    ),
+    "the discard must still be logged loudly, never silently swallowed",
+  );
+
+  // ── NOT PROTECTED: the underlying DB write still happened under u2 ──
+  // This is the point of the test: the assertions above must NOT be read as
+  // "onSourceWrite prevents cross-user data corruption" — it does not, for a
+  // handler already in flight. `rebuildMonths`/`snapshotStore.mutate` resolve
+  // ambient identity fresh at their own call time, independent of anything
+  // `onSourceWrite` tracks. Pre-existing architectural limitation of
+  // `rebuildMonths`, out of scope for this module (which treats
+  // `rebuildMonths` as invariant per this task's brief) — flagged as a
+  // follow-up for the branch's final review, not fixed here.
+  const u2Snapshot = await snapshotStore.loadWithHash!(
+    "u2",
+    cryptoHandle,
+    SNAP_KEY,
+  );
+  assert.deepEqual(
+    u2Snapshot.data.months,
+    { "2026-06": 999 },
+    "the fictitious write from u1's stale in-flight call DOES land in u2's " +
+      "snapshot — onSourceWrite's cross-user guard does not, and cannot, " +
+      "prevent this; only the bookkeeping side above is protected",
+  );
+
+  console.error = originalConsoleError;
+  handle();
+});
+
 // ─── CT4 — byte parity: reaction-triggered vs. manual rebuild ─────────────────
 
 test("CT4: the snapshot blob after a reaction-triggered rebuild is byte-identical (same contentHash) to a manual rebuildMonths call", async () => {
