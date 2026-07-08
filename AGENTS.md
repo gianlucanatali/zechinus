@@ -57,8 +57,8 @@ consuming app** — not just inside this package — stop and classify it:
   it belongs **inside DataCloak itself** (`core/`), as a new capability with a TDD test in
   `tests/`. Do not build it as a one-off in the calling service.
 - **App-specific but still storage/crypto mechanics** (not domain logic) → it belongs as an
-  **adapter or extension behind an existing port** (`StorageAdapter` today; `CacheAdapter`/
-  `KeyProvider` once they exist) — still not inline in the service.
+  **adapter or extension behind an existing port** (`StorageAdapter`, `CacheAdapter`, or
+  `KeyProvider`) — still not inline in the service.
 - **Actual domain logic** (validation rules, business decisions, what a field means) → that
   one genuinely belongs in the calling service, outside DataCloak.
 

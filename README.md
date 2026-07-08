@@ -9,7 +9,7 @@ encryption — so the domain only declares **the shape of its data**, never the 
 
 > Status: v1 in development, inside the the host app repo (`datacloak/`). Extraction into a
 > standalone OSS MIT package is planned but not done yet — see
-> `_local/plans/20260626-1111000-secure-store-framework.md` for the full design-decision
+> `_local/plans/done/20260626-1111000-secure-store-framework.md` for the full design-decision
 > history (that file is for people working _on_ DataCloak; this README is for people who
 > _use_ it).
 >
@@ -1096,7 +1096,7 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   zero-knowledge system rotates that way. **If ever built: a synchronous, session-
   invalidating ceremony (Bitwarden-style), never a framework-level lazy mechanism.** Full
   rationale (the multi-device failure mode, the 1Password/Bitwarden/Proton and Matrix/Olm
-  comparison): `_local/plans/20260626-1111000-secure-store-framework.md` § "Decisioni aperte".
+  comparison): `_local/plans/done/20260626-1111000-secure-store-framework.md` § "Decisioni aperte".
 
 ## Extending `StorageAdapter`
 
