@@ -83,6 +83,12 @@ export {
   type ComputeFn,
 } from "./core/aggregation.ts";
 
+export {
+  onSourceWrite,
+  type OnSourceWriteOptions,
+  type Unsubscribe,
+} from "./core/onSourceWrite.ts";
+
 export type {
   StorageAdapter,
   BlobRecord,

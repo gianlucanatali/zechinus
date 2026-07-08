@@ -466,6 +466,27 @@ export function keyedRangeEpochCacheKey(
   return `${storeName}:${userId}:__keysEpoch__`;
 }
 
+/**
+ * Cache key holding the domain key(s) touched by the MOST RECENT ambient keyed
+ * write (`set()`/`mutate()`/`createMany()`) — overwritten (not appended) on every
+ * write, unlike `keyedRangeEpochCacheKey`'s plain counter. `onSourceWrite`
+ * (`datacloak/core/onSourceWrite.ts`) is the one consumer: the epoch counter alone
+ * tells a listener "something in this store changed", never WHICH key, and
+ * `onSourceWrite`'s whole contract (`{ keys: string[] }`) needs the latter. Safe to
+ * read as "last write's keys, not yet lost" because `CacheAdapter.subscribe`'s
+ * production implementations (`tanstackAdapter`, the in-memory test double) invoke
+ * every subscriber SYNCHRONOUSLY inside `cache.set()`, before the write call that
+ * triggered it returns — so a subscriber's callback always observes the exact keys
+ * of the write that just fired it, never a later write's keys clobbering this slot
+ * first.
+ */
+export function keyedWriteKeysCacheKey(
+  storeName: string,
+  userId: string,
+): string {
+  return `${storeName}:${userId}:__writtenKeys__`;
+}
+
 function buildKeyedStore<S extends z.ZodType>(
   { def, migrators, validateRead, validateWrite }: BuildContext<S>,
   keyColumn: string,
@@ -482,11 +503,14 @@ function buildKeyedStore<S extends z.ZodType>(
   // has already fetched might now be stale (a `CacheAdapter` has no notion of
   // "subscribe to every key in [from,to]", so a per-store, per-user counter is
   // the simplest correct invalidation trigger; see `keyedRangeEpochCacheKey`).
-  const bumpRangeEpoch = (userId: string): void => {
+  const bumpRangeEpoch = (userId: string, keys: string[]): void => {
     const { cache } = getSecureStoreConfig();
     if (!cache) return;
     const epochKey = keyedRangeEpochCacheKey(def.name, userId);
     cache.set(epochKey, (cache.get<number>(epochKey) ?? 0) + 1);
+    // See `keyedWriteKeysCacheKey`'s doc comment — same ambient-write interception,
+    // one extra slot carrying WHICH key(s) this write touched (for `onSourceWrite`).
+    cache.set(keyedWriteKeysCacheKey(def.name, userId), keys);
   };
 
   const keyedSave = async (
@@ -581,7 +605,7 @@ function buildKeyedStore<S extends z.ZodType>(
         ? await cryptoHandle.hashContent!(toEnvelope(valid, def.version))
         : null;
       writeThroughCache(cacheKeyFor(userId, key), valid, hash);
-      bumpRangeEpoch(userId);
+      bumpRangeEpoch(userId, [key]);
     },
     async mutate(key, fn) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
@@ -603,7 +627,7 @@ function buildKeyedStore<S extends z.ZodType>(
           throw new OptimisticLockConflictError(def.name);
         }
         writeThroughCache(cacheKeyFor(userId, key), next, result.hash);
-        bumpRangeEpoch(userId);
+        bumpRangeEpoch(userId, [key]);
         return next;
       }
       const { data: current, hash } = await keyedLoadInternal(
@@ -619,7 +643,7 @@ function buildKeyedStore<S extends z.ZodType>(
       if (def.contentHash && hash !== null && nextHash === hash) return next;
       await keyedSave(userId, cryptoHandle, key, next);
       writeThroughCache(cacheKeyFor(userId, key), next, nextHash);
-      bumpRangeEpoch(userId);
+      bumpRangeEpoch(userId, [key]);
       return next;
     },
     async createMany(entries) {
@@ -662,7 +686,10 @@ function buildKeyedStore<S extends z.ZodType>(
           record.contentHash ?? null,
         );
       }
-      bumpRangeEpoch(userId);
+      bumpRangeEpoch(
+        userId,
+        prepared.map(({ key }) => key),
+      );
     },
     async list(userId, cryptoHandle, range) {
       const { storage } = getSecureStoreConfig();
