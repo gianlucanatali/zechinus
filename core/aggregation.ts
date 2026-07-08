@@ -310,6 +310,24 @@ function isKeyedSourceRef(source: Source): source is KeyedSourceRef<unknown> {
 }
 
 /**
+ * Internal-only side channel: for every `Aggregation` instance this module has ever
+ * created, a getter for its CURRENT in-flight recompute promise (`null` when none is
+ * running right now). Populated once per instance at the bottom of `defineAggregation`,
+ * consulted ONLY by `computeAndPersist`'s `isAggregationSource` branch below (CT6 fix,
+ * "diamond DAG" gap — see the plan's CT6 report) — never by anything outside this
+ * module. Deliberately NOT a new method on the public `Aggregation<T>` interface: `.get()`
+ * 's non-blocking contract for the React binding (Task 1/4) is completely untouched, it
+ * still never awaits a pending recompute. A `WeakMap` keyed by the returned object's
+ * IDENTITY means no property ever appears on the object literal `defineAggregation` hands
+ * back — a caller holding only the public `Aggregation<T>` type has no way to reach this,
+ * by accident or otherwise.
+ */
+const inFlightPeek = new WeakMap<
+  Aggregation<unknown>,
+  () => Promise<unknown> | null
+>();
+
+/**
  * An Aggregation source has no `contentHash` column of its own (it isn't a `Store`) — its
  * "fingerprint", for a DOWNSTREAM aggregation's freshness check, is a deterministic digest
  * of its own persisted `data`. Computed identically in the two places that must agree: (1)
@@ -464,6 +482,25 @@ export function defineAggregation<
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
+      // CT6 fix, part 2 (diamond-DAG gap): a "diamond" source shape (see the
+      // `isAggregationSource` branch's own CT6 comment in `computeAndPersist`) can mark
+      // THIS aggregation stale via TWO independent subscriptions for the exact same
+      // underlying change — a direct Store/KeyedSourceRef subscription (fires
+      // immediately) AND an Aggregation-source subscription on the SAME upstream data
+      // (fires one hop later, once that upstream republishes). The direct-subscription
+      // path's debounced recompute already reads the upstream aggregation-as-source via
+      // `computeAndPersist`'s `isAggregationSource` branch, which (per the fix above) now
+      // AWAITS that upstream's in-flight recompute and persists with its fresh result —
+      // so by the time THIS second, later-firing timer goes off, this aggregation may
+      // already be fully up to date. Skip the redundant recompute in exactly that case,
+      // using the SAME freshness check `.get()` already applies before ever calling
+      // `triggerRecompute()`, and the SAME one the queued-rerun branch below already uses
+      // for the analogous same-instance race — a genuinely NEW change since the last
+      // persist still fails `isFresh` (current fingerprints keep moving independently of
+      // this check) and still recomputes normally.
+      if (lastEnvelope !== null && isFresh(lastEnvelope)) {
+        return;
+      }
       triggerRecompute().catch((e) =>
         logBackgroundFailure("source-triggered recompute failed", e),
       );
@@ -626,7 +663,36 @@ export function defineAggregation<
             // staleness pipeline) and still returns immediately with what's currently
             // persisted — exactly the "no double fetch" behavior scenario 9 requires.
             const state = await source.get();
-            if (state.data === null) {
+            let data = state.data;
+            // CT6 fix (diamond-DAG gap, see the plan's CT6 report): a "diamond" source
+            // shape — this aggregation reads `source` here AND ALSO has a direct Store/
+            // KeyedSourceRef entry that `source` itself reads too (`dashboardAgg`'s real
+            // shape: `netWorthSeries: netWorthSeriesAgg` + `snapshots:
+            // keyedSource(snapshotStore, ...)`, where `netWorthSeriesAgg` ALSO sources
+            // `snapshotStore` directly) — means a single write can mark BOTH this
+            // aggregation and `source` stale at the same instant. `source.get()` above is
+            // non-blocking by design (scenario 9/Task 1-4's contract, untouched): if
+            // `source` was stale-but-not-yet-computing, that very call may have just
+            // kicked off `source`'s OWN recompute, and `state.data` above is still the
+            // PRE-change value. Without this, THIS aggregation would persist a compute
+            // built from that stale value, then recompute a SECOND time moments later
+            // once `source` republishes its fresh fingerprint (the observed "D computes
+            // twice" gap). Only applies when `source` has EVER computed before
+            // (`data !== null`) — a genuinely cold `source` (never computed, nothing to
+            // await) must keep throwing below, unchanged, never wait on its very first
+            // compute here.
+            if (data !== null) {
+              const peekInFlight = inFlightPeek.get(source);
+              const sourceInFlight = peekInFlight?.();
+              if (sourceInFlight) {
+                // Await the SAME promise `source.get()` may have just triggered (or one
+                // already running from `source`'s own debounce timer) — never starts a
+                // second compute of `source` (single-flight preserved, same discipline
+                // as scenario 9's "no duplicate fetch").
+                data = await sourceInFlight;
+              }
+            }
+            if (data === null) {
               throw new Error(
                 `defineAggregation(${name}): source aggregation "${sourceName}" (${source.name}) ` +
                   `has no persisted value yet — call its own get()/refresh() at least once ` +
@@ -635,8 +701,8 @@ export function defineAggregation<
             }
             return [
               sourceName,
-              state.data,
-              aggregationSourceFingerprint(state.data),
+              data,
+              aggregationSourceFingerprint(data),
             ] as const;
           }
           if (isKeyedSourceRef(source)) {
@@ -847,7 +913,7 @@ export function defineAggregation<
     return run;
   }
 
-  return {
+  const aggregation: Aggregation<T> = {
     name,
     version: def.version,
     async get() {
@@ -919,4 +985,9 @@ export function defineAggregation<
       return triggerRecompute();
     },
   };
+  // CT6 fix: register this instance's in-flight peek AFTER the object literal exists —
+  // see `inFlightPeek`'s doc comment above for why this is a WeakMap side channel and
+  // not a public method.
+  inFlightPeek.set(aggregation as Aggregation<unknown>, () => inFlight);
+  return aggregation;
 }

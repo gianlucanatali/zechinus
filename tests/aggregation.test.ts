@@ -985,6 +985,114 @@ test(
 );
 
 test(
+  "diamond DAG, WARM (not cold-start): D shares a DIRECT store source with C (the " +
+    "exact shape of dashboardAgg's real `snapshots` keyedSource, subscribed by BOTH " +
+    "dashboardAgg AND netWorthSeriesAgg directly) — a single write to that shared " +
+    "source, AFTER both C and D already have a valid persisted value, must still " +
+    "recompute D exactly ONCE, never twice (CT6 diamond-DAG gap, see the plan's CT6 " +
+    "report: before this fix, D's own eager `aggC.get()` returned the pre-write value " +
+    "— C hadn't republished yet — D persisted with it, then recomputed a second time " +
+    "the instant C's fresh fingerprint arrived)",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    configureSecureStore({
+      storage: adapter,
+      cache,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+
+    const source = makeSource("warm_diamond_source");
+    await source.set({ value: 1 });
+
+    // C: sources the shared store DIRECTLY — the `netWorthSeriesAgg` role.
+    let computeCallsC = 0;
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "warm_diamond_agg_c", key: "__agg__" },
+      debounceMs: 30,
+      sources: { src: source },
+      compute: ({ sources }) => {
+        computeCallsC++;
+        return { total: sources.src.value * 10 };
+      },
+    });
+
+    // D: sources the SAME store directly AND `aggC` as an aggregation-source — the
+    // `dashboardAgg` role. SAME `debounceMs` as C (production default is 500ms for
+    // both) — no structural head start for either side, the fix must not depend on one.
+    let computeCallsD = 0;
+    const aggD = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "warm_diamond_agg_d", key: "__agg__" },
+      debounceMs: 30,
+      sources: { src: source, c: aggC },
+      compute: ({ sources }) => {
+        computeCallsD++;
+        return { total: sources.src.value + sources.c.total };
+      },
+    });
+
+    // Prime WARM (not cold): converge the whole DAG once, exactly like the real CT6
+    // test's `primeColdStart` does. Calling `aggD.get()` first (not `aggC.get()`) also
+    // reproduces the real subscription ORDER: D's own `ensureSubscribed` subscribes to
+    // `source` (its `src` entry) BEFORE C ever subscribes to anything — C's
+    // `ensureSubscribed` only runs later, nested inside D's first `computeAndPersist`
+    // when it reads `aggC.get()` for its `c` entry. This is the exact order
+    // `dashboardAgg`/`netWorthSeriesAgg` have in production (see the CT6 report).
+    await aggD.get();
+    await waitFor(
+      () =>
+        computeCallsC === 1 &&
+        computeCallsD === 1 &&
+        adapter.putCallsFor("warm_diamond_agg_c") === 1 &&
+        adapter.putCallsFor("warm_diamond_agg_d") === 1,
+      3000,
+    );
+    await settle(200);
+
+    // The real scenario: a SINGLE write to the shared leaf once both C and D already
+    // hold valid persisted data (warm) — this is what a live transaction burst does to
+    // `snapshotStore` in production (see `ct6-single-pass.test.tsx`).
+    computeCallsC = 0;
+    computeCallsD = 0;
+    await source.set({ value: 2 });
+
+    await waitFor(() => computeCallsC >= 1 && computeCallsD >= 1, 3000);
+    // Hold well past a possible SECOND debounce/recompute round — this is exactly where
+    // the pre-fix gap showed up (D recomputing again once C republished).
+    await settle(500);
+
+    assert.equal(
+      computeCallsC,
+      1,
+      "C must recompute exactly once for a single upstream change",
+    );
+    assert.equal(
+      computeCallsD,
+      1,
+      "D must recompute exactly once for a single upstream change — before the CT6 " +
+        "fix this was deterministically 2 (D's eager read of C returned the stale " +
+        "pre-write value, then D recomputed again once C republished its fresh " +
+        "fingerprint)",
+    );
+
+    const final = await aggD.get();
+    assert.deepEqual(
+      final.data,
+      { total: 2 + 20 },
+      "the converged value must reflect the NEW source value on BOTH the direct path " +
+        "and via C, never a mix of stale-C + fresh-src",
+    );
+  },
+);
+
+test(
   "refresh({ bypassExternalsTtl: true }): forces a fresh external fetch even inside its " +
     "TTL window; a plain refresh() keeps reusing the cached value (Task 5 review, Finding " +
     "3 — a worker that just wrote new market data needs the NEXT recompute to see it now, " +
