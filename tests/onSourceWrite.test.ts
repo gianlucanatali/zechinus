@@ -961,3 +961,170 @@ test("CT4: the snapshot blob after a reaction-triggered rebuild is byte-identica
       "since ciphertext bytes themselves differ every encryption (random nonce)",
   );
 });
+
+// ─── flush() — force pending/in-flight work to settle NOW, no debounce wait ────
+//
+// A caller that just finished a known batch (e.g. an import writing N months)
+// needs the reaction's effect visible before it proceeds — without knowing
+// which months were touched, without duplicating the reaction's own logic at
+// the call site, and without waiting out `debounceMs`. `flush()` is that
+// primitive: it dispatches whatever is currently pending (debounced write or
+// scheduled backoff retry) immediately and awaits it (and any single-flight
+// rerun) settling.
+
+test("flush(): a pending debounced write runs immediately, without waiting debounceMs", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+    cache,
+  });
+  const { txStore, snapshotStore, rebuildMonths } = makeStores();
+
+  const handlerCalls: string[][] = [];
+  const handle = onSourceWrite(
+    txStore,
+    async ({ keys }) => {
+      const sorted = [...keys].sort();
+      handlerCalls.push(sorted);
+      await rebuildMonths(sorted);
+    },
+    // A debounce window far longer than this test's own timeout — if flush()
+    // actually waited it out instead of forcing it, the assertions below
+    // would see nothing yet.
+    { debounceMs: 60_000, coalesce: true },
+  );
+
+  const started = Date.now();
+  await txStore.mutate("2026-03", () => [{ id: "a", amount: 100 }]);
+  await handle.flush();
+  const elapsedMs = Date.now() - started;
+
+  assert.ok(
+    elapsedMs < 5_000,
+    `flush() must not wait out the 60s debounce window (took ${elapsedMs}ms)`,
+  );
+  assert.deepEqual(handlerCalls, [["2026-03"]]);
+  const { data } = await snapshotStore.loadWithHash!(
+    "u1",
+    cryptoHandle,
+    SNAP_KEY,
+  );
+  assert.deepEqual(data.months, { "2026-03": 100 });
+
+  handle();
+});
+
+test("flush(): nothing pending or in flight resolves immediately, no handler call", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+    cache,
+  });
+  const { txStore } = makeStores();
+
+  const handlerCalls: string[][] = [];
+  const handle = onSourceWrite(
+    txStore,
+    async ({ keys }) => {
+      handlerCalls.push([...keys].sort());
+    },
+    { debounceMs: 60_000, coalesce: true },
+  );
+
+  await handle.flush();
+
+  assert.deepEqual(handlerCalls, []);
+  handle();
+});
+
+test("flush(): awaits a handler already in flight (plus any queued rerun) before resolving", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+    cache,
+  });
+  const { txStore, snapshotStore, rebuildMonths } = makeStores();
+
+  let releaseFirstCall: (() => void) | null = null;
+  const handlerCalls: string[][] = [];
+  const handle = onSourceWrite(
+    txStore,
+    async ({ keys }) => {
+      const sorted = [...keys].sort();
+      handlerCalls.push(sorted);
+      if (handlerCalls.length === 1) {
+        // Block the FIRST call until the test releases it, so the second
+        // write below is guaranteed to land while it's still in flight.
+        await new Promise<void>((resolve) => {
+          releaseFirstCall = resolve;
+        });
+      }
+      await rebuildMonths(sorted);
+    },
+    // coalesce:false so the first write dispatches immediately (no debounce
+    // wait needed to get it in flight) — flush() below is what's under test,
+    // not scheduleRun()'s own coalescing.
+    { debounceMs: 60_000, coalesce: false },
+  );
+
+  await txStore.mutate("2026-03", () => [{ id: "a", amount: 100 }]);
+  await waitFor(() => handlerCalls.length === 1, 1000);
+
+  // Arrives while the first call is in flight — single-flight queues it as a
+  // rerun rather than starting a second concurrent handler call.
+  await txStore.mutate("2026-05", () => [{ id: "b", amount: 50 }]);
+
+  const flushPromise = handle.flush();
+  releaseFirstCall!();
+  await flushPromise;
+
+  assert.deepEqual(
+    handlerCalls,
+    [["2026-03"], ["2026-05"]],
+    "flush() must wait for the in-flight call AND the queued rerun it unblocks, not just the first",
+  );
+  const { data } = await snapshotStore.loadWithHash!(
+    "u1",
+    cryptoHandle,
+    SNAP_KEY,
+  );
+  assert.deepEqual(data.months, { "2026-03": 100, "2026-05": 50 });
+
+  handle();
+});
+
+test("flush(): a failing handler is surfaced via getLastError(), never rejects flush() itself", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+    cache,
+  });
+  const { txStore } = makeStores();
+
+  const handle = onSourceWrite(
+    txStore,
+    async () => {
+      throw new Error("boom");
+    },
+    { debounceMs: 60_000, coalesce: true, retry: { maxAttempts: 1 } },
+  );
+
+  await txStore.mutate("2026-03", () => [{ id: "a", amount: 100 }]);
+  await assert.doesNotReject(handle.flush());
+
+  assert.equal(handle.getLastError()?.error.message, "boom");
+
+  handle();
+});

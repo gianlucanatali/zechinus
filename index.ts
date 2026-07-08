@@ -72,6 +72,7 @@ export {
 export {
   defineAggregation,
   keyedSource,
+  invalidateChannel,
   type Aggregation,
   type AggregationDef,
   type AggregationState,

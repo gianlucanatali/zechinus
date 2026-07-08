@@ -70,6 +70,42 @@ import {
 export interface ExternalInput<T = unknown> {
   load: () => Promise<T>;
   ttlMs: number;
+  /**
+   * Named invalidation channel(s) this external depends on, beyond its own TTL — for data
+   * that lives entirely OUTSIDE any DataCloak `Store` (e.g. a plaintext table read via a
+   * plain REST call), which this module has no write-interception hook for at all: no
+   * `source` ever changes when that data changes, so nothing naturally marks the
+   * aggregation stale before the TTL expires. Declare the channel(s) here; the app then
+   * calls `invalidateChannel(name)` (this module's export) once, at the single place the
+   * underlying mutation actually happens (e.g. "an account was created/deleted") — every
+   * aggregation with a matching entry has THIS external's cache cleared and a recompute
+   * forced immediately, without the caller needing to know which aggregation(s), if any,
+   * depend on it.
+   */
+  invalidateOn?: string[];
+}
+
+/**
+ * Module-level registry: channel name -> the set of per-`(aggregation instance, external
+ * name)` invalidator callbacks registered for it. Populated once, at `defineAggregation()`
+ * definition time (aggregations are permanent app-wide singletons with no dispose/teardown
+ * — same lifetime assumption `onSourceWrite` and `defineStore` already make), never
+ * mutated afterward except by new `defineAggregation()` calls adding more entries.
+ */
+const channelSubscribers = new Map<string, Set<() => void>>();
+
+/**
+ * Forces every external, across every aggregation, that declared `invalidateOn: [channel]`
+ * to refetch and its owning aggregation to recompute immediately — see `ExternalInput.
+ * invalidateOn`'s doc comment for the full rationale. A channel nobody subscribed to is a
+ * safe no-op. Never throws: each affected aggregation's own recompute failure (if any) is
+ * already surfaced through its normal `logBackgroundFailure`/`AggregationState.error` path,
+ * exactly like a source-triggered recompute failure — this call only dispatches them.
+ */
+export function invalidateChannel(channel: string): void {
+  const subs = channelSubscribers.get(channel);
+  if (!subs) return;
+  for (const invalidate of subs) invalidate();
 }
 
 /**
@@ -911,6 +947,27 @@ export function defineAggregation<
     // recompute starting immediately, not only once it settles.
     notifyReactState();
     return run;
+  }
+
+  // Register every external's `invalidateOn` channel(s) — see `ExternalInput.invalidateOn`'s
+  // doc comment. Done once, at definition time: each callback clears ONLY its own external's
+  // in-memory cache entry (never the others on the same aggregation, and never a source's own
+  // fingerprint tracking) and forces an immediate recompute via the SAME `triggerRecompute()`
+  // single-flight entry point a debounced source-write reaction uses — no new recompute path.
+  for (const [extName, ext] of Object.entries(def.externals ?? {})) {
+    for (const channel of (ext as ExternalInput<unknown>).invalidateOn ?? []) {
+      if (!channelSubscribers.has(channel))
+        channelSubscribers.set(channel, new Set());
+      channelSubscribers.get(channel)!.add(() => {
+        externalCache.delete(extName);
+        triggerRecompute().catch((e) =>
+          logBackgroundFailure(
+            `invalidateChannel("${channel}") recompute failed`,
+            e,
+          ),
+        );
+      });
+    }
   }
 
   const aggregation: Aggregation<T> = {

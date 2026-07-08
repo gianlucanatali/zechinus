@@ -914,6 +914,51 @@ showing stale prices right after an explicit "refresh". One-shot: only that ONE 
 external fetches are forced; the refreshed value re-enters the normal TTL-gated cache
 afterward.
 
+### `invalidateOn` / `invalidateChannel` — externals sourced from non-Store data
+
+An `external` can depend on data that lives entirely OUTSIDE any DataCloak `Store` — a
+plaintext table read via a plain REST call, e.g. "which account ids currently exist"
+(`src/services/dashboardAggregation.ts`'s `existingAccountIds`). No `source` ever changes
+when that data changes, so nothing naturally marks the aggregation stale before its `ttlMs`
+expires — a `refresh({ bypassExternalsTtl: true })` call from the app is the only way to
+force freshness, and every call site that mutates the underlying data would otherwise need
+to remember to make it.
+
+`invalidateOn` names the channel(s) an external depends on; `invalidateChannel(name)` (also
+exported from `datacloak`) is called ONCE, at the single place the underlying mutation
+actually happens — every aggregation with a matching `invalidateOn` entry has THAT
+external's cache cleared and a recompute forced immediately, without the caller needing to
+know which aggregation(s), if any, depend on it:
+
+```ts
+// dashboardAggregation.ts — declare the dependency once, where the external is defined.
+externals: {
+  existingAccountIds: {
+    load: loadExistingAccountIds,
+    ttlMs: 5 * 60 * 1000,
+    invalidateOn: ["accounts-changed"],
+  },
+},
+```
+
+```ts
+// appApi.ts — emit the event once, at the single choke point that mutates `accounts`.
+import { invalidateChannel } from "datacloak";
+
+export async function createManualAccount(input: unknown) {
+  const result = await appApiRequest("/accounts/manual", {
+    method: "POST",
+    body: input,
+  });
+  invalidateChannel("accounts-changed");
+  return result;
+}
+```
+
+Scoped to just the ONE external that declared the channel — an unrelated external on the
+same aggregation, or one with no `invalidateOn` at all, is never refetched by it. A channel
+nobody subscribed to is a safe no-op.
+
 ### Write-reaction — `onSourceWrite`
 
 **A different primitive from `defineAggregation`, not a variant of it.** An aggregation
@@ -951,6 +996,29 @@ failure automatically with exponential backoff (default: 5 attempts, 1s base del
 doubling, capped at 30s) instead of silently dropping the failed months. The current
 unresolved failure (if retries haven't succeeded yet) is inspectable via
 `handle.getLastError()` on the handle `onSourceWrite` returns.
+
+**`handle.flush()`** forces whatever is currently pending (a debounced write still waiting
+out `debounceMs`, or a scheduled backoff retry) to run NOW, and awaits it — including any
+single-flight rerun a write arriving mid-run queues. For a caller that just finished a known
+batch (e.g. an import that wrote N months) and needs the reaction's effect visible before it
+proceeds, without knowing which keys were touched or duplicating `handler`'s own logic at the
+call site, and without waiting out the debounce window. Real consumer,
+`src/lib/secureStore.ts` exports a thin wrapper around it:
+
+```ts
+const txSnapshotRebuildHandle = onSourceWrite(txStore, handler, {
+  debounceMs: 500,
+});
+
+export function flushTxSnapshotRebuild(): Promise<void> {
+  return txSnapshotRebuildHandle.flush();
+}
+```
+
+`AccountsRegister.tsx`'s post-import reconcile modal calls this before reading
+`conto.saldoContabile`, instead of racing the 500ms debounce. Never rejects — a `handler`
+failure is already surfaced via `getLastError()`/`console.error`; resolves immediately if
+nothing is pending or in flight.
 
 **Known architectural limit (documented, not hidden):** a `handler` call already in flight
 that crosses a same-tab session/identity switch can still persist under the wrong

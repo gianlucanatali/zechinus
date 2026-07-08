@@ -26,6 +26,7 @@ import {
   __resetSecureStoreConfig,
   defineStore,
   defineAggregation,
+  invalidateChannel,
   fingerprintSchema,
   type StorageAdapter,
   type CacheAdapter,
@@ -1436,5 +1437,236 @@ test('keyColumn: omitted -> defaults to the literal column "key" (Task 1-4 backw
     ["key"],
     "an aggregation that doesn't specify keyColumn must keep persisting under the " +
       'literal column "key" — exactly Task 1-4\'s existing, already-tested behavior',
+  );
+});
+
+// ─── invalidateOn / invalidateChannel — externals sourced from non-Store data ──
+//
+// An `external` can depend on data DataCloak has no write-interception hook for
+// at all (a plaintext table read via a plain REST call, e.g. "which account ids
+// currently exist") — no source ever changes when that data changes, so nothing
+// naturally marks the aggregation stale before its TTL expires. `invalidateOn`
+// lets an external declare the named channel(s) it depends on; the app calls
+// `invalidateChannel(name)` once, at the single place the underlying mutation
+// happens, without needing to know which aggregation(s) (if any) care.
+
+test("invalidateChannel: forces an immediate recompute with a freshly refetched external, with no source change at all", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("invchan_source");
+  await source.set({ value: 1 });
+
+  let externalValue = 100;
+  let externalFetchCalls = 0;
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "invchan_agg", key: "__agg__" },
+    sources: { src: source },
+    externals: {
+      thing: {
+        load: async () => {
+          externalFetchCalls++;
+          return externalValue;
+        },
+        ttlMs: 10 * 60 * 1000,
+        invalidateOn: ["invchan-test-1"],
+      },
+    },
+    compute: ({ sources, externals }) => ({
+      total: sources.src.value + externals.thing,
+    }),
+  });
+
+  await agg.get();
+  await waitFor(() => adapter.putCallsFor("invchan_agg") === 1);
+  assert.deepEqual((await agg.get()).data, { total: 101 });
+  assert.equal(externalFetchCalls, 1);
+
+  // The underlying non-Store data changes — nothing here is a `source`, so
+  // nothing naturally marks the aggregate stale.
+  externalValue = 200;
+  await settle(50);
+  assert.deepEqual(
+    (await agg.get()).data,
+    { total: 101 },
+    "sanity: the external's long TTL means an ordinary get() must NOT see the change yet",
+  );
+
+  invalidateChannel("invchan-test-1");
+  await waitFor(() => externalFetchCalls === 2, 2000);
+  await waitFor(() => adapter.putCallsFor("invchan_agg") === 2, 2000);
+
+  assert.deepEqual(
+    (await agg.get()).data,
+    { total: 201 },
+    "invalidateChannel must force the external to refetch and the aggregate to " +
+      "recompute immediately, without waiting out its TTL and without any source change",
+  );
+});
+
+test("invalidateChannel: only the external(s) declaring that channel are refetched, not unrelated ones on the same aggregation", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("invchan_scope_source");
+  await source.set({ value: 1 });
+
+  let watchedFetchCalls = 0;
+  let unrelatedFetchCalls = 0;
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "invchan_scope_agg", key: "__agg__" },
+    sources: { src: source },
+    externals: {
+      watched: {
+        load: async () => {
+          watchedFetchCalls++;
+          return 10;
+        },
+        ttlMs: 10 * 60 * 1000,
+        invalidateOn: ["invchan-test-2"],
+      },
+      unrelated: {
+        load: async () => {
+          unrelatedFetchCalls++;
+          return 1000;
+        },
+        ttlMs: 10 * 60 * 1000,
+        // No invalidateOn at all — must never be refetched by a channel invalidation.
+      },
+    },
+    compute: ({ sources, externals }) => ({
+      total: sources.src.value + externals.watched + externals.unrelated,
+    }),
+  });
+
+  await agg.get();
+  await waitFor(() => adapter.putCallsFor("invchan_scope_agg") === 1);
+  assert.equal(watchedFetchCalls, 1);
+  assert.equal(unrelatedFetchCalls, 1);
+
+  invalidateChannel("invchan-test-2");
+  await waitFor(() => watchedFetchCalls === 2, 2000);
+  await waitFor(() => adapter.putCallsFor("invchan_scope_agg") === 2, 2000);
+
+  assert.equal(
+    unrelatedFetchCalls,
+    1,
+    "an external with no invalidateOn for this channel must never be refetched by it",
+  );
+});
+
+test("invalidateChannel: a single call reaches EVERY aggregation subscribed to that channel, not just one", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("invchan_multi_source");
+  await source.set({ value: 1 });
+
+  let fetchCallsA = 0;
+  const aggA = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "invchan_multi_agg_a", key: "__agg__" },
+    sources: { src: source },
+    externals: {
+      thing: {
+        load: async () => {
+          fetchCallsA++;
+          return 1;
+        },
+        ttlMs: 10 * 60 * 1000,
+        invalidateOn: ["invchan-test-3"],
+      },
+    },
+    compute: ({ sources, externals }) => ({
+      total: sources.src.value + externals.thing,
+    }),
+  });
+
+  let fetchCallsB = 0;
+  const aggB = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "invchan_multi_agg_b", key: "__agg__" },
+    sources: { src: source },
+    externals: {
+      thing: {
+        load: async () => {
+          fetchCallsB++;
+          return 2;
+        },
+        ttlMs: 10 * 60 * 1000,
+        invalidateOn: ["invchan-test-3"],
+      },
+    },
+    compute: ({ sources, externals }) => ({
+      total: sources.src.value + externals.thing,
+    }),
+  });
+
+  await aggA.get();
+  await aggB.get();
+  await waitFor(
+    () =>
+      adapter.putCallsFor("invchan_multi_agg_a") === 1 &&
+      adapter.putCallsFor("invchan_multi_agg_b") === 1,
+  );
+  assert.equal(fetchCallsA, 1);
+  assert.equal(fetchCallsB, 1);
+
+  invalidateChannel("invchan-test-3");
+  await waitFor(() => fetchCallsA === 2 && fetchCallsB === 2, 2000);
+
+  assert.equal(
+    fetchCallsA,
+    2,
+    "one invalidateChannel call must reach aggregation A",
+  );
+  assert.equal(
+    fetchCallsB,
+    2,
+    "the SAME invalidateChannel call must ALSO reach aggregation B — the app names " +
+      "the channel once, it never needs to know which aggregations depend on it",
+  );
+});
+
+test("invalidateChannel: an unused channel name is a safe no-op", async () => {
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  assert.doesNotThrow(() =>
+    invalidateChannel("nobody-subscribes-to-this-channel"),
   );
 });

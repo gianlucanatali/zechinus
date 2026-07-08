@@ -141,6 +141,11 @@ export interface OnSourceWriteHandle {
   /** The current pending-or-exhausted failure, if any — `null` once the
    * affected months have been successfully recomputed. */
   getLastError(): OnSourceWriteFailure | null;
+  /** Forces any pending debounced write or scheduled backoff retry to run now,
+   * and awaits it (and any single-flight rerun it queues) settling — see the
+   * implementation's own doc comment for the full rationale. Never rejects;
+   * resolves immediately if nothing is pending or in flight. */
+  flush(): Promise<void>;
 }
 
 const DEFAULT_MAX_RETRY_ATTEMPTS = 5;
@@ -381,6 +386,30 @@ export function onSourceWrite(
     }, debounceMs);
   }
 
+  /** Forces whatever is currently pending (a debounced write still waiting out
+   * `debounceMs`, or a scheduled backoff retry — `dispatch()` folds either into
+   * this call via the same `foldFailedKeysIntoNewWrite` path a real new write
+   * already uses) to run NOW, and awaits it — including any single-flight rerun
+   * a write that arrived while it was running queues (`runHandler`'s own
+   * `rerunKeys` mechanism, unchanged). For a caller that just finished a known
+   * batch (e.g. an import that wrote N months) and needs the reaction's effect
+   * (a derived snapshot) visible before proceeding, without knowing which keys
+   * were touched or duplicating the reaction's own logic at the call site.
+   * Never rejects — a handler failure is already surfaced via
+   * `logFailure`/`getLastError()`; a caller that only needs "is this applied
+   * yet" shouldn't also have to catch a separate rejection here. Resolves
+   * immediately if nothing is pending or in flight. */
+  async function flush(): Promise<void> {
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    dispatch();
+    while (inFlight) {
+      await inFlight.catch(() => {});
+    }
+  }
+
   /** (Re)subscribes to the CURRENT ambient user's write-keys slot — mirrors
    * `defineAggregation`'s `ensureSubscribed` re-subscribe-on-identity-change
    * handling (user switch/logout). `userId === null` (locked/logged out) just
@@ -516,5 +545,6 @@ export function onSourceWrite(
   };
   const handle = unsubscribe as OnSourceWriteHandle;
   handle.getLastError = () => lastError;
+  handle.flush = flush;
   return handle;
 }
