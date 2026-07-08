@@ -10,6 +10,7 @@ import {
   perKeyExample,
   manyExample,
   optimisticLockExample,
+  aggregationExample,
 } from "../examples/basic-usage.ts";
 
 test("example: perUser roundtrip", async () => {
@@ -33,4 +34,8 @@ test("example: optimisticLock — success, chained hash, rejected stale write", 
   assert.notEqual(second.hash, first.hash);
   assert.equal(conflict.ok, false);
   assert.equal(conflict.hash, null);
+});
+
+test("example: defineAggregation — sum over an array source, via refresh()", async () => {
+  assert.deepEqual(await aggregationExample(), { total: 150 });
 });

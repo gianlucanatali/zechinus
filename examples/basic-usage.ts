@@ -13,14 +13,17 @@ import { randomBytes } from "@noble/ciphers/utils.js";
 import {
   configureSecureStore,
   defineStore,
+  defineAggregation,
   fingerprintSchema,
   createKeyHandle,
   asRawDekBytes,
   type StorageAdapter,
   type BlobRecord,
+  type CacheAdapter,
   type CryptoHandle,
   type KeyProvider,
 } from "../index.ts";
+import * as agg from "../aggregate/index.ts";
 
 // A real app derives its DEK from a `KeyProvider` adapter (WebAuthn, password KDF,
 // hardware token, ...) and picks its own salt/info for `createKeyHandle` — these
@@ -92,6 +95,30 @@ export function memoryAdapter(): StorageAdapter {
       for (const { extraKeys, record } of entries) {
         rows.set(rowKey(collection, userId, extraKeys), record);
       }
+    },
+  };
+}
+
+/** Real subscribable in-memory CacheAdapter — required by `defineAggregation` (it
+ * detects a source write through this port, not by re-fetching every source on every
+ * read). See `datacloak/tests/aggregation.test.ts`'s identical fixture. */
+function memoryCache(): CacheAdapter {
+  const data = new Map<string, unknown>();
+  const subs = new Map<string, Set<() => void>>();
+  return {
+    get: (key) => data.get(key) as never,
+    set: (key, value) => {
+      data.set(key, value);
+      for (const cb of subs.get(key) ?? []) cb();
+    },
+    subscribe: (key, cb) => {
+      if (!subs.has(key)) subs.set(key, new Set());
+      subs.get(key)!.add(cb);
+      return () => subs.get(key)?.delete(cb);
+    },
+    clear: () => {
+      data.clear();
+      for (const set of subs.values()) for (const cb of set) cb();
     },
   };
 }
@@ -226,4 +253,43 @@ export async function optimisticLockExample() {
   );
 
   return { first, second, conflict };
+}
+
+// ── 5. defineAggregation — a persisted, declarative read-model over a store ────────
+export async function aggregationExample() {
+  const cryptoHandle = freshDek();
+  configureSecureStore({
+    storage: memoryAdapter(),
+    cache: memoryCache(), // required: this is how the aggregate detects a source write
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  // The source is an array store on purpose — `agg.sum` (the declarative operator
+  // kit, `datacloak/aggregate`) only reduces over array/collection sources. See
+  // README's "Aggregations" section for the hand-written-function alternative form.
+  const InvoiceList = z.array(z.object({ amount: z.number() }));
+  const invoiceStore = defineStore({
+    name: "invoice_blobs",
+    encrypt: "all",
+    schema: InvoiceList,
+    version: 1,
+    empty: [], // array schema — no .default() to derive one from, same as snapshotStore's tuple
+    contentHash: true, // lets the aggregate fingerprint this source
+    schemaFingerprint: fingerprintSchema(InvoiceList, "all"),
+  });
+  await invoiceStore.set([{ amount: 120 }, { amount: 30 }]);
+
+  const Totals = z.object({ total: z.number() });
+  const totalsAgg = defineAggregation({
+    version: 1,
+    schema: Totals,
+    schemaFingerprint: fingerprintSchema(Totals, "all"),
+    storage: { table: "invoice_totals_agg", key: "__totals__" },
+    sources: { invoices: invoiceStore },
+    compute: { total: agg.sum("invoices", "amount") },
+  });
+
+  // `refresh()` forces a recompute and resolves with the freshly persisted value
+  // directly — no polling needed in a one-shot script like this one.
+  return totalsAgg.refresh();
 }

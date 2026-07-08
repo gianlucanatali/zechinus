@@ -694,6 +694,375 @@ consumer.
 needs `keys` (no `cache`), and never exposes the `CryptoHandle` to the caller. See
 `datacloak/tests/useIsUnlocked.test.tsx`.
 
+## Aggregations
+
+**A `defineAggregation` is a persisted, declarative read-model derived from one or more
+stores — never a value the app computes and writes itself.** Where `defineStore` owns a
+row the app writes directly, `defineAggregation` owns a row the FRAMEWORK writes, by
+calling the app's `compute()` whenever a source changes or an external's TTL expires. The
+persisted result goes through the exact same encrypted envelope/AAD/versioning machinery
+`defineStore` already provides (an aggregation is, internally, one `defineStore` the
+framework builds and drives) — this section documents the layer on top: source
+fingerprinting, debounced recompute, and the extra wire-format guarantees the persisted
+envelope makes.
+
+### `defineAggregation` — perUser only
+
+Real read-model from this branch, trimmed for length (`src/services/dashboardAggregation.ts`):
+
+```ts
+import { defineAggregation, keyedSource } from "datacloak";
+
+export const dashboardAgg = defineAggregation({
+  version: 1,
+  schema: DashboardSummarySchema,
+  schemaFingerprint: "62df50f2",
+  // Same physical row `dashboardSummaryStore` used before this branch (zero migration).
+  // `keyColumn: "year_month"` because `account_snapshot_blobs`'s sentinel column is
+  // called that, not "key" — see "storage.keyColumn" below.
+  storage: {
+    table: "account_snapshot_blobs",
+    key: "__dashboard__",
+    keyColumn: "year_month",
+  },
+  sources: {
+    assets: assetStore,
+    accountMeta: keyedSource(accountMetaStore, ACCOUNT_META_KEY),
+    snapshots: keyedSource(snapshotStore, STORE_KEY),
+    portfolioSeries: portfolioSeriesAgg, // an Aggregation used as a Source — see below
+    netWorthSeries: netWorthSeriesAgg, //   same
+  },
+  externals: {
+    currentPortfolio: {
+      load: loadCurrentPortfolioMetrics,
+      ttlMs: 5 * 60 * 1000,
+    },
+    existingAccountIds: { load: loadExistingAccountIds, ttlMs: 5 * 60 * 1000 },
+  },
+  compute: computeDashboardSummary, // a plain function here — see "declarative operator kit" below for the other form
+});
+```
+
+`version`/`schema`/`schemaFingerprint` follow the exact same discipline as `defineStore`
+(a mismatch between `schema` and `schemaFingerprint` throws at definition time — see
+"Guardrail: versioning is mandatory" above). The difference: an aggregation never needs a
+`BlobMigrator` — a shape or `version` change just means "recompute from sources", there is
+no old ciphertext to migrate in place, since nothing but the framework ever wrote that row.
+
+`storage.table` is a `defineStore` `name` (a real backing table); `storage.key` is the
+sentinel row identifier within it. Several aggregations commonly share ONE physical table
+via distinct `key` values (`dashboardAgg`/`netWorthSeriesAgg` above both live in
+`account_snapshot_blobs`, alongside the real per-month snapshot rows) — the same "generic
+domain key column" convention `snapshotStore` itself already uses.
+
+**`storage.keyColumn`** (optional, defaults to `"key"`): the DB column name backing that
+sentinel key. Set it when wiring an aggregation onto a PRE-EXISTING table whose sentinel
+column has a different name — `account_snapshot_blobs.year_month` above, not `key` — so
+reusing an already-shipped table costs zero DB migration. Omit it for a table that only
+ever exists for aggregations (this module's own convention, `"key"`).
+
+### Sources: stores, keyed stores, and other aggregates
+
+A `sources` entry can be any of three things (`Source` in `core/aggregation.ts`):
+
+- **A `perUser` `Store`** — passed directly, e.g. `assets: assetStore` above.
+- **`keyedSource(store, key)`** — wraps a `perKey` `KeyedStore` read through ONE fixed
+  key, for the two real cases in this branch where a `perKey` store is always read
+  through a single sentinel key per user, never a real range: `snapshotStore` and
+  `accountMetaStore` (`accountMeta: keyedSource(accountMetaStore, ACCOUNT_META_KEY)`,
+  `snapshots: keyedSource(snapshotStore, STORE_KEY)` above). A `KeyedStore` can't be
+  passed as a `Source` directly — `perKey` reads/writes always need a key, there's no
+  key-less signature to fall back to the way a `perUser` `Store` has one. Deliberately
+  fixed-key-only: reading a range or the whole collection of a `KeyedStore` as a single
+  aggregation input isn't supported (no real caller needs it).
+- **Another `Aggregation`** — "aggregate-as-source", below.
+
+**Aggregate-as-source.** A `sources` entry can itself be an `Aggregation` — a downstream
+aggregate reads the upstream one's PERSISTED value via its own `.get()`, never
+duplicating its `compute`/`externals` logic. Real example, `src/services/netWorthSeriesAggregation.ts`:
+
+```ts
+export const netWorthSeriesAgg = defineAggregation({
+  version: 1,
+  schema: NetWorthSeriesSchema,
+  schemaFingerprint: "2d5aa43a",
+  storage: {
+    table: "account_snapshot_blobs",
+    key: "__net_worth_series__",
+    keyColumn: "year_month",
+  },
+  sources: {
+    assets: assetStore,
+    accountMeta: keyedSource(accountMetaStore, ACCOUNT_META_KEY),
+    snapshots: keyedSource(snapshotStore, STORE_KEY),
+    portfolioSeries: portfolioSeriesAgg, // aggregate-as-source
+  },
+  compute: ({ sources }) => {
+    const portfolioHistory =
+      sources.portfolioSeries.byPortfolio[ALL_PORTFOLIOS_KEY]?.Max ?? [];
+    return buildRetroactiveHistoryClient(/* ... */ portfolioHistory /* ... */);
+  },
+});
+```
+
+The product motivation is avoiding a double fetch: `portfolioSeriesAgg` (Task 5, point A)
+computes an expensive time series against live market data behind an `ExternalInput`
+TTL. Without aggregate-as-source, both `netWorthSeriesAgg` and `dashboardAgg` (which ALSO
+lists `portfolioSeries: portfolioSeriesAgg` in its own `sources`, above) would each need
+their own copy of that fetch/compute logic — instead both read the SAME persisted series,
+computed once. A change in `portfolioSeriesAgg` still propagates: its own fingerprint
+(see "Aggregation envelope wire format" below) flows into every aggregation that sources
+it, marking them stale through the exact same `ensureSubscribed`/`isFresh` machinery a
+`Store` source already uses — no special-casing needed for the aggregate-as-source case.
+
+### Declarative operator kit — `datacloak/aggregate`
+
+A second, declarative form for `compute`, alongside the plain-function form used by every
+real aggregation wired in this branch so far (`dashboardAgg`/`netWorthSeriesAgg` above
+both use plain functions, because their math already lives in `shared/domain/*` — see
+`aggregate/index.ts`'s own header comment for the target shape):
+
+```ts
+import * as agg from "datacloak/aggregate";
+
+defineAggregation({
+  // ...
+  compute: {
+    liquidita: agg.sum("banche", "saldo"),
+    immobili: agg.sum("assets", "valore", { where: { tipo: "immobile" } }),
+    totaleAttivi: agg.expr((f) => f.liquidita + f.immobili),
+    varEur: agg.lastDelta("storicoPatrimonio", "valore"),
+    effScore: agg.custom((f, src) => computeEffScore(f)),
+  },
+});
+```
+
+Verified, compiling usage lives in `datacloak/examples/basic-usage.ts`'s
+`aggregationExample()` (`compute: { total: agg.sum("invoices", "amount") }`) and
+`datacloak/tests/aggregateOperators.test.ts`. `defineAggregation` compiles a
+`FieldOperators` record into the exact same function shape ONCE, at definition time
+(`compileFieldOperators`, `aggregate/compile.ts`) — nothing downstream of that point knows
+a declarative form exists.
+
+The five operators, deliberately ONLY these five (YAGNI — no `avg`/`count`/`min`/`max`/
+`groupBy`, however tempting in the abstract):
+
+| Operator                       | Does                                                                                                                       |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| `sum(source, field, {where})`  | Sums `field` across every row of `source`, optionally filtered by exact match                                              |
+| `sumWith(source, fn, {where})` | Like `sum`, but the per-row value is `fn(row)` — for reductions with real logic (typically calling into `shared/domain/*`) |
+| `expr(fn)`                     | `fn` reads the aggregate's OTHER already-computed fields; dependency order resolved automatically, cycles fail loud        |
+| `lastDelta(source, field)`     | Reads `field` off the LAST row of `source` (an ordered time series)                                                        |
+| `custom(fn)`                   | Escape hatch — `fn(fields, sources)` sees everything else already computed, plus the raw sources                           |
+
+Prefer the declarative form when every output field is expressible as one of the five
+operators over array/collection sources — no domain logic belongs in the operators
+themselves (`sumWith`/`custom`'s `fn` is always the caller's own function, e.g. from
+`shared/domain/*`). Prefer the plain-function form (as every real aggregate in this branch
+does today) when the computation is a single existing pure function you're reusing as-is
+(`calculateDashboardMetrics`, `buildRetroactiveHistoryClient`) — wrapping an
+already-correct, already-tested function in five operator calls would be pure overhead for
+no readability gain.
+
+### `useAggregation` binding
+
+Same plain get/subscribe + `useSyncExternalStore` pattern as `useStore`/`useKeyedStore`,
+reading through the CacheAdapter slot `defineAggregation` publishes to
+(`aggregationStateCacheKey`) — never a bespoke subscription of its own. Real usage,
+`src/hooks/usePortfolioHistory.ts`:
+
+```tsx
+import { useAggregation } from "datacloak/react";
+
+export function usePortfolioHistory({ range, portfolioId, enabled }) {
+  const { data, computing, error, refresh } =
+    useAggregation(portfolioSeriesAgg);
+  // data: T | null · computing: boolean · stale: boolean · error: Error | null
+  // refresh(opts?): forces a recompute now — see bypassExternalsTtl below
+  const forceRefresh = () => refresh({ bypassExternalsTtl: true });
+  // ...
+}
+```
+
+`{ data, computing, stale, error, refresh }` — `data` is the last PERSISTED value (`null`
+if never computed), painted immediately; `computing`/`stale` reflect a background
+recompute in flight, the same non-blocking contract `Aggregation.get()` has. This is a
+READ binding only — an aggregate's `compute()` is the only thing that ever produces its
+data, `refresh()` exists for an explicit retry/force, not a write path.
+
+**`refresh({ bypassExternalsTtl: true })`** clears the aggregation's in-memory external
+cache before recomputing, forcing a real refetch even within the external's own `ttlMs` —
+distinct from a plain `refresh()`, which still respects each external's TTL (it forces the
+recompute, not a refetch of data that's still fresh by the external's own clock). The one
+real consumer, `usePortfolioHistory` above: the price-history worker just wrote new market
+data, and the caller — not the TTL clock — knows it's time to see it now. A plain
+`refresh()` there would still serve the 15-minute-old cached `marketData` external,
+showing stale prices right after an explicit "refresh". One-shot: only that ONE recompute's
+external fetches are forced; the refreshed value re-enters the normal TTL-gated cache
+afterward.
+
+### Write-reaction — `onSourceWrite`
+
+**A different primitive from `defineAggregation`, not a variant of it.** An aggregation
+persists a DERIVED value the framework owns end-to-end; `onSourceWrite` instead reacts to
+writes on a `KeyedStore` by calling an arbitrary app-supplied `handler` that itself
+read/mutates a DIFFERENT store — one with its OWN, independent `optimisticLock` semantics.
+Wrapping that in `defineAggregation`'s internal store (hardcoded `optimisticLock: false`,
+see below) would silently throw away a real cross-writer conflict. `onSourceWrite` never
+persists anything itself; it only observes writes and invokes `handler`.
+
+The one real consumer, `src/lib/secureStore.ts` (registered once, at bootstrap, right
+after `configureSecureStore`):
+
+```ts
+import { onSourceWrite } from "datacloak";
+
+onSourceWrite(
+  txStore,
+  async ({ keys }) => {
+    if (!keys.length) return;
+    const sorted = [...keys].sort();
+    await rebuildMonths(monthRange(sorted[0], sorted[sorted.length - 1]));
+  },
+  { debounceMs: 500, coalesce: true },
+);
+```
+
+Every ambient write on `txStore` (import, row edit, delete, recurring-transaction
+materialization, demo seed) debounces/coalesces into ONE `handler({ keys })` call carrying
+the union of touched months, replacing 6 manual `rebuildMonths` call sites that used to be
+scattered across the app. `rebuildMonths` writes `snapshotStore`
+(`optimisticLock: true`) — a real cross-writer conflict there (two tabs rebuilding
+overlapping months) throws `OptimisticLockConflictError`, and `onSourceWrite` retries that
+failure automatically with exponential backoff (default: 5 attempts, 1s base delay,
+doubling, capped at 30s) instead of silently dropping the failed months. The current
+unresolved failure (if retries haven't succeeded yet) is inspectable via
+`handle.getLastError()` on the handle `onSourceWrite` returns.
+
+**Known architectural limit (documented, not hidden):** a `handler` call already in flight
+that crosses a same-tab session/identity switch can still persist under the wrong
+identity — `rebuildMonths`'s own `mutate()` call resolves the ambient identity fresh at
+its own invocation, not pinned to whichever identity was active when `handler` was
+dispatched. `onSourceWrite` isolates its OWN bookkeeping (`lastError`, scheduled retries)
+from a stale identity correctly, but it cannot retroactively stop `rebuildMonths`'s
+`mutate()` from resolving a NEW identity mid-flight — a pre-existing gap in how
+`rebuildMonths` resolves ambient identity, not introduced by this module. See
+`datacloak/core/onSourceWrite.ts`'s own doc comment for the exact scope of this gap.
+
+### `optimisticLock`: materialized store vs. derived aggregate
+
+**`optimisticLock: true` belongs to materialized stores with partial update, where two
+writers can legitimately conflict** — e.g. `snapshotStore`, updated incrementally by
+`rebuildMonths` from potentially two tabs at once. **`optimisticLock: false` belongs to
+derived read-models** — a clobber there just rewrites the same result (or gets
+invalidated by fingerprints on the next read), never a real conflict.
+
+This isn't a per-call decision for `defineAggregation`: `AggregationDef` has no
+`optimisticLock` field at all — the internal store `defineAggregation` builds hardcodes
+`optimisticLock: false` (`core/aggregation.ts`). Every aggregation in this branch (A/C/D —
+`portfolioSeriesAgg`/`netWorthSeriesAgg`/`dashboardAgg`) gets this for free, by
+construction, never by a choice a caller makes.
+
+The choice a future developer actually faces is upstream of that: **is what I'm building a
+derived read-model, or a materialized store someone partially updates?** If it's the
+former, use `defineAggregation` — the framework already made the right call.
+If a "read model" ever seems to need `optimisticLock: true`, that's the signal the shape
+isn't a derived aggregate at all: build it as a real `defineStore` (like `snapshotStore`)
+updated by a `onSourceWrite` reaction (like `rebuildMonths`), not as a `defineAggregation`.
+
+### Anti-sprawl: when NOT to persist an aggregation
+
+Not every derived value belongs in `defineAggregation`. If a computation is a pure
+`useMemo` over data that's already cache-resident from a SINGLE store, with no remote I/O
+and no cumulative-over-time logic, it stays a plain function in the view — persisting it
+would add a DB row, a fingerprint subscription, and a debounce timer for something that
+already recomputes for free on every render.
+
+Reference case, explicitly excluded from this branch's plan: `src/hooks/useBudgetAggregation.ts`.
+It calls `buildReportAggregation` inside a `useMemo` over `useTransactions`'s already
+TanStack-cached data — no persistence, no framework involvement:
+
+```ts
+const aggregation = useMemo(
+  () =>
+    buildReportAggregation({
+      transazioni,
+      period,
+      budgetCategorie: resolvedBudgetCategorie,
+      budgetGruppi: resolvedBudgetGruppi,
+      ...(today ? { today } : {}),
+    }),
+  [transazioni, period, resolvedBudgetCategorie, resolvedBudgetGruppi, today],
+);
+```
+
+The signal that something DOES belong in `defineAggregation` instead: a remote fetch
+(`ExternalInput`), a cumulative-over-time computation that would otherwise re-scan every
+month on every render (`buildRetroactiveHistoryClient`'s net-worth history), or a value
+several independent views need to agree on byte-for-byte (`dashboardAgg`'s consistency
+with `Investimenti.tsx`'s portfolio metrics). Absent those, keep it a `useMemo`.
+
+### Aggregation envelope wire format
+
+The plaintext payload `defineAggregation` persists — BEFORE the standard DataCloak
+encryption/AAD/versioning wraps it (see "Wire format: envelope version" at the top of this
+file for THAT layer; the `v` below is a different field, do not confuse the two):
+
+```ts
+interface PersistedEnvelope<T> {
+  v: number;
+  computedAt: string;
+  sourceFingerprints: Record<string, string | null>;
+  externalsFetchedAt: Record<string, string>;
+  data: T | null;
+}
+```
+
+(`core/aggregation.ts`'s `PersistedEnvelope`.) This is a **language-neutral spec**: an
+implementation in another language (e.g. Swift, for the mobile app) must be able to
+read/write this envelope from this description alone, never from reading the TypeScript.
+Rules that make it portable:
+
+- **Stable JSON, no language-specific semantics.** No `undefined` anywhere — a JS-only
+  value with no JSON representation; absence is always `null`, never a missing/undefined
+  field. Key order carries no meaning — a reader must not assume or rely on any ordering.
+  Every number is finite — never `NaN`/`Infinity`, which JSON itself cannot represent.
+
+- **Field semantics:**
+  - `v` — the aggregation DEFINITION's own version (`AggregationDef.version`), bumped
+    when the compute logic or output shape changes meaningfully. NOT the ciphertext
+    envelope's `EncryptedField.v` (1–4, compression + AAD format) documented earlier in
+    this file — same field name, two unrelated concepts, one inside the other.
+  - `computedAt` — ISO 8601 timestamp of when THIS envelope's `compute()` call finished.
+  - `sourceFingerprints` — one entry per `sources` key, mapping to either a fingerprint
+    string or `null` (see below for how each is computed).
+  - `externalsFetchedAt` — one entry per `externals` key, the ISO 8601 timestamp of when
+    that external was last actually fetched (as opposed to served from the in-memory TTL
+    cache) — compared against `ttlMs` to decide whether the next recompute must refetch.
+  - `data` — the aggregate's own output, validated by the aggregate's Zod `schema`; `null`
+    only before the very first successful compute has ever persisted.
+
+- **Fingerprint computation, per source kind** (verified against `core/aggregation.ts`,
+  not assumed):
+  - **`Store` source** (perUser, or the fixed key inside a `keyedSource`): the store's own
+    `content_hash` — the keyed HMAC-SHA256 described in the `content_hash` section above,
+    read via that store's `loadWithHash`. If the store was NOT defined with
+    `contentHash: true`, this is always `null` — that source contributes no fingerprint
+    signal, and staleness detection for it relies entirely on the CacheAdapter's
+    ambient-write notification (a write that was never observed this session is treated
+    as "unchanged", per `isFresh`'s own contract — see that function's doc comment).
+  - **Aggregation-as-source:** an aggregation has no `content_hash` column — it isn't a
+    `Store` at the storage layer — so its fingerprint is `JSON.stringify(data)` of its own
+    persisted `data` (`aggregationSourceFingerprint`). Computed identically in the two
+    places that must agree: the upstream aggregation publishes this digest to the shared
+    cache slot right after a real (non-skip-write) persist; the downstream aggregation
+    computes the SAME digest live, from the value its own `.get()` call just returned.
+
+- **The explicit goal:** a Swift (or any other language) implementation for the mobile
+  app should be able to decrypt a DataCloak blob, parse this envelope, decide freshness,
+  and re-encrypt an updated one, using only this section plus the top-of-file envelope/AAD
+  spec — never needing to read `datacloak/core/aggregation.ts` itself.
+
 ## What DataCloak doesn't do yet (v1 scope — 2026-07-04)
 
 Explicit error at definition (never a silent stub), with a `FIXME` in the source:
