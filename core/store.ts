@@ -179,8 +179,21 @@ export interface Store<T> {
    * attempt: throws `OptimisticLockConflictError` on conflict rather than
    * retrying blindly (a blind retry would re-run `fn` against fresher data
    * without the caller ever deciding whether that's still valid).
+   *
+   * `options.retryOnConflict` opts INTO that retry, bounded to N total attempts:
+   * on conflict, re-reads the fresh current state and re-applies `fn` to it (not
+   * the stale one), then retries the conditional write. Only safe when `fn` is a
+   * pure, self-contained derivation of `current` that stays correct against any
+   * fresher state (e.g. appending a pre-generated record) — NOT when `fn`
+   * overwrites specific fields from data captured outside `current` (e.g. a
+   * user-typed value), where retrying would silently clobber a genuine
+   * multi-tab conflict instead of surfacing it. Omit entirely to keep today's
+   * single-attempt throw.
    */
-  mutate(fn: (current: T) => T | Promise<T>): Promise<T>;
+  mutate(
+    fn: (current: T) => T | Promise<T>,
+    options?: { retryOnConflict?: number },
+  ): Promise<T>;
   /** Present only when the store declares `contentHash: true`. */
   loadWithHash?(
     userId: string,
@@ -214,8 +227,15 @@ export interface KeyedStore<T> {
   get(key: string): Promise<T>;
   /** Ambient blind write for the given key — no `userId`/`CryptoHandle`, no read — see `Store.set`. */
   set(key: string, data: T): Promise<void>;
-  /** Load → transform → save for the given key, no `userId`/`CryptoHandle` in sight — see `Store.mutate`. */
-  mutate(key: string, fn: (current: T) => T | Promise<T>): Promise<T>;
+  /**
+   * Load → transform → save for the given key, no `userId`/`CryptoHandle` in
+   * sight — see `Store.mutate` (same `options.retryOnConflict` contract).
+   */
+  mutate(
+    key: string,
+    fn: (current: T) => T | Promise<T>,
+    options?: { retryOnConflict?: number },
+  ): Promise<T>;
   /**
    * Ambient bulk creation for N distinct keys in a single round-trip — needs
    * `insertMany` on the adapter. A real INSERT, not an upsert: any key that
@@ -618,44 +638,52 @@ function buildKeyedStore<S extends z.ZodType>(
       writeThroughCache(cacheKeyFor(userId, key), valid, hash);
       bumpRangeEpoch(userId, [key]);
     },
-    async mutate(key, fn) {
+    async mutate(key, fn, options) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
-      if (keyed.saveIfMatch) {
+      const maxAttempts = Math.max(1, options?.retryOnConflict ?? 1);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (keyed.saveIfMatch) {
+          const { data: current, hash } = await keyedLoadInternal(
+            userId,
+            cryptoHandle,
+            key,
+          );
+          const next = await fn(current);
+          const result = await keyed.saveIfMatch(
+            userId,
+            cryptoHandle,
+            key,
+            next,
+            hash,
+          );
+          if (result.ok) {
+            writeThroughCache(cacheKeyFor(userId, key), next, result.hash);
+            bumpRangeEpoch(userId, [key]);
+            return next;
+          }
+          if (attempt === maxAttempts) {
+            throw new OptimisticLockConflictError(def.name);
+          }
+          continue;
+        }
         const { data: current, hash } = await keyedLoadInternal(
           userId,
           cryptoHandle,
           key,
         );
         const next = await fn(current);
-        const result = await keyed.saveIfMatch(
-          userId,
-          cryptoHandle,
-          key,
-          next,
-          hash,
-        );
-        if (!result.ok) {
-          throw new OptimisticLockConflictError(def.name);
-        }
-        writeThroughCache(cacheKeyFor(userId, key), next, result.hash);
+        const validated = validateWrite(next, `mutate(key=${key})`);
+        const nextHash = def.contentHash
+          ? await cryptoHandle.hashContent!(toEnvelope(validated, def.version))
+          : null;
+        if (def.contentHash && hash !== null && nextHash === hash) return next;
+        await keyedSave(userId, cryptoHandle, key, next);
+        writeThroughCache(cacheKeyFor(userId, key), next, nextHash);
         bumpRangeEpoch(userId, [key]);
         return next;
       }
-      const { data: current, hash } = await keyedLoadInternal(
-        userId,
-        cryptoHandle,
-        key,
-      );
-      const next = await fn(current);
-      const validated = validateWrite(next, `mutate(key=${key})`);
-      const nextHash = def.contentHash
-        ? await cryptoHandle.hashContent!(toEnvelope(validated, def.version))
-        : null;
-      if (def.contentHash && hash !== null && nextHash === hash) return next;
-      await keyedSave(userId, cryptoHandle, key, next);
-      writeThroughCache(cacheKeyFor(userId, key), next, nextHash);
-      bumpRangeEpoch(userId, [key]);
-      return next;
+      // Unreachable — the loop above always returns or throws on its last iteration.
+      throw new OptimisticLockConflictError(def.name);
     },
     async createMany(entries) {
       if (!entries.length) return;
@@ -1073,35 +1101,43 @@ function buildPerUserStore<S extends z.ZodType>({
         : null;
       writeThroughCache(cacheKeyFor(userId), valid, hash);
     },
-    async mutate(fn) {
+    async mutate(fn, options) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
-      const { data: rawCurrent, hash } = await perUserLoadInternal(
-        userId,
-        cryptoHandle,
-      );
-      const current = validateRead(rawCurrent, "mutate");
-      const next = await fn(current);
-      if (store.saveIfMatch) {
-        const result = await store.saveIfMatch(
+      const maxAttempts = Math.max(1, options?.retryOnConflict ?? 1);
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const { data: rawCurrent, hash } = await perUserLoadInternal(
           userId,
           cryptoHandle,
-          next,
-          hash,
         );
-        if (!result.ok) {
-          throw new OptimisticLockConflictError(def.name);
+        const current = validateRead(rawCurrent, "mutate");
+        const next = await fn(current);
+        if (store.saveIfMatch) {
+          const result = await store.saveIfMatch(
+            userId,
+            cryptoHandle,
+            next,
+            hash,
+          );
+          if (result.ok) {
+            writeThroughCache(cacheKeyFor(userId), next, result.hash);
+            return next;
+          }
+          if (attempt === maxAttempts) {
+            throw new OptimisticLockConflictError(def.name);
+          }
+          continue;
         }
-        writeThroughCache(cacheKeyFor(userId), next, result.hash);
+        const validated = validateWrite(next, "mutate");
+        const nextHash = def.contentHash
+          ? await cryptoHandle.hashContent!(toEnvelope(validated, def.version))
+          : null;
+        if (def.contentHash && hash !== null && nextHash === hash) return next;
+        await inner.save(userId, cryptoHandle, validated);
+        writeThroughCache(cacheKeyFor(userId), next, nextHash);
         return next;
       }
-      const validated = validateWrite(next, "mutate");
-      const nextHash = def.contentHash
-        ? await cryptoHandle.hashContent!(toEnvelope(validated, def.version))
-        : null;
-      if (def.contentHash && hash !== null && nextHash === hash) return next;
-      await inner.save(userId, cryptoHandle, validated);
-      writeThroughCache(cacheKeyFor(userId), next, nextHash);
-      return next;
+      // Unreachable — the loop above always returns or throws on its last iteration.
+      throw new OptimisticLockConflictError(def.name);
     },
   };
 

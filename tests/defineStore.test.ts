@@ -424,6 +424,142 @@ test("defineStore: mutate() on an optimisticLock store succeeds and updates the 
   });
 });
 
+test("defineStore: mutate() with retryOnConflict re-reads and reapplies fn until it succeeds", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    contentHash: true,
+    optimisticLock: true,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  let fnCalls = 0;
+  // Simulates a concurrent, independent mutate() call finishing first (the real
+  // bug: an unrelated auto-save writing its own change to the same row) between
+  // our read and our write — tamper the stored content_hash on the FIRST attempt
+  // only, so our saveIfMatch's expectedHash no longer matches.
+  const result = await store.mutate(
+    (current) => {
+      fnCalls += 1;
+      if (fnCalls === 1) {
+        const row = adapter.rows.get("portfolio_blobs:u1")!;
+        adapter.rows.set("portfolio_blobs:u1", {
+          ...row,
+          contentHash: "someone-elses-write",
+        });
+      }
+      return { ...current, positions: [...current.positions, "MSFT"] };
+    },
+    { retryOnConflict: 3 },
+  );
+
+  assert.equal(fnCalls, 2, "fn re-applied once after the first conflict");
+  assert.deepEqual(
+    result.positions,
+    ["AAPL", "MSFT"],
+    "retry re-read the concurrent writer's row before appending",
+  );
+  assert.deepEqual(await store.load("u1", cryptoHandle), {
+    positions: ["AAPL", "MSFT"],
+    count: 1,
+  });
+});
+
+test("defineStore: mutate() with retryOnConflict exhausts attempts and throws OptimisticLockConflictError", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    contentHash: true,
+    optimisticLock: true,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  let fnCalls = 0;
+  await assert.rejects(
+    () =>
+      store.mutate(
+        (current) => {
+          fnCalls += 1;
+          // Every attempt loses the race — persistent conflict, not transient
+          // (a different writer keeps winning, not a one-off hiccup).
+          const row = adapter.rows.get("portfolio_blobs:u1")!;
+          adapter.rows.set("portfolio_blobs:u1", {
+            ...row,
+            contentHash: `someone-elses-write-${fnCalls}`,
+          });
+          return { ...current, count: current.count + 1 };
+        },
+        { retryOnConflict: 3 },
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof OptimisticLockConflictError);
+      return true;
+    },
+  );
+  assert.equal(fnCalls, 3, "exactly retryOnConflict attempts, then gives up");
+});
+
+test("defineStore: mutate() WITHOUT retryOnConflict still throws immediately (default unchanged)", async () => {
+  const adapter = memoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "portfolio_blobs",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Portfolio,
+    version: 1,
+    contentHash: true,
+    optimisticLock: true,
+    schemaFingerprint: fingerprintSchema(Portfolio, "all"),
+  });
+
+  await store.save("u1", cryptoHandle, { positions: ["AAPL"], count: 1 });
+
+  let fnCalls = 0;
+  await assert.rejects(
+    () =>
+      store.mutate((current) => {
+        fnCalls += 1;
+        adapter.rows.delete("portfolio_blobs:u1");
+        return { ...current, count: current.count + 1 };
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof OptimisticLockConflictError);
+      return true;
+    },
+  );
+  assert.equal(fnCalls, 1, "no options → no retry, same as before this change");
+});
+
 test("defineStore: Zod validation on WRITE rejects non-conforming data", async () => {
   const adapter = memoryAdapter();
   configureSecureStore({ storage: adapter });

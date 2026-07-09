@@ -399,6 +399,36 @@ using `useStore`/`useKeyedStore`/`useCollectionStore` never touches `saveIfMatch
 `expectedHash` directly; only code calling `Store`/`KeyedStore`/`CollectionStore` raw
 (outside React, or inside a custom binding) needs the pattern above.
 
+### `mutate()` on an optimisticLock store — single attempt by default, opt-in retry
+
+`Store.mutate`/`KeyedStore.mutate` wrap the `loadWithHash`/`saveIfMatch` pattern above into
+one call: load, apply your transform, write, done. On a store with `optimisticLock: true`,
+the DEFAULT behavior is a **single attempt** — a conflict throws
+`OptimisticLockConflictError` immediately, same as calling `saveIfMatch` yourself. This is
+deliberate: a blind retry would re-run your transform against fresher data without you ever
+deciding whether that's still valid — the right call for a transform that overwrites
+specific fields from data captured outside `current` (e.g. a user-typed value), where a
+genuine multi-tab edit conflict must stay visible, not get silently clobbered by whichever
+writer retries harder.
+
+Pass `{ retryOnConflict: N }` to opt into automatic retry, bounded to N total attempts: on
+conflict, `mutate()` re-reads the fresh current state and re-applies your transform to it
+(not the stale one), then retries the conditional write. **Only safe when the transform is
+a pure, self-contained derivation of `current`** that stays correct against any fresher
+state — the canonical case is appending an already-generated record:
+
+```ts
+// Safe to retry: appending `record` is correct no matter what else changed in `current`
+// (e.g. an unrelated feature writing to the same row moments earlier).
+await assetStore.mutate(
+  (current) => ({ ...current, assets: [...current.assets, record] }),
+  { retryOnConflict: 3 },
+);
+```
+
+Without the option, behavior is byte-for-byte what it was before this existed — no breaking
+change for any existing `mutate()` call site.
+
 ## Guardrail: encryption always explicit
 
 `defineStore` **refuses** to be defined unless you declare `encrypt: "all"`,
