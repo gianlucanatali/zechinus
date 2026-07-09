@@ -1366,6 +1366,173 @@ test(
 );
 
 test(
+  "diamond DAG + invalidateChannel: a shared-source write that lands WHILE D's " +
+    "channel-triggered recompute is awaiting its external, AND while C (the upstream " +
+    "aggregation-source) is itself still mid-recompute from that SAME write, must " +
+    "still converge D to the fully-fresh total (src filtered by the fresh external " +
+    "ids, PLUS C's fresh total) — exact production shape: dashboardAgg sources " +
+    "snapshotStore directly (filtered by existingAccountIds) AND netWorthSeriesAgg " +
+    "(which itself sources snapshotStore), with existingAccountIds invalidated via " +
+    "ACCOUNTS_CHANGED_CHANNEL on account creation",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    configureSecureStore({
+      storage: adapter,
+      cache,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+
+    const BalancesSchema = z.object({
+      balances: z.record(z.string(), z.number()).default({}),
+    });
+    const source = defineStore({
+      name: "diamond_race_source",
+      encrypt: "all",
+      schema: BalancesSchema,
+      version: 1,
+      contentHash: true,
+      schemaFingerprint: fingerprintSchema(BalancesSchema, "all"),
+    });
+    await source.set({ balances: { acc1: 100 } });
+
+    // C: sources the shared store DIRECTLY, unfiltered — the `netWorthSeriesAgg` role.
+    // The test controls exactly when C's SECOND compute (triggered by the shared
+    // write below) returns, so D can be made to read C while C is still mid-flight —
+    // C's FIRST compute (the warm-up) is never gated, it must resolve immediately.
+    let computeCallsCStarted = 0;
+    let computeCallsCFinished = 0;
+    let releaseSecondCCompute: (() => void) | null = null;
+    const secondCComputeGate = new Promise<void>((resolve) => {
+      releaseSecondCCompute = resolve;
+    });
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "diamond_race_agg_c", key: "__agg__" },
+      debounceMs: 30,
+      sources: { bal: source },
+      compute: async ({ sources }) => {
+        computeCallsCStarted++;
+        if (computeCallsCStarted === 2) await secondCComputeGate;
+        computeCallsCFinished++;
+        const total = Object.values(sources.bal.balances).reduce(
+          (a, b) => a + b,
+          0,
+        );
+        return { total: total * 10 };
+      },
+    });
+
+    // D: sources the SAME store directly (filtered by an external, the
+    // `existingAccountIds` role) AND `aggC` as an aggregation-source — the
+    // `dashboardAgg` role. Same controllable-gate technique as the earlier
+    // invalidateChannel race test for D's OWN external fetch.
+    let existingIds = ["acc1"];
+    let externalFetchCalls = 0;
+    let releaseSecondExternalFetch: (() => void) | null = null;
+    const secondExternalFetchGate = new Promise<void>((resolve) => {
+      releaseSecondExternalFetch = resolve;
+    });
+    let computeCallsD = 0;
+    const aggD = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "diamond_race_agg_d", key: "__agg__" },
+      debounceMs: 30,
+      sources: { bal: source, c: aggC },
+      externals: {
+        ids: {
+          load: async () => {
+            externalFetchCalls++;
+            if (externalFetchCalls === 2) await secondExternalFetchGate;
+            return existingIds;
+          },
+          ttlMs: 10 * 60 * 1000,
+          invalidateOn: ["diamond-race-test"],
+        },
+      },
+      compute: ({ sources, externals }) => {
+        computeCallsD++;
+        const idSet = new Set(externals.ids);
+        let filtered = 0;
+        for (const [id, balance] of Object.entries(sources.bal.balances)) {
+          if (idSet.has(id)) filtered += balance;
+        }
+        return { total: filtered + sources.c.total };
+      },
+    });
+
+    // Prime WARM, same order as the plain diamond test above: D first, so C's own
+    // subscription is set up nested inside D's first compute, matching production.
+    await aggD.get();
+    await waitFor(
+      () =>
+        computeCallsCFinished === 1 &&
+        computeCallsD === 1 &&
+        adapter.putCallsFor("diamond_race_agg_c") === 1 &&
+        adapter.putCallsFor("diamond_race_agg_d") === 1,
+      3000,
+    );
+    await settle(200);
+    assert.deepEqual((await aggD.get()).data, { total: 100 + 1000 });
+    assert.equal(externalFetchCalls, 1);
+
+    // "Account created": the new account already exists server-side by the time
+    // invalidateChannel fires. D's channel-triggered recompute (R1) starts NOW —
+    // reads `bal` (pre-write) and `c` (aggC's current persisted value, 1000) right
+    // away, then blocks on its own external fetch.
+    existingIds = ["acc1", "acc2"];
+    invalidateChannel("diamond-race-test");
+    await waitFor(() => externalFetchCalls === 2, 2000);
+
+    // "Import lands": a single write to the shared store, marking BOTH D (direct
+    // subscription) and C (its only source) stale at the same instant — the exact
+    // diamond shape from the plain warm-diamond test above, just with D's own
+    // channel-triggered recompute (R1) still in flight on top of it.
+    await source.mutate((current) => ({
+      balances: { ...current.balances, acc2: 50 },
+    }));
+
+    // Let C's OWN debounce fire and its recompute START (and block on its gate) —
+    // C must be genuinely mid-flight, not just scheduled, when D later reads it.
+    await waitFor(() => computeCallsCStarted === 2, 2000);
+
+    // NOW let D's channel-triggered recompute (R1) finish. It persists using the
+    // PRE-write `bal`/`c` it already captured plus the fresh external ids — correct
+    // for what it saw, but stale relative to the write that landed during its flight.
+    // The queued rerun (R3) must fire immediately after, reading sources fresh —
+    // exactly the moment the CT6 diamond fix (`inFlightPeek`) is supposed to cover,
+    // now combined with the external dimension.
+    releaseSecondExternalFetch!();
+    await waitFor(() => adapter.putCallsFor("diamond_race_agg_d") >= 2, 2000);
+
+    // Only now let C's second compute finish.
+    releaseSecondCCompute!();
+    await waitFor(() => computeCallsCFinished === 2, 2000);
+    await waitFor(() => adapter.putCallsFor("diamond_race_agg_c") === 2, 2000);
+
+    // Give D every opportunity to self-heal with a further reactive recompute once
+    // C republishes its fresh fingerprint — same generous window the plain
+    // warm-diamond test uses to catch a "recomputes again" gap.
+    await settle(500);
+
+    const final = await aggD.get();
+    assert.deepEqual(
+      final.data,
+      { total: 150 + 1500 },
+      "D must converge to the fully-fresh total (150 = acc1+acc2 filtered by the " +
+        "fresh external ids, 1500 = C's fresh total) — a value stuck at the pre-write " +
+        "total (250 or 1100) means the source write that landed during D's " +
+        "channel-triggered recompute was lost and D never reactively recomputes again",
+    );
+  },
+);
+
+test(
   "refresh({ bypassExternalsTtl: true }): forces a fresh external fetch even inside its " +
     "TTL window; a plain refresh() keeps reusing the cached value (Task 5 review, Finding " +
     "3 — a worker that just wrote new market data needs the NEXT recompute to see it now, " +
@@ -1940,6 +2107,183 @@ test("invalidateChannel: an unused channel name is a safe no-op", async () => {
 
   assert.doesNotThrow(() =>
     invalidateChannel("nobody-subscribes-to-this-channel"),
+  );
+});
+
+test("invalidateChannel: a transient failure in the triggered recompute (e.g. a CI edge runtime killing the request mid-flight, or any other transient network error) must be retried automatically, not abandoned until the external's TTL expires", async () => {
+  // Reproduces the real remaining gap behind the production bug: the framework's
+  // invalidateChannel/source-write reactions ALREADY converge correctly (see the
+  // race test below) — but only if every recompute attempt actually SUCCEEDS. A
+  // background triggerRecompute() that throws is only ever logged
+  // (logBackgroundFailure) and abandoned; nothing retries it. In production this
+  // is reachable by any transient failure of a source/external fetch (a killed
+  // edge isolate, a network blip, a transient 5xx) — not just a CI artifact — and
+  // without a retry, the aggregate is stuck at its pre-failure value until the
+  // external's own TTL (5 minutes in the real dashboardAgg) expires.
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("retry_source");
+  await source.set({ value: 1 });
+
+  let existingValue = 100;
+  let externalFetchCalls = 0;
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "retry_agg", key: "__agg__" },
+    sources: { src: source },
+    externals: {
+      thing: {
+        load: async () => {
+          externalFetchCalls++;
+          // Only the SECOND fetch (the invalidateChannel-triggered one) fails —
+          // simulates a single transient failure, not a permanently broken compute.
+          if (externalFetchCalls === 2) {
+            throw new Error(
+              "simulated transient failure (e.g. edge isolate killed mid-request)",
+            );
+          }
+          return existingValue;
+        },
+        ttlMs: 10 * 60 * 1000,
+        invalidateOn: ["retry-test"],
+      },
+    },
+    compute: ({ sources, externals }) => ({
+      total: sources.src.value + externals.thing,
+    }),
+  });
+
+  await agg.get();
+  await waitFor(() => adapter.putCallsFor("retry_agg") === 1);
+  assert.deepEqual((await agg.get()).data, { total: 101 });
+
+  existingValue = 200;
+  invalidateChannel("retry-test");
+  await waitFor(() => externalFetchCalls === 2, 2000);
+  await settle(50); // let the failed attempt fully settle (logged, not retried yet)
+
+  assert.equal(
+    (await agg.get()).data?.total,
+    101,
+    "sanity: the failed attempt must not have corrupted or partially persisted anything",
+  );
+
+  // If this times out, the framework silently gave up after the failed attempt —
+  // it must automatically retry a failed background recompute instead, never wait
+  // out the external's TTL.
+  await waitFor(() => externalFetchCalls === 3, 3000);
+  await waitFor(async () => (await agg.get()).data?.total === 201, 2000);
+});
+
+test("invalidateChannel: a source write landing WHILE the channel-triggered recompute is still awaiting its external fetch must not be lost", async () => {
+  // Reproduces a real production bug: the host app's dashboard aggregate filters a
+  // source's balances by an external's list of currently-existing account ids
+  // (`invalidateOn: [ACCOUNTS_CHANGED_CHANNEL]`). A user creates an account (fires
+  // invalidateChannel) then immediately imports transactions into it (a source
+  // write) before the channel-triggered external refetch — a real network round
+  // trip, slower on CI — has resolved. On CI the final total was observed frozen at
+  // the PRE-import value forever, never converging even given far more time.
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const BalancesSchema = z.object({
+    balances: z.record(z.string(), z.number()).default({}),
+  });
+  const source = defineStore({
+    name: "invchan_race_source",
+    encrypt: "all",
+    schema: BalancesSchema,
+    version: 1,
+    contentHash: true,
+    schemaFingerprint: fingerprintSchema(BalancesSchema, "all"),
+  });
+  await source.set({ balances: { acc1: 100 } });
+
+  let existingIds = ["acc1"];
+  let externalFetchCalls = 0;
+  // The test controls exactly when the external's SECOND fetch (the one
+  // invalidateChannel triggers) resolves, so a source write can land while it is
+  // still in flight — the first fetch (the aggregation's initial get()) resolves
+  // immediately, like a real fast first load.
+  let releaseSecondFetch: (() => void) | null = null;
+  const secondFetchGate = new Promise<void>((resolve) => {
+    releaseSecondFetch = resolve;
+  });
+
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "invchan_race_agg", key: "__agg__" },
+    debounceMs: 20,
+    sources: { bal: source },
+    externals: {
+      ids: {
+        load: async () => {
+          externalFetchCalls++;
+          if (externalFetchCalls === 2) await secondFetchGate;
+          return existingIds;
+        },
+        ttlMs: 10 * 60 * 1000,
+        invalidateOn: ["invchan-race-test"],
+      },
+    },
+    compute: ({ sources, externals }) => {
+      const idSet = new Set(externals.ids);
+      let total = 0;
+      for (const [id, balance] of Object.entries(sources.bal.balances)) {
+        if (idSet.has(id)) total += balance;
+      }
+      return { total };
+    },
+  });
+
+  await agg.get();
+  await waitFor(() => adapter.putCallsFor("invchan_race_agg") === 1);
+  assert.deepEqual((await agg.get()).data, { total: 100 });
+  assert.equal(externalFetchCalls, 1);
+
+  // "Account created": the new account already exists server-side by the time
+  // invalidateChannel fires — mirrors the real code, which always calls
+  // invalidateChannel AFTER its own creation POST has already resolved.
+  existingIds = ["acc1", "acc2"];
+  invalidateChannel("invchan-race-test");
+  await waitFor(() => externalFetchCalls === 2, 2000);
+  // The channel-triggered recompute is now stuck awaiting its external fetch —
+  // exactly the CI-slow-network window the real bug lives in.
+
+  // "Import lands while account creation's own recompute is still in flight": an
+  // ordinary source write, must mark the aggregation stale and queue a rerun.
+  await source.mutate((current) => ({
+    balances: { ...current.balances, acc2: 50 },
+  }));
+
+  // Let the channel-triggered recompute finish now.
+  releaseSecondFetch!();
+
+  await waitFor(() => adapter.putCallsFor("invchan_race_agg") >= 3, 2000);
+
+  assert.deepEqual(
+    (await agg.get()).data,
+    { total: 150 },
+    "the source write that landed WHILE the invalidateChannel-triggered recompute was " +
+      "still in flight must not be lost — the final persisted total must reflect BOTH " +
+      "the new account id AND its balance, not just one of the two",
   );
 });
 

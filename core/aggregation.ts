@@ -56,7 +56,7 @@ import { z } from "zod";
 import { defineStore, type Store, type KeyedStore } from "./store.ts";
 import { getSecureStoreConfig } from "./config.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
-import { LockedSessionError } from "./errors.ts";
+import { LockedSessionError, ColdAggregationSourceError } from "./errors.ts";
 import type { CryptoHandle } from "./types.ts";
 import {
   compileFieldOperators,
@@ -93,6 +93,20 @@ export interface ExternalInput<T = unknown> {
  * mutated afterward except by new `defineAggregation()` calls adding more entries.
  */
 const channelSubscribers = new Map<string, Set<() => void>>();
+
+/**
+ * Backoff schedule (ms) for automatically retrying a BACKGROUND recompute that
+ * threw — a source/external read failing transiently (a killed edge isolate under
+ * CI load, a network blip, a transient 5xx) must not leave an aggregate stuck at
+ * its pre-failure value until an external's TTL expires or an unrelated trigger
+ * happens to fire; see `triggerRecompute`'s `.finally()` below. One entry per
+ * retry attempt; the last entry repeats for any attempt beyond
+ * `BACKGROUND_RETRY_DELAYS_MS.length` (see `MAX_BACKGROUND_RETRIES`). Bounded —
+ * a persistently broken `compute()`/source/external must still surface its error
+ * after retries are exhausted, never retry forever and mask a real bug.
+ */
+const BACKGROUND_RETRY_DELAYS_MS = [1000, 3000, 8000];
+const MAX_BACKGROUND_RETRIES = BACKGROUND_RETRY_DELAYS_MS.length;
 
 /**
  * Forces every external, across every aggregation, that declared `invalidateOn: [channel]`
@@ -418,6 +432,25 @@ function isKeyedSourceRef(source: Source): source is KeyedSourceRef<unknown> {
  * IDENTITY means no property ever appears on the object literal `defineAggregation` hands
  * back — a caller holding only the public `Aggregation<T>` type has no way to reach this,
  * by accident or otherwise.
+ *
+ * KNOWN RESIDUAL GAP (not a correctness bug — a UX flicker window, scoped and understood,
+ * not fixed here): this peek only catches `source` (an aggregation-source, e.g. C) when its
+ * OWN recompute has already STARTED. If the SAME write that marked the reader (e.g. D) stale
+ * also armed C's debounce timer but that timer hasn't FIRED yet at the exact moment D's
+ * `computeAndPersist` reads `source.get()`, this peek finds nothing to await — D proceeds
+ * with C's still-stale `state.data`, persists/publishes a partially-updated value, and only
+ * self-corrects a moment later when C finishes and republishes (the ordinary
+ * subscription-driven self-heal every source triggers, see `ensureSubscribed`). The eventual
+ * value is always correct (verified by this file's diamond-DAG tests) — the gap is a brief
+ * visible flicker (stale value -> partially-updated value -> correct value) in that narrow
+ * timing window, not a wrong final result. Closing it would mean extending this same
+ * WeakMap-peek pattern to ALSO detect "C has an armed-but-not-yet-fired debounce" (there is
+ * no such peek today — only `globalPendingDebounceCount`, a global cross-aggregation
+ * counter, not a per-instance one) and, when found, force C's recompute immediately via its
+ * own `refresh()` (single-flight-safe) instead of waiting out its debounce window. Deferred:
+ * a real framework change for a rare, low-severity timing window, not the production bug
+ * this session actually fixed (a background recompute that failed and never retried,
+ * covered by `BACKGROUND_RETRY_DELAYS_MS` below and its own regression test).
  */
 const inFlightPeek = new WeakMap<
   Aggregation<unknown>,
@@ -524,6 +557,11 @@ export function defineAggregation<
   let rerunRequested = false;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let lastError: Error | null = null;
+  // Consecutive background-recompute failures since the last success — drives the
+  // retry-with-backoff below (BACKGROUND_RETRY_DELAYS_MS). Reset to 0 on any
+  // successful compute, so a fresh failure later gets its own full retry budget
+  // rather than draining a lifetime-shared counter.
+  let consecutiveBackgroundFailures = 0;
   let subscribedUserId: string | null = null;
   let unsubscribeFns: Array<() => void> = [];
   // Per-source fingerprint this instance has actually OBSERVED this session (via the
@@ -916,10 +954,10 @@ export function defineAggregation<
               }
             }
             if (data === null) {
-              throw new Error(
-                `defineAggregation(${name}): source aggregation "${sourceName}" (${source.name}) ` +
-                  `has no persisted value yet — call its own get()/refresh() at least once ` +
-                  `before using it as a source for another aggregation.`,
+              throw new ColdAggregationSourceError(
+                name,
+                sourceName,
+                source.name,
               );
             }
             return [
@@ -1088,6 +1126,7 @@ export function defineAggregation<
     const run = computeAndPersist()
       .then((result) => {
         lastError = null;
+        consecutiveBackgroundFailures = 0;
         return result;
       })
       .catch((e: unknown) => {
@@ -1131,6 +1170,38 @@ export function defineAggregation<
           triggerRecompute().catch((e) =>
             logBackgroundFailure("queued recompute failed", e),
           );
+        } else if (
+          lastError !== null &&
+          !(lastError instanceof ColdAggregationSourceError) &&
+          consecutiveBackgroundFailures < MAX_BACKGROUND_RETRIES
+        ) {
+          // This attempt failed and nothing else already queued a rerun (the
+          // `rerunRequested` branch above already covers that case, immediately,
+          // no backoff needed — a real new trigger arrived). A transient failure
+          // with NO new trigger since — e.g. a killed edge isolate, a network
+          // blip — must still self-heal: retry with backoff instead of waiting on
+          // the next unrelated source write or an external's TTL, which is what
+          // silently reproduced the "stuck for minutes" production bug this
+          // guards against (see aggregation.test.ts's own regression test).
+          // `ColdAggregationSourceError` is excluded deliberately — see that
+          // error type's own doc comment (`core/errors.ts`): it already
+          // self-heals reactively, a timer-based retry here would be redundant
+          // and would produce an extra logged failure the cold-start regression
+          // test explicitly guards against.
+          const attempt = consecutiveBackgroundFailures;
+          consecutiveBackgroundFailures++;
+          globalPendingDebounceCount++;
+          notifyGlobalActivity();
+          setTimeout(() => {
+            globalPendingDebounceCount--;
+            notifyGlobalActivity();
+            triggerRecompute().catch((e) =>
+              logBackgroundFailure(
+                `background retry ${attempt + 1}/${MAX_BACKGROUND_RETRIES} failed`,
+                e,
+              ),
+            );
+          }, BACKGROUND_RETRY_DELAYS_MS[attempt]);
         }
       });
     inFlight = run;

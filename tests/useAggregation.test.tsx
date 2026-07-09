@@ -27,6 +27,7 @@ import {
   __resetSecureStoreConfig,
   defineStore,
   defineAggregation,
+  invalidateChannel,
   fingerprintSchema,
   type StorageAdapter,
   type CacheAdapter,
@@ -448,5 +449,94 @@ describe("useAggregation", () => {
     await settle(20); // give any errant background effect a chance to run
     expect(storage.getCallsFor("locked_agg")).toBe(0);
     expect(storage.getCallsFor("locked_source")).toBe(0);
+  });
+
+  it("bugfix regression: a source write landing WHILE an invalidateChannel-triggered recompute is still awaiting its external must still reach the RENDERED hook value, not just the persisted envelope", async () => {
+    // Same production bug as `aggregation.test.ts`'s core-level regression test, but
+    // exercised through the actual React binding: `datacloak/core/aggregation.ts`'s
+    // `computeAndPersist()` was already proven correct at the pure-framework level —
+    // this isolates whether the gap is instead in how `useAggregation` republishes
+    // (or fails to republish) the converged value to a mounted component.
+    const storage = memoryAdapter();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    const cache = memoryCache();
+    configureSecureStore({ storage, keys: provider, cache });
+
+    const BalancesSchema = z.object({
+      balances: z.record(z.string(), z.number()).default({}),
+    });
+    const source = defineStore({
+      name: "hook_race_source",
+      encrypt: "all",
+      schema: BalancesSchema,
+      version: 1,
+      contentHash: true,
+      schemaFingerprint: fingerprintSchema(BalancesSchema, "all"),
+    });
+    await source.set({ balances: { acc1: 100 } });
+
+    let existingIds = ["acc1"];
+    let externalFetchCalls = 0;
+    let releaseSecondFetch!: () => void;
+    const secondFetchGate = new Promise<void>((resolve) => {
+      releaseSecondFetch = resolve;
+    });
+
+    const agg = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "hook_race_agg", key: "__agg__" },
+      debounceMs: 20,
+      sources: { bal: source },
+      externals: {
+        ids: {
+          load: async () => {
+            externalFetchCalls++;
+            if (externalFetchCalls === 2) await secondFetchGate;
+            return existingIds;
+          },
+          ttlMs: 10 * 60 * 1000,
+          invalidateOn: ["hook-race-test"],
+        },
+      },
+      compute: ({ sources, externals }) => {
+        const idSet = new Set(externals.ids);
+        let total = 0;
+        for (const [id, balance] of Object.entries(sources.bal.balances)) {
+          if (idSet.has(id)) total += balance;
+        }
+        return { total };
+      },
+    });
+
+    await agg.refresh(); // seed: { total: 100 }
+    expect(externalFetchCalls).toBe(1);
+
+    const { result } = renderHook(() => useAggregation(agg));
+    await waitFor(() => expect(result.current.data).toEqual({ total: 100 }));
+
+    // "Account created": the new account already exists server-side by the time
+    // invalidateChannel fires.
+    existingIds = ["acc1", "acc2"];
+    invalidateChannel("hook-race-test");
+    await waitFor(() => expect(externalFetchCalls).toBe(2));
+
+    // "Import lands while account creation's own recompute is still in flight": an
+    // ordinary source write.
+    await source.mutate((current) => ({
+      balances: { ...current.balances, acc2: 50 },
+    }));
+
+    // Let the channel-triggered recompute (and its queued rerun) finish.
+    releaseSecondFetch();
+
+    await waitFor(() => expect(result.current.data).toEqual({ total: 150 }), {
+      timeout: 3000,
+    });
+    expect(result.current.stale).toBe(false);
+    expect(result.current.computing).toBe(false);
+    expect(result.current.error).toBeNull();
   });
 });
