@@ -691,16 +691,19 @@ configured `CacheAdapter` themselves, under the exact same key `useStore`/
 `patchPortfolioTransaction`) now keeps every mounted hook for that store in sync,
 same as if the write had gone through the hook's own `save()`.
 
-**Deliberate exclusion: `CollectionStore.add()`/`.update()` (`many` cardinality)
-do NOT write through to the cache.** Only `perUser`/`perKey` ambient writes
-(`set()`/`mutate()` above) do. Safe today because the only consumer is
-`useCollectionStore` itself, which already applies its own optimistic
-write-through before calling `add()`/`update()` — but the first service that
-calls `add()`/`update()` ambiently (bypassing the hook, the same way
-`patchPortfolioTransaction` calls `.mutate()` directly) will silently desync
-every other mounted `useCollectionStore` for that store until a manual
-refetch. If you add such a caller, either write through the cache the same
-way `perUser`/`perKey` do, or document why not.
+**Deliberate exclusion: `CollectionStore.add()`/`.update()`/`.discard()` (`many`
+cardinality) do NOT write through to the cache.** Only `perUser`/`perKey`
+ambient writes (`set()`/`mutate()` above) do. Safe today because the only
+consumer is `useCollectionStore` itself, which already applies its own
+optimistic write-through before calling `add()`/`update()` — but the first
+service that calls `add()`/`update()`/`discard()` ambiently (bypassing the
+hook, the same way `patchPortfolioTransaction` calls `.mutate()` directly)
+will silently desync every other mounted `useCollectionStore` for that store
+until a manual refetch. If you add such a caller, either write through the
+cache the same way `perUser`/`perKey` do, or document why not — `discard()`'s
+first consumer (an account-deletion cleanup service) documents why not: the
+rows it removes belong to an entity no UI can select anymore, so there is
+nothing left to desync.
 
 **In-flight fetch deduplication:** all three React bindings (`useStore`,
 `useKeyedStore`, `useKeyedStoreRange`) keep a module-level `Map<key, Promise>`

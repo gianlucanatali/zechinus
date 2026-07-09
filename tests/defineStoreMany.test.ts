@@ -154,6 +154,34 @@ test("defineStore many: get()/add() work ambiently — no cryptoHandle/userId in
   assert.deepEqual(viaExplicit, afterAdd);
 });
 
+test("defineStore many: discard() — ambient hard-delete removes the row (mirror of remove())", async () => {
+  const adapter = collectionMemoryAdapter();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const store = defineStore({
+    name: "rebalance_simulations",
+    identity: "many",
+    encrypt: "all",
+    schema: Sim,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Sim, "all"),
+  });
+
+  const idA = await store.add({ name: "sim-a", addedLiquidity: 100 });
+  const idB = await store.add({ name: "sim-b", addedLiquidity: 200 });
+
+  await store.discard(idA);
+
+  const rows = await store.get();
+  const ids = rows.map((r) => r.id);
+  assert.ok(!ids.includes(idA), "discarded row A must be gone");
+  assert.ok(ids.includes(idB), "row B must remain");
+});
+
 test("defineStore many: get() throws an explicit error when locked (no active cryptoHandle)", async () => {
   const adapter = collectionMemoryAdapter();
   configureSecureStore({ storage: adapter, keys: fixedKeyProvider(null) });

@@ -311,6 +311,15 @@ export interface CollectionStore<T> {
   /** Ambient create — no `userId`/`CryptoHandle` — see `Store.mutate`. */
   add(data: T): Promise<string>;
   /**
+   * Ambient hard-delete — no `userId`/`CryptoHandle` — the ambient counterpart of
+   * `remove()`, same relationship as `get()`↔`list()` and `add()`↔`create()`. For
+   * callers outside a mounted React component (e.g. a service reacting to account
+   * deletion). Like `add()`/`update()`, it does NOT write through the cache (see
+   * README § "Deliberate exclusion") — safe here because the rows being discarded
+   * belong to an entity no UI can select anymore.
+   */
+  discard(id: string): Promise<void>;
+  /**
    * Present only when the store declares `optimisticLock: true`. `expectedHash`
    * comes from the `hash` field returned alongside each row in `list()` — see
    * README's "Optimistic locking" section. On success, `hash` is the row's new
@@ -975,6 +984,10 @@ function buildCollectionStore<S extends z.ZodType>(
     async add(data) {
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
       return collection.create(userId, cryptoHandle, data);
+    },
+    async discard(id) {
+      const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
+      await collection.remove(userId, cryptoHandle, id);
     },
   };
 
