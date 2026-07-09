@@ -120,15 +120,35 @@ export function invalidateChannel(channel: string): void {
  * "I don't know or care which aggregations exist, just tell me when it's quiet" case.
  */
 let globalInFlightCount = 0;
+/**
+ * Counts `scheduleDebouncedRecompute()` timers currently armed (waiting out `debounceMs`
+ * before actually calling `triggerRecompute()`), across every aggregation instance —
+ * companion to `globalInFlightCount`, not a replacement. Without this, a COLD multi-level
+ * aggregation-as-source chain (e.g. `dashboardAgg` sourcing `netWorthSeriesAgg` sourcing
+ * `portfolioSeriesAgg`) has real, observable gaps where `isAnyAggregationComputing()`
+ * reports `false`: a downstream aggregation's first read of a cold upstream one throws
+ * immediately (`computeAndPersist`'s `isAggregationSource` branch — an aggregation never
+ * waits on another's first compute) and settles its OWN `triggerRecompute()` back to idle,
+ * while the upstream's real recompute — and every subsequent hop's REACTIVE retry, which
+ * only fires via this debounce timer, never immediately — is still pending. Confirmed live
+ * both via the video-tutorial recording (a fresh page's first dashboard render showed the
+ * zero placeholder well after an E2E `waitForAggregationsIdle` had already resolved) and a
+ * dedicated regression test (`datacloak/tests/aggregation.test.ts`, "COLD start of a
+ * 2-level aggregation-as-source chain").
+ */
+let globalPendingDebounceCount = 0;
 const globalActivityListeners = new Set<() => void>();
 
 function notifyGlobalActivity(): void {
   for (const cb of globalActivityListeners) cb();
 }
 
-/** True if at least one aggregation, anywhere in the app, currently has a compute in flight. */
+/** True if at least one aggregation, anywhere in the app, currently has a compute in
+ * flight OR a debounced recompute armed and about to fire (see
+ * `globalPendingDebounceCount`'s doc comment — without the latter, a cold multi-level
+ * chain can report "idle" between hops even though it hasn't converged yet). */
 export function isAnyAggregationComputing(): boolean {
-  return globalInFlightCount > 0;
+  return globalInFlightCount > 0 || globalPendingDebounceCount > 0;
 }
 
 /** Subscribes to every transition of `isAnyAggregationComputing()`'s value. Returns an
@@ -142,9 +162,10 @@ export function subscribeGlobalAggregationActivity(cb: () => void): () => void {
 
 /** Test-only reset — mirrors `__resetSecureStoreConfig`'s naming/purpose. Aggregations are
  * permanent app-wide singletons with no dispose (see `channelSubscribers`' own doc comment),
- * so nothing else ever clears this counter between test cases. */
+ * so nothing else ever clears these counters between test cases. */
 export function __resetGlobalAggregationActivity(): void {
   globalInFlightCount = 0;
+  globalPendingDebounceCount = 0;
   globalActivityListeners.clear();
 }
 
@@ -555,9 +576,19 @@ export function defineAggregation<
   }
 
   function scheduleDebouncedRecompute(): void {
-    if (debounceTimer) clearTimeout(debounceTimer);
+    // Re-arming an ALREADY-armed timer (another source write coalescing into the same
+    // pending recompute) is not new pending work — only count the transition into
+    // "armed" from "idle", mirroring `triggerRecompute`'s own single-flight discipline.
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    } else {
+      globalPendingDebounceCount++;
+      notifyGlobalActivity();
+    }
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
+      globalPendingDebounceCount--;
+      notifyGlobalActivity();
       // CT6 fix, part 2 (diamond-DAG gap): a "diamond" source shape (see the
       // `isAggregationSource` branch's own CT6 comment in `computeAndPersist`) can mark
       // THIS aggregation stale via TWO independent subscriptions for the exact same
@@ -1191,6 +1222,12 @@ export function defineAggregation<
       if (debounceTimer) {
         clearTimeout(debounceTimer);
         debounceTimer = null;
+        // Cancelling an ARMED timer (superseded by this explicit refresh(), which calls
+        // triggerRecompute() directly below) — the pending debounce it represented never
+        // fires, so the global signal must drop it now, not wait for a timeout callback
+        // that will never run.
+        globalPendingDebounceCount--;
+        notifyGlobalActivity();
       }
       // Wipe the in-memory external cache BEFORE triggering the recompute — the TTL
       // check in `computeAndPersist` (`cached && now - cached.fetchedAtMs < ext.ttlMs`)

@@ -501,6 +501,106 @@ test("isAnyAggregationComputing: true while ANY aggregation has a compute in fli
   );
 });
 
+test(
+  "isAnyAggregationComputing: COLD start of a 2-level aggregation-as-source chain " +
+    "(D sources C, C never computed) must stay true across C's real compute AND D's " +
+    "subsequent DEBOUNCED recompute — not just during each's own triggerRecompute() " +
+    "window. Regression: D's first read of C throws immediately (C has no persisted " +
+    "value yet, by design — see computeAndPersist's isAggregationSource branch), C's own " +
+    "cold triggerRecompute settles D's OWN attempt back to 'idle' the instant it fails, " +
+    "and D's real retry (once C publishes) only fires via ensureSubscribed's " +
+    "scheduleDebouncedRecompute — which previously did not count as 'busy' while its " +
+    "timer was armed, leaving a real, observable gap where isAnyAggregationComputing() " +
+    "reported false even though the graph had NOT converged yet (reproduced live via " +
+    "the video-tutorial recording: a fresh page's first dashboard render showed the " +
+    "zero placeholder well after an E2E wait on this exact signal had already resolved)",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    configureSecureStore({
+      storage: adapter,
+      cache,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+
+    const source = makeSource("gac_chain_source");
+    await source.set({ value: 7 });
+
+    // C: real, gated compute — controls exactly when the FIRST hop of the chain
+    // actually finishes, same technique as the other isAnyAggregationComputing tests.
+    let releaseC: () => void = () => {};
+    const gateC = new Promise<void>((resolve) => {
+      releaseC = resolve;
+    });
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "gac_chain_agg_c", key: "__agg__" },
+      debounceMs: 50,
+      sources: { src: source },
+      compute: async ({ sources }) => {
+        await gateC;
+        return { total: sources.src.value * 10 };
+      },
+    });
+
+    // D: sources C as an aggregation-source — the `dashboardAgg` role. Short
+    // `debounceMs` keeps the test fast while still exercising the real debounced
+    // reactive-recompute path (production default is 500ms for both).
+    const aggD = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "gac_chain_agg_d", key: "__agg__" },
+      debounceMs: 50,
+      sources: { c: aggC },
+      compute: ({ sources }) => ({ total: sources.c.total + 1 }),
+    });
+
+    let sawBusy = false;
+    let falseAfterBusyBeforeConverged = false;
+    const unsubscribe = subscribeGlobalAggregationActivity(() => {
+      const busy = isAnyAggregationComputing();
+      if (busy) sawBusy = true;
+      if (!busy && sawBusy && !falseAfterBusyBeforeConverged) {
+        // `converged` is read synchronously here, not awaited — a plain boolean
+        // flag set once `aggD`'s final value has actually landed (below).
+        if (!converged) falseAfterBusyBeforeConverged = true;
+      }
+    });
+
+    let converged = false;
+    void aggD.get(); // cold start — D's first read of C (also cold) throws immediately
+
+    // Let D's own failed attempt settle before releasing C, so the test actually
+    // exercises the gap BETWEEN "D's first attempt failed" and "C's real compute
+    // finishes" — releasing C too early would let everything resolve in one tick.
+    await waitFor(() => isAnyAggregationComputing());
+    await settle(20);
+    releaseC();
+
+    await waitFor(async () => {
+      const state = await aggD.get();
+      if (state.data !== null && state.data.total === 71) {
+        converged = true;
+        return true;
+      }
+      return false;
+    }, 3000);
+
+    unsubscribe();
+
+    assert.equal(
+      falseAfterBusyBeforeConverged,
+      false,
+      "isAnyAggregationComputing() went idle before D's real, converged value was " +
+        "available — an E2E/tutorial wait on this signal can resolve too early",
+    );
+  },
+);
+
 test("subscribeGlobalAggregationActivity: notifies on every transition, unsubscribes cleanly", async () => {
   const adapter = memoryAdapter();
   const cache = memoryCache();
