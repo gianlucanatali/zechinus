@@ -490,3 +490,35 @@ test("getUnlockMethod: 'passkey' after setDek (dev/test injection path)", async 
   );
   assert.equal(controller.getUnlockMethod(), "passkey");
 });
+
+test("checkSetupNeeded: a different uid must never reuse a handle unlocked for someone else", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+
+  // user-a unlocks (e.g. via setDek, the dev/test injection path).
+  await controller.setDek(
+    "user-a",
+    asRawDekBytes(bytesFromRange(32, (i) => i + 7)),
+  );
+  assert.notEqual(controller.getCryptoHandle(), null);
+  assert.equal(controller.getUserId(), "user-a");
+
+  // A session swap to user-b happens underneath (e.g. multi-tab session sync
+  // via BroadcastChannel — another tab of the same browser/origin logs in as
+  // a different user, no reload, no intermediate SIGNED_OUT). The consuming
+  // app always re-runs checkSetupNeeded(auth.userId) on identity change — the
+  // controller itself must refuse to answer for user-b using user-a's handle.
+  await controller.checkSetupNeeded("user-b");
+
+  assert.equal(
+    controller.getCryptoHandle(),
+    null,
+    "user-a's handle must be destroyed, not silently reused for user-b",
+  );
+  assert.equal(controller.getUserId(), null);
+});

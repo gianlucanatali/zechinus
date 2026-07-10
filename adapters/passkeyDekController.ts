@@ -158,6 +158,17 @@ export function createPasskeyDekController(
     for (const cb of listeners) cb();
   }
 
+  // Extracted so both lock() and checkSetupNeeded() share the exact same
+  // teardown, never letting a handle survive an identity mismatch.
+  function destroyHandle(): void {
+    if (cryptoHandle) {
+      cryptoHandle.destroy();
+      cryptoHandle = null;
+    }
+    userId = null;
+    unlockMethod = null;
+  }
+
   async function activate(
     uid: string,
     rawBytes: RawDekBytes,
@@ -187,17 +198,20 @@ export function createPasskeyDekController(
     },
 
     lock() {
-      if (cryptoHandle) {
-        cryptoHandle.destroy();
-        cryptoHandle = null;
-      }
-      userId = null;
-      unlockMethod = null;
+      destroyHandle();
       notify();
     },
 
     async checkSetupNeeded(uid) {
-      if (cryptoHandle) return; // already unlocked this session — nothing to check
+      if (cryptoHandle && userId !== uid) {
+        // Identity changed underneath an active handle (e.g. a different
+        // user's session replaced this one in the same tab/browser context —
+        // multi-tab session sync, no reload, no intermediate SIGNED_OUT).
+        // Never let a stale handle answer for a new identity.
+        destroyHandle();
+        notify();
+      }
+      if (cryptoHandle) return; // already unlocked for this exact user — nothing to check
       const count = await storage.countPasskeyWraps(uid);
       setupStatus = count === 0 ? "needed" : "done";
       notify();
