@@ -1533,6 +1533,153 @@ test(
 );
 
 test(
+  "diamond DAG, ARMED-DEBOUNCE flicker: D sources the shared Store S DIRECTLY AND " +
+    "aggregation C (which itself sources S) — after C has computed once (warm), a " +
+    "write to S arms C's debounce timer (via C's own subscription) but the timer is " +
+    "forced (via D's own refresh()) BEFORE it can fire. D's resulting value, and the " +
+    "ONLY compute() call it makes for this round, must already reflect C's FRESH " +
+    "total — never a value built from C's stale pre-write `state.data`. PINS DOWN AN " +
+    "ALREADY-EXISTING GUARANTEE (not a new fix): `inFlightPeek`'s doc comment once " +
+    "described this as an open gap, but it never reproduces — `Aggregation.get()`'s " +
+    "live self-heal-on-stale-read (`if (!fresh && !inFlight) triggerRecompute()`, " +
+    "checked synchronously on every `get()`) always sets `inFlight` on C BEFORE " +
+    "`computeAndPersist`'s existing `inFlightPeek` check can run, because arming C's " +
+    "debounce and updating its fingerprint happen in the SAME synchronous " +
+    "`ensureSubscribed` callback that `get()`'s freshness check re-reads live. A " +
+    "purpose-built `debounceArmedPeek` side-channel was drafted to close this " +
+    "'gap' and found to be provably unreachable dead code — see the doc comment " +
+    "on `inFlightPeek` for the full trace.",
+  async () => {
+    const adapter = memoryAdapter();
+    const cache = memoryCache();
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    configureSecureStore({
+      storage: adapter,
+      cache,
+      keys: fixedKeyProvider(cryptoHandle),
+    });
+
+    const source = makeSource("armed_flicker_source");
+    await source.set({ value: 1 });
+
+    // C: sources the shared store DIRECTLY — the `netWorthSeriesAgg` role. Same
+    // `debounceMs` as the WARM diamond test above (30ms) — the "armed but not fired"
+    // window this test needs is deterministic regardless of the value (see the
+    // comment on `source.set()` below), so there's no reason to diverge from it.
+    let computeCallsC = 0;
+    const aggC = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "armed_flicker_agg_c", key: "__agg__" },
+      debounceMs: 30,
+      sources: { src: source },
+      compute: ({ sources }) => {
+        computeCallsC++;
+        return { total: sources.src.value * 10 };
+      },
+    });
+
+    // D: sources the SAME store directly AND `aggC` — the `dashboardAgg` role.
+    let computeCallsD = 0;
+    const dComputeCTotals: number[] = [];
+    const aggD = defineAggregation({
+      version: 1,
+      schema: OutputSchema,
+      schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+      storage: { table: "armed_flicker_agg_d", key: "__agg__" },
+      debounceMs: 30,
+      sources: { src: source, c: aggC },
+      compute: ({ sources }) => {
+        computeCallsD++;
+        dComputeCTotals.push(sources.c.total);
+        return { total: sources.src.value + sources.c.total };
+      },
+    });
+
+    // Prime WARM: converge the whole DAG once, same order/discipline as the other
+    // warm-diamond test above (D first, so C's subscription to `source` is established
+    // as a nested side effect of D's first computeAndPersist, matching production
+    // order — `dashboardAgg` reads `netWorthSeriesAgg` before it's ever read directly).
+    await aggD.get();
+    await waitFor(
+      () =>
+        computeCallsC === 1 &&
+        computeCallsD === 1 &&
+        adapter.putCallsFor("armed_flicker_agg_c") === 1 &&
+        adapter.putCallsFor("armed_flicker_agg_d") === 1,
+      3000,
+    );
+
+    computeCallsC = 0;
+    computeCallsD = 0;
+    dComputeCTotals.length = 0;
+
+    // The write: its synchronous cache notification (see `writeThroughCache` in
+    // store.ts / `memoryCache.set` here — fired INSIDE `source.set()`, never
+    // scheduled) arms both C's and D's debounce timers. The forced `aggD.refresh()`
+    // right below runs in the very next synchronous statement — no real time (let
+    // alone `debounceMs`) elapses between the two, so which debounce value is
+    // configured is irrelevant to determinism here.
+    await source.set({ value: 2 });
+
+    // Force D to recompute RIGHT NOW, deterministically inside the window where C's
+    // debounce is armed but has not fired. D's `aggC.get()` call inside
+    // `computeAndPersist` finds C's `inFlight` ALREADY non-null here — not because
+    // C's debounce timer fired, but because `get()`'s own live self-heal
+    // (`!fresh && !inFlight` → `triggerRecompute()`) synchronously started C's
+    // recompute the moment this call observed C as stale, before this `await`
+    // resolves. The existing `inFlightPeek` check then correctly awaits that
+    // promise, so D converges on C's FRESH total (20 = 2*10), never the stale one.
+    const result = await aggD.refresh();
+
+    assert.deepEqual(
+      result,
+      { total: 2 + 20 },
+      "D's forced recompute must already reflect C's FRESH total (20 = 2*10) — " +
+        "never the stale pre-write total (10 = 1*10)",
+    );
+    assert.equal(
+      computeCallsD,
+      1,
+      "D must compute exactly once to reach the fresh result — never a stale " +
+        "compute followed by a corrective second one",
+    );
+    assert.deepEqual(
+      dComputeCTotals,
+      [20],
+      "the ONLY value of `sources.c.total` D's compute() ever saw for this round " +
+        "must already be fresh (20) — a flicker would show up here as an initial " +
+        "entry of 10 (C's stale total) before a later corrective 20",
+    );
+    assert.equal(
+      computeCallsC,
+      1,
+      "C must have computed exactly once, triggered by get()'s own live " +
+        "self-heal (not by its debounce timer, which this assertion doesn't " +
+        "wait for) — never twice",
+    );
+
+    // C's armed debounce timer, still pending when its own self-heal-triggered
+    // compute already resolved it, must not fire a redundant second compute once
+    // it does elapse — its own freshness check (`isFresh`) sees an up-to-date
+    // envelope and no-ops. D's timer was explicitly canceled by the `refresh()`
+    // call above.
+    await settle(200);
+    assert.equal(
+      computeCallsC,
+      1,
+      "no redundant second compute for C after settling",
+    );
+    assert.equal(
+      computeCallsD,
+      1,
+      "no redundant second compute for D after settling",
+    );
+  },
+);
+
+test(
   "refresh({ bypassExternalsTtl: true }): forces a fresh external fetch even inside its " +
     "TTL window; a plain refresh() keeps reusing the cached value (Task 5 review, Finding " +
     "3 — a worker that just wrote new market data needs the NEXT recompute to see it now, " +

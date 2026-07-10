@@ -433,24 +433,23 @@ function isKeyedSourceRef(source: Source): source is KeyedSourceRef<unknown> {
  * back — a caller holding only the public `Aggregation<T>` type has no way to reach this,
  * by accident or otherwise.
  *
- * KNOWN RESIDUAL GAP (not a correctness bug — a UX flicker window, scoped and understood,
- * not fixed here): this peek only catches `source` (an aggregation-source, e.g. C) when its
- * OWN recompute has already STARTED. If the SAME write that marked the reader (e.g. D) stale
- * also armed C's debounce timer but that timer hasn't FIRED yet at the exact moment D's
- * `computeAndPersist` reads `source.get()`, this peek finds nothing to await — D proceeds
- * with C's still-stale `state.data`, persists/publishes a partially-updated value, and only
- * self-corrects a moment later when C finishes and republishes (the ordinary
- * subscription-driven self-heal every source triggers, see `ensureSubscribed`). The eventual
- * value is always correct (verified by this file's diamond-DAG tests) — the gap is a brief
- * visible flicker (stale value -> partially-updated value -> correct value) in that narrow
- * timing window, not a wrong final result. Closing it would mean extending this same
- * WeakMap-peek pattern to ALSO detect "C has an armed-but-not-yet-fired debounce" (there is
- * no such peek today — only `globalPendingDebounceCount`, a global cross-aggregation
- * counter, not a per-instance one) and, when found, force C's recompute immediately via its
- * own `refresh()` (single-flight-safe) instead of waiting out its debounce window. Deferred:
- * a real framework change for a rare, low-severity timing window, not the production bug
- * this session actually fixed (a background recompute that failed and never retried,
- * covered by `BACKGROUND_RETRY_DELAYS_MS` below and its own regression test).
+ * PREVIOUSLY SUSPECTED GAP, INVESTIGATED AND FOUND ALREADY CLOSED (see the "diamond DAG,
+ * ARMED-DEBOUNCE flicker" test in `aggregation.test.ts` for the pinning regression test and
+ * full reasoning): this peek only catches `source` (an aggregation-source, e.g. C) when its
+ * OWN recompute has already STARTED — the worry was that if the SAME write that marked the
+ * reader (e.g. D) stale also armed C's debounce timer but that timer hadn't FIRED yet at the
+ * exact moment D's `computeAndPersist` reads `source.get()`, this peek would find nothing to
+ * await, so D would proceed with C's still-stale `state.data`. In practice this window never
+ * opens: `Aggregation.get()` (below) re-derives `isFresh` LIVE on every call and, if stale,
+ * synchronously calls `triggerRecompute()` (setting `inFlight`) BEFORE returning — and arming
+ * a debounce timer / updating the fingerprint `isFresh` reads both happen inside the SAME
+ * synchronous `ensureSubscribed` callback. So by the time `source.get()`'s `await` resolves
+ * inside the branch below, `inFlight` is already set whenever a debounce would have been
+ * armed, and the EXISTING `sourceInFlight` check (right below) already awaits it. A
+ * purpose-built sibling peek for "armed-but-not-fired debounce" was drafted to close this as
+ * a belt-and-suspenders fix and found to be provably unreachable dead code — see the test's
+ * own doc comment for the causal proof (temporarily disabling `get()`'s self-heal branch was
+ * the only way to make the drafted fix's branch ever execute).
  */
 const inFlightPeek = new WeakMap<
   Aggregation<unknown>,
