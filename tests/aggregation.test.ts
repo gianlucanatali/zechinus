@@ -2331,6 +2331,102 @@ test("invalidateChannel: a transient failure in the triggered recompute (e.g. a 
   await waitFor(async () => (await agg.get()).data?.total === 201, 2000);
 });
 
+test("triggerRecompute: after MAX_BACKGROUND_RETRIES consecutive failures, the background retry loop stops and surfaces the final error instead of retrying forever", async () => {
+  // Sibling to the "transient failure ... must be retried automatically" test above —
+  // that one proves retry-then-succeed; this one proves the OTHER half of the same
+  // contract, spelled out in BACKGROUND_RETRY_DELAYS_MS's doc comment in
+  // aggregation.ts: "a persistently broken compute()/source/external must still
+  // surface its error after retries are exhausted, never retry forever and mask a
+  // real bug." Unlike the sibling test (which only fails ONCE, on the second
+  // attempt), this external throws on EVERY call, so the retry loop must exhaust its
+  // budget (1 initial attempt + MAX_BACKGROUND_RETRIES=3 retries = 4 total) and then
+  // genuinely stop — no 5th attempt, ever.
+  const adapter = memoryAdapter();
+  const cache = memoryCache();
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  configureSecureStore({
+    storage: adapter,
+    cache,
+    keys: fixedKeyProvider(cryptoHandle),
+  });
+
+  const source = makeSource("cap_source");
+  await source.set({ value: 1 });
+
+  let attemptCount = 0;
+  const agg = defineAggregation({
+    version: 1,
+    schema: OutputSchema,
+    schemaFingerprint: fingerprintSchema(OutputSchema, "all"),
+    storage: { table: "cap_agg", key: "__agg__" },
+    sources: { src: source },
+    externals: {
+      thing: {
+        load: async (): Promise<number> => {
+          attemptCount++;
+          // Every single call fails — a persistently broken external/compute, not a
+          // transient blip (contrast with the sibling test's "only the 2nd fetch
+          // fails").
+          throw new Error(
+            `persistently broken external (attempt ${attemptCount})`,
+          );
+        },
+        ttlMs: 10 * 60 * 1000,
+      },
+    },
+    compute: ({ sources, externals }) => ({
+      total: sources.src.value + (externals.thing as number),
+    }),
+  });
+
+  // Nothing is persisted yet, so this immediately kicks off attempt 1 in the
+  // background (fire-and-forget) and returns {data: null, computing: true} right
+  // away — same "never persisted" path scenario 1 already covers.
+  const first = await agg.get();
+  assert.equal(first.data, null);
+
+  // The backoff schedule is BACKGROUND_RETRY_DELAYS_MS = [1000, 3000, 8000]ms, so
+  // attempt 4 (the 3rd and last retry) only fires ~12s after attempt 1 failed. Same
+  // real-timer waitFor() pattern the sibling retry test above already uses, just
+  // with a longer timeout to cover the full backoff sum.
+  await waitFor(() => attemptCount === 4, 15_000);
+  // Let attempt 4 fully settle (its rejection propagate through .then/.catch/
+  // .finally) before checking whether a 5th retry got scheduled.
+  await settle(200);
+
+  // Wait well past the point a 5th attempt would have fired if the cap didn't
+  // exist (the 3rd retry's own delay was 8000ms — this margin is comfortably
+  // longer), then confirm the count is STILL exactly 4.
+  await settle(4_000);
+  assert.equal(
+    attemptCount,
+    4,
+    "must stop at exactly 4 attempts (1 initial + MAX_BACKGROUND_RETRIES retries) " +
+      "— a 5th attempt would mean the cap doesn't actually bound the retry loop",
+  );
+
+  // Only now (after the "no 5th attempt" assertion already landed) read the
+  // surfaced error — this read is itself a fresh, user-initiated get() that may
+  // kick off its own new attempt in the background, but that happens strictly
+  // AFTER the assertions above, so it can't corrupt the attempt count already
+  // asserted.
+  const finalState = await agg.get();
+  assert.equal(
+    finalState.data,
+    null,
+    "nothing was ever computed successfully, so data must still be null",
+  );
+  assert.ok(
+    finalState.error,
+    "the final failure must be surfaced via error, never silently swallowed",
+  );
+  assert.match(
+    finalState.error!.message,
+    /persistently broken external/,
+    "the surfaced error must reflect the actual last failure, not a generic/empty message",
+  );
+});
+
 test("invalidateChannel: a source write landing WHILE the channel-triggered recompute is still awaiting its external fetch must not be lost", async () => {
   // Reproduces a real production bug: the host app's dashboard aggregate filters a
   // source's balances by an external's list of currently-existing account ids
