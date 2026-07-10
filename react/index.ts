@@ -21,5 +21,7 @@ export { usePasskeyDek, type UsePasskeyDekResult } from "./usePasskeyDek.ts";
 export { useAutoLock } from "./useAutoLock.ts";
 export {
   useDevDekInjection,
+  DevDekInjectionBridge,
   type UseDevDekInjectionOptions,
+  type DevDekInjectionBridgeProps,
 } from "./useDevDekInjection.ts";

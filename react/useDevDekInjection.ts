@@ -15,6 +15,15 @@ import { useEffect } from "react";
 import { asRawDekBytes, type KeyHandle } from "../core/keyDerivation.ts";
 import type { PasskeyDekController } from "../adapters/passkeyDekController.ts";
 
+// SEC-15: `enabled` is a runtime prop, so a bundler can never dead-code-eliminate
+// this hook's body from it alone — `if (someRuntimeBoolean) {...}` isn't the same
+// as `if (import.meta.env.DEV) {...}`, which Vite inlines to a literal `false` in
+// production and Rollup/esbuild then strip entirely. Callers that want this hook's
+// code (including the `__setTestDek`-style window property names) genuinely absent
+// from production bundles — not just inert — must render `DevDekInjectionBridge`
+// behind a static `import.meta.env.DEV &&` check instead of calling the hook
+// directly; see that component's own doc comment below.
+
 const STORAGE_KEY = "__testDek__";
 
 export interface UseDevDekInjectionOptions {
@@ -77,4 +86,36 @@ export function useDevDekInjection(
     const bytes = new Uint8Array(JSON.parse(stored));
     controller.setDek(userId, asRawDekBytes(bytes)).catch(console.error);
   }, [enabled, userId, cryptoHandle, controller]);
+}
+
+export interface DevDekInjectionBridgeProps extends Omit<
+  UseDevDekInjectionOptions,
+  "enabled"
+> {
+  controller: PasskeyDekController;
+  userId: string | null;
+  cryptoHandle: KeyHandle | null;
+}
+
+/**
+ * Mount this instead of calling `useDevDekInjection` directly when the goal is
+ * for the injection code to be genuinely absent from production bundles, not
+ * merely inert there (SEC-15). Render it behind a static
+ * `{import.meta.env.DEV && <DevDekInjectionBridge .../>}` check at the call
+ * site — Vite inlines `import.meta.env.DEV` to a literal `false` in production,
+ * so Rollup/esbuild can constant-fold the whole branch away, dropping both this
+ * component and its import specifier (and everything it pulls in) from the
+ * production chunk instead of merely disabling it at runtime.
+ */
+export function DevDekInjectionBridge({
+  controller,
+  userId,
+  cryptoHandle,
+  ...options
+}: DevDekInjectionBridgeProps): null {
+  useDevDekInjection(controller, userId, cryptoHandle, {
+    ...options,
+    enabled: true,
+  });
+  return null;
 }
