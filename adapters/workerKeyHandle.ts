@@ -84,6 +84,8 @@ export async function createWorkerKeyHandle(
     wrapForDevice: (devicePublicKeyB64) =>
       send("wrapForDevice", { devicePublicKeyB64 }) as Promise<{
         ciphertext: string;
+        nonce: string;
+        ephemeralPublicKeyB64: string;
       }>,
     destroy() {
       worker.postMessage({ id: nextId++, type: "destroy" });

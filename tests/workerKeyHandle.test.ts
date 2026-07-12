@@ -126,6 +126,8 @@ test("createWorkerKeyHandle: wrapForDevice proxies through to the worker's handl
       createKeyHandle(rawBytes, new Uint8Array(32).fill(7), "test-info", {
         wrapForDevice: async (key, devicePublicKeyB64) => ({
           ciphertext: `wrapped(${devicePublicKeyB64}):${key.length}bytes`,
+          nonce: "fake-nonce",
+          ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
         }),
       }),
     workerCtx,

@@ -1,159 +1,78 @@
-/* eslint-disable no-undef */
 /**
- * Device-bound key provider — a non-exportable asymmetric keypair generated once per
- * device/browser, used to wrap a raw DEK so that only THIS device's private key can
- * unwrap it (multi-device DEK-rotation delivery, key-custody roadmap Fase 2.3: another
- * device wraps DEK_{N+1} against this device's public key, delivered via the device
- * registry). RSA-OAEP, not ECDH: a direct public-key encrypt of the 32-byte DEK needs no
- * ephemeral key / HKDF step on the sending device — one WebCrypto call, correct by
- * construction, no wrap format beyond a ciphertext.
+ * Device-bound key material for multi-device DEK delivery (key-custody roadmap Fase
+ * 2.3) — derived DETERMINISTICALLY from the passkey's KEK, never generated randomly
+ * and never persisted anywhere. An earlier version of this file generated a random
+ * WebCrypto RSA-OAEP keypair and persisted it in IndexedDB so it would survive
+ * reloads. That was the wrong design: a persisted private key, even non-extractable,
+ * is a standing secret a compromised script in this origin can USE at any time —
+ * including while the app is fully locked/closed — since WebCrypto has no per-use
+ * gate (unlike a passkey ceremony, which requires a visible, user-gesture-gated
+ * WebAuthn prompt every time). Deriving the device key from the KEK instead means
+ * there is nothing to persist: the "device private key" only exists for as long as
+ * the KEK does — in memory, for the duration of an unlock — exactly like the
+ * DEK/KEK themselves. Same KEK in, same device public key out, every time.
  *
- * Persistence is injected (`DeviceKeyPairStorage`) rather than hardcoded to IndexedDB, so
- * the crypto itself is testable under plain `node --test` (`crypto.subtle` is available
- * there) — only `indexedDbDeviceKeyPairStorage`, the real browser-backed implementation,
- * needs an actual browser (covered by the consuming app's E2E suite, same split as
- * `webauthnKeyProvider.ts`).
+ * Derived from the KEK, not the DEK: the KEK is tied to the passkey credential and
+ * stays stable across a DEK rotation (a "graceful" rotation keeps the same passkey,
+ * only the DEK changes) — deriving from the DEK would make the device's own public
+ * key go stale at the exact moment a rotation needs to address it.
+ *
+ * The wrap itself is an ephemeral-static X25519 ECDH (`@noble/curves`, same trusted
+ * family as `@noble/ciphers`/`@noble/hashes` already used here): the sender generates
+ * a one-off ephemeral keypair, computes a shared secret against the recipient's
+ * (derived) device public key, HKDF-derives a wrapping key from it, and reuses the
+ * existing `wrapKey`/`unwrapKey` (AES-GCM) — no new AEAD implementation needed.
  */
+import { x25519 } from "@noble/curves/ed25519.js";
+import {
+  deriveKey,
+  wrapKey,
+  unwrapKey,
+  bytesToBase64,
+  base64ToBytes,
+} from "../core/keyDerivation.ts";
+import type { WrappedKey } from "../core/keyDerivation.ts";
 
-import { bytesToBase64, base64ToBytes } from "../core/keyDerivation.ts";
+/** IMMUTABLE once any device public key has been derived/registered — changing it makes every derived device key different, permanently (same rationale as `webauthnKeyProvider`'s salts). */
+const DEVICE_KEY_SALT = new TextEncoder().encode("datacloak-device-key-v1");
+const DEVICE_KEY_INFO = "device-key-x25519-seed-v1";
+const WRAP_KEK_INFO = "device-key-wrap-shared-secret-v1";
 
-const RSA_OAEP_PARAMS: RsaHashedKeyGenParams = {
-  name: "RSA-OAEP",
-  modulusLength: 3072,
-  publicExponent: new Uint8Array([1, 0, 1]),
-  hash: "SHA-256",
-};
+export type DeviceWrappedKey = WrappedKey & { ephemeralPublicKeyB64: string };
 
-/** RSA-OAEP has no external nonce (OAEP padding is randomized internally) — unlike `WrappedKey`. */
-export type DeviceWrappedKey = { ciphertext: string };
-
-export interface DeviceKeyPairStorage {
-  loadKeyPair(): Promise<CryptoKeyPair | null>;
-  saveKeyPair(keyPair: CryptoKeyPair): Promise<void>;
-}
-
-export interface DeviceKeyProvider {
-  /** Generates the device keypair on first call, persists it, and returns the (exportable) public key. Idempotent. */
-  getOrCreateDevicePublicKey(): Promise<{ publicKeyB64: string }>;
-  /** Unwraps a DEK wrapped for THIS device's public key. Throws if wrapped for a different device. */
-  unwrapWithDeviceKey(wrapped: DeviceWrappedKey): Promise<Uint8Array>;
-}
-
-export function webDeviceKeyProvider(
-  storage: DeviceKeyPairStorage,
-): DeviceKeyProvider {
-  let cached: CryptoKeyPair | null = null;
-
-  async function getOrCreateKeyPair(): Promise<CryptoKeyPair> {
-    if (cached) return cached;
-    const stored = await storage.loadKeyPair();
-    if (stored) {
-      cached = stored;
-      return stored;
-    }
-    // extractable:false applies to the private key only — the Web Crypto spec always
-    // generates the public key of a pair as extractable, regardless of this flag.
-    const keyPair = await crypto.subtle.generateKey(RSA_OAEP_PARAMS, false, [
-      "encrypt",
-      "decrypt",
-    ]);
-    await storage.saveKeyPair(keyPair);
-    cached = keyPair;
-    return keyPair;
-  }
-
-  return {
-    async getOrCreateDevicePublicKey() {
-      const keyPair = await getOrCreateKeyPair();
-      const raw = await crypto.subtle.exportKey("spki", keyPair.publicKey);
-      return { publicKeyB64: bytesToBase64(new Uint8Array(raw)) };
-    },
-
-    async unwrapWithDeviceKey(wrapped) {
-      const keyPair = await getOrCreateKeyPair();
-      const ct = base64ToBytes(wrapped.ciphertext);
-      const plain = await crypto.subtle.decrypt(
-        { name: "RSA-OAEP" },
-        keyPair.privateKey,
-        ct,
-      );
-      return new Uint8Array(plain);
-    },
-  };
+/** Deterministically derives this device's X25519 public key from the KEK. Same KEK → same public key, every time — nothing to persist, nothing to "create". */
+export function deriveDevicePublicKey(kek: Uint8Array): string {
+  const seed = deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32);
+  return bytesToBase64(x25519.getPublicKey(seed));
 }
 
 /**
- * Wraps a DEK for delivery to a specific device, called from ANY device that already
- * holds the plaintext DEK — needs only the target's public key, never its private key,
- * so it's a standalone function rather than a `DeviceKeyProvider` method.
+ * Wraps a DEK for delivery to a specific device's public key — called by whichever
+ * device already holds the plaintext DEK. Needs only the recipient's public key,
+ * never the recipient's KEK/private material.
  */
-export async function wrapForDevicePublicKey(
-  publicKeyB64: string,
-  dek: Uint8Array<ArrayBuffer>,
-): Promise<DeviceWrappedKey> {
-  const raw = base64ToBytes(publicKeyB64);
-  const publicKey = await crypto.subtle.importKey(
-    "spki",
-    raw,
-    RSA_OAEP_PARAMS,
-    true,
-    ["encrypt"],
+export function wrapForDevicePublicKey(
+  devicePublicKeyB64: string,
+  dek: Uint8Array,
+): DeviceWrappedKey {
+  const devicePublicKey = base64ToBytes(devicePublicKeyB64);
+  const ephemeralSeed = x25519.utils.randomSecretKey();
+  const ephemeralPublicKeyB64 = bytesToBase64(
+    x25519.getPublicKey(ephemeralSeed),
   );
-  const ct = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, publicKey, dek);
-  return { ciphertext: bytesToBase64(new Uint8Array(ct)) };
+  const sharedSecret = x25519.getSharedSecret(ephemeralSeed, devicePublicKey);
+  const wrapKek = deriveKey(sharedSecret, DEVICE_KEY_SALT, WRAP_KEK_INFO, 32);
+  return { ...wrapKey(wrapKek, dek), ephemeralPublicKeyB64 };
 }
 
-const DB_NAME = "datacloak-device-key";
-const STORE_NAME = "keypair";
-const RECORD_KEY = "device-keypair";
-
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => {
-      req.result.createObjectStore(STORE_NAME);
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () =>
-      reject(
-        new Error(
-          `deviceKeyProvider.openDb: ${req.error?.message ?? "unknown IndexedDB error"}`,
-        ),
-      );
-  });
-}
-
-/** Real browser-backed storage — persists the non-extractable `CryptoKeyPair` object itself (structured-clonable) via IndexedDB. */
-export function indexedDbDeviceKeyPairStorage(): DeviceKeyPairStorage {
-  return {
-    async loadKeyPair() {
-      const db = await openDb();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, "readonly");
-        const req = tx.objectStore(STORE_NAME).get(RECORD_KEY);
-        req.onsuccess = () => resolve(req.result ?? null);
-        req.onerror = () =>
-          reject(
-            new Error(
-              `deviceKeyProvider.loadKeyPair: ${req.error?.message ?? "unknown IndexedDB error"}`,
-            ),
-          );
-      });
-    },
-
-    async saveKeyPair(keyPair) {
-      const db = await openDb();
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, "readwrite");
-        tx.objectStore(STORE_NAME).put(keyPair, RECORD_KEY);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () =>
-          reject(
-            new Error(
-              `deviceKeyProvider.saveKeyPair: ${tx.error?.message ?? "unknown IndexedDB error"}`,
-            ),
-          );
-      });
-    },
-  };
+/** Unwraps a DEK wrapped for this device — re-derives this device's private key from the KEK on the spot, needs no persisted material. Throws if the wrap targets a different device's public key. */
+export function unwrapWithDeviceKey(
+  kek: Uint8Array,
+  wrapped: DeviceWrappedKey,
+): Uint8Array {
+  const seed = deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32);
+  const ephemeralPublicKey = base64ToBytes(wrapped.ephemeralPublicKeyB64);
+  const sharedSecret = x25519.getSharedSecret(seed, ephemeralPublicKey);
+  const wrapKek = deriveKey(sharedSecret, DEVICE_KEY_SALT, WRAP_KEK_INFO, 32);
+  return unwrapKey(wrapKek, wrapped);
 }

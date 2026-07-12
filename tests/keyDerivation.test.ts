@@ -183,7 +183,11 @@ test("createKeyHandle: wrapForDevice passes the closed-over key to the injected 
       wrapForDevice: async (k, devicePublicKeyB64) => {
         receivedKey = k;
         receivedPublicKey = devicePublicKeyB64;
-        return { ciphertext: "fake-ciphertext" };
+        return {
+          ciphertext: "fake-ciphertext",
+          nonce: "fake-nonce",
+          ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
+        };
       },
     },
   );
@@ -191,7 +195,11 @@ test("createKeyHandle: wrapForDevice passes the closed-over key to the injected 
   const result = await handle.wrapForDevice!("device-pubkey-b64");
   assert.deepEqual(receivedKey, key);
   assert.equal(receivedPublicKey, "device-pubkey-b64");
-  assert.deepEqual(result, { ciphertext: "fake-ciphertext" });
+  assert.deepEqual(result, {
+    ciphertext: "fake-ciphertext",
+    nonce: "fake-nonce",
+    ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
+  });
 });
 
 test("bindKeyHandleFactory: bound factory produces the same handle as calling createKeyHandle directly", () => {

@@ -1,102 +1,94 @@
-/* eslint-disable no-undef */
 /**
- * `webDeviceKeyProvider` runs entirely on `crypto.subtle` (RSA-OAEP), available under
- * plain `node --test` — no browser needed for the crypto itself. What IS browser-only is
- * the IndexedDB-backed `DeviceKeyPairStorage` (`indexedDbDeviceKeyPairStorage`), so these
- * tests inject an in-memory fake storage instead; that also lets "survives reload" be
- * expressed precisely as "a fresh provider instance backed by the same storage".
+ * `deriveDevicePublicKey`/`wrapForDevicePublicKey`/`unwrapWithDeviceKey` are pure
+ * functions of the KEK — no storage, no browser API, so they run directly under
+ * `node --test` like the rest of the crypto core. Nothing here needs a fake/in-memory
+ * storage double (an earlier version of this file did, before the IndexedDB-persisted
+ * design was replaced by derivation from the KEK).
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { DeviceKeyPairStorage } from "../adapters/deviceKeyProvider.ts";
 import {
-  webDeviceKeyProvider,
+  deriveDevicePublicKey,
   wrapForDevicePublicKey,
+  unwrapWithDeviceKey,
 } from "../adapters/deviceKeyProvider.ts";
 import { mobileDeviceKeyProvider } from "../adapters/mobileDeviceKeyProvider.ts";
 import { createKeyHandle, asRawDekBytes } from "../core/keyDerivation.ts";
 
-function memoryStorage(): DeviceKeyPairStorage {
-  let stored: CryptoKeyPair | null = null;
-  return {
-    async loadKeyPair() {
-      return stored;
-    },
-    async saveKeyPair(keyPair) {
-      stored = keyPair;
-    },
-  };
+function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
+  const out = new Uint8Array(len);
+  for (let i = 0; i < len; i++) out[i] = fn(i);
+  return out;
 }
 
-test("webDeviceKeyProvider: the private key is generated non-extractable", async () => {
-  const storage = memoryStorage();
-  await webDeviceKeyProvider(storage).getOrCreateDevicePublicKey();
-
-  const keyPair = await storage.loadKeyPair();
-  assert.ok(keyPair);
-  assert.equal(keyPair.privateKey.extractable, false);
+test("deriveDevicePublicKey: the same KEK always derives the same public key — nothing to persist, nothing to reload", () => {
+  const kek = bytesFromRange(32, (i) => i);
+  assert.equal(deriveDevicePublicKey(kek), deriveDevicePublicKey(kek));
 });
 
-test("webDeviceKeyProvider: the public key persists across provider instances backed by the same storage (simulates a reload)", async () => {
-  const storage = memoryStorage();
-  const { publicKeyB64: keyFromFirstInstance } =
-    await webDeviceKeyProvider(storage).getOrCreateDevicePublicKey();
-
-  // A fresh provider instance sharing the same storage stands in for "after reload":
-  // no in-memory cache to fall back on, only what was persisted.
-  const { publicKeyB64: keyFromSecondInstance } =
-    await webDeviceKeyProvider(storage).getOrCreateDevicePublicKey();
-
-  assert.equal(keyFromFirstInstance, keyFromSecondInstance);
+test("deriveDevicePublicKey: a different KEK derives a different public key", () => {
+  const kekA = bytesFromRange(32, (i) => i);
+  const kekB = bytesFromRange(32, (i) => 31 - i);
+  assert.notEqual(deriveDevicePublicKey(kekA), deriveDevicePublicKey(kekB));
 });
 
-test("wrapForDevicePublicKey + unwrapWithDeviceKey: round-trips a DEK-sized payload", async () => {
-  const storage = memoryStorage();
-  const provider = webDeviceKeyProvider(storage);
-  const { publicKeyB64 } = await provider.getOrCreateDevicePublicKey();
+test("wrapForDevicePublicKey + unwrapWithDeviceKey: round-trips a DEK-sized payload for the device that owns the KEK", () => {
+  const kek = bytesFromRange(32, (i) => i);
+  const publicKeyB64 = deriveDevicePublicKey(kek);
 
-  const dek = crypto.getRandomValues(new Uint8Array(32));
-  const wrapped = await wrapForDevicePublicKey(publicKeyB64, dek);
-  const unwrapped = await provider.unwrapWithDeviceKey(wrapped);
+  const dek = bytesFromRange(32, (i) => (i * 3) % 256);
+  const wrapped = wrapForDevicePublicKey(publicKeyB64, dek);
+  const unwrapped = unwrapWithDeviceKey(kek, wrapped);
 
   assert.deepEqual(unwrapped, dek);
 });
 
-test("unwrapWithDeviceKey: a different device's private key cannot unwrap the wrap (device-bound, not shared)", async () => {
-  const storageA = memoryStorage();
-  const { publicKeyB64: publicKeyA } =
-    await webDeviceKeyProvider(storageA).getOrCreateDevicePublicKey();
+test("wrapForDevicePublicKey: wrapping the same DEK twice for the same device produces different ciphertexts (fresh ephemeral key each call)", () => {
+  const kek = bytesFromRange(32, (i) => i);
+  const publicKeyB64 = deriveDevicePublicKey(kek);
+  const dek = bytesFromRange(32, (i) => i);
 
-  const storageB = memoryStorage();
-  const providerB = webDeviceKeyProvider(storageB);
-  await providerB.getOrCreateDevicePublicKey(); // B has its own, unrelated keypair
+  const wrappedA = wrapForDevicePublicKey(publicKeyB64, dek);
+  const wrappedB = wrapForDevicePublicKey(publicKeyB64, dek);
 
-  const dek = crypto.getRandomValues(new Uint8Array(32));
-  const wrapped = await wrapForDevicePublicKey(publicKeyA, dek);
+  assert.notEqual(
+    wrappedA.ephemeralPublicKeyB64,
+    wrappedB.ephemeralPublicKeyB64,
+  );
+  assert.notEqual(wrappedA.ciphertext, wrappedB.ciphertext);
+  assert.deepEqual(unwrapWithDeviceKey(kek, wrappedA), dek);
+  assert.deepEqual(unwrapWithDeviceKey(kek, wrappedB), dek);
+});
 
-  await assert.rejects(() => providerB.unwrapWithDeviceKey(wrapped));
+test("unwrapWithDeviceKey: a different device's KEK cannot unwrap the wrap (device-bound, not shared)", () => {
+  const kekA = bytesFromRange(32, (i) => i);
+  const kekB = bytesFromRange(32, (i) => 31 - i);
+  const publicKeyA = deriveDevicePublicKey(kekA);
+
+  const dek = bytesFromRange(32, (i) => i);
+  const wrapped = wrapForDevicePublicKey(publicKeyA, dek);
+
+  assert.throws(() => unwrapWithDeviceKey(kekB, wrapped));
 });
 
 test("createKeyHandle + wrapForDevice: the intended real usage — the DEK held by a KeyHandle (e.g. a Worker) is wrapped for a device's public key without ever being handed to the caller as a plain value", async () => {
-  const recipientStorage = memoryStorage();
-  const { publicKeyB64 } =
-    await webDeviceKeyProvider(recipientStorage).getOrCreateDevicePublicKey();
+  const recipientKek = bytesFromRange(32, (i) => i * 5);
+  const publicKeyB64 = deriveDevicePublicKey(recipientKek);
 
-  const dek = crypto.getRandomValues(new Uint8Array(32));
+  const dek = bytesFromRange(32, (i) => (i * 7) % 256);
   const handle = createKeyHandle(
     asRawDekBytes(dek),
     new Uint8Array(32).fill(7),
     "test-info",
     {
-      wrapForDevice: (key, devicePublicKeyB64) =>
+      wrapForDevice: async (key, devicePublicKeyB64) =>
         wrapForDevicePublicKey(devicePublicKeyB64, key),
     },
   );
 
   // The handle's public surface never returns `dek` — only `wrapForDevice`'s result.
   const wrapped = await handle.wrapForDevice!(publicKeyB64);
-  const unwrapped =
-    await webDeviceKeyProvider(recipientStorage).unwrapWithDeviceKey(wrapped);
+  const unwrapped = unwrapWithDeviceKey(recipientKek, wrapped);
 
   assert.deepEqual(unwrapped, dek);
 });
