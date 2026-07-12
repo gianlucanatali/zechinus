@@ -35,6 +35,10 @@ import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
 import type { CryptoHandle, FieldAAD, KeyColumn } from "./types.ts";
 import { LockedSessionError, OptimisticLockConflictError } from "./errors.ts";
+import {
+  reencryptRowIfNeeded,
+  type RotationOutcome,
+} from "./rotationMigration.ts";
 
 /**
  * Resolves the current session's `CryptoHandle` AND userId from the configured
@@ -210,6 +214,23 @@ export interface Store<T> {
     data: T,
     expectedHash: string | null,
   ): Promise<{ ok: boolean; hash: string | null }>;
+  /**
+   * DEK rotation (key-custody roadmap Fase 2.3): re-encrypts this user's row
+   * from `oldHandle` to `newHandle`, tagging it with `newEpoch`. Always present
+   * — every `defineStore`-created store gets this for free, no app-level wiring
+   * needed per store. Safe to call repeatedly (idempotent): a row already
+   * migrated by an earlier/interrupted call is detected and left untouched
+   * (`alreadyMigrated`), never re-written. A row missing entirely (never saved)
+   * is a no-op (`migrated: 0, alreadyMigrated: 0, failed: []`) — there is
+   * nothing to rotate. Does NOT touch the read-through cache: the plaintext
+   * value never changes, only its ciphertext, so any cached copy stays valid.
+   */
+  rotateEpoch(
+    userId: string,
+    oldHandle: CryptoHandle,
+    newHandle: CryptoHandle,
+    newEpoch: number,
+  ): Promise<RotationOutcome>;
 }
 
 /** `perKey`-cardinality store: one blob per `(user, domain key)`. */
@@ -284,6 +305,18 @@ export interface KeyedStore<T> {
     data: T,
     expectedHash: string | null,
   ): Promise<{ ok: boolean; hash: string | null }>;
+  /**
+   * DEK rotation (key-custody roadmap Fase 2.3): re-encrypts EVERY key this user
+   * has in this store from `oldHandle` to `newHandle`, tagging each with
+   * `newEpoch`. Requires `listAll` on the configured adapter (throws by name if
+   * missing). Idempotent per key, same contract as `Store.rotateEpoch`.
+   */
+  rotateEpoch(
+    userId: string,
+    oldHandle: CryptoHandle,
+    newHandle: CryptoHandle,
+    newEpoch: number,
+  ): Promise<RotationOutcome>;
 }
 
 /** `identity: "many"` — a collection with a framework-generated id, one encrypted blob per row. */
@@ -333,6 +366,20 @@ export interface CollectionStore<T> {
     data: T,
     expectedHash: string | null,
   ): Promise<{ ok: boolean; hash: string | null }>;
+  /**
+   * DEK rotation (key-custody roadmap Fase 2.3): re-encrypts EVERY row this user
+   * has in this collection from `oldHandle` to `newHandle`, tagging each with
+   * `newEpoch`. Requires `list` on the configured adapter (throws by name if
+   * missing — same requirement `CollectionStore.list()` already has). Idempotent
+   * per row, same contract as `Store.rotateEpoch`. Plaintext (mixed `enc()`)
+   * columns are untouched — rotation only ever re-encrypts the blob.
+   */
+  rotateEpoch(
+    userId: string,
+    oldHandle: CryptoHandle,
+    newHandle: CryptoHandle,
+    newEpoch: number,
+  ): Promise<RotationOutcome>;
 }
 
 /** `defineStore`'s return type based on cardinality: perKey → KeyedStore, many → CollectionStore, else Store. */
@@ -787,6 +834,48 @@ function buildKeyedStore<S extends z.ZodType>(
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
       return keyed.list(userId, cryptoHandle, range);
     },
+    async rotateEpoch(userId, oldHandle, newHandle, newEpoch) {
+      const { storage } = getSecureStoreConfig();
+      if (!storage.listAll) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support perKey enumeration (listAll missing) — required for DEK rotation.`,
+        );
+      }
+      const rows = await storage.listAll(def.name, userId, keyColumn);
+      let migrated = 0;
+      let alreadyMigrated = 0;
+      const failed: Array<{ key: unknown; error: string }> = [];
+      for (const { key, record } of rows) {
+        const oldAAD = canonicalAADFor(oldHandle, key);
+        const newAAD = { ...canonicalAADFor(newHandle, key), epoch: newEpoch };
+        try {
+          const result = await reencryptRowIfNeeded(
+            oldHandle,
+            newHandle,
+            oldAAD,
+            newAAD,
+            record,
+            def.version,
+            migrators,
+            empty,
+          );
+          if (result === "already-migrated") {
+            alreadyMigrated++;
+            continue;
+          }
+          await storage.put(
+            def.name,
+            userId,
+            [{ column: keyColumn, value: key }],
+            result,
+          );
+          migrated++;
+        } catch (e) {
+          failed.push({ key, error: String(e) });
+        }
+      }
+      return { migrated, alreadyMigrated, failed };
+    },
   };
 
   if (def.contentHash) {
@@ -989,6 +1078,48 @@ function buildCollectionStore<S extends z.ZodType>(
       const { cryptoHandle, userId } = resolveAmbientIdentity(def.name);
       await collection.remove(userId, cryptoHandle, id);
     },
+    async rotateEpoch(userId, oldHandle, newHandle, newEpoch) {
+      const { storage } = getSecureStoreConfig();
+      if (!storage.list) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support 'many' (list missing).`,
+        );
+      }
+      if (!storage.updateById) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support 'many' (updateById missing).`,
+        );
+      }
+      const rows = await storage.list(def.name, userId, plaintextKeys);
+      let migrated = 0;
+      let alreadyMigrated = 0;
+      const failed: Array<{ key: unknown; error: string }> = [];
+      for (const { id, record, plain } of rows) {
+        const oldAAD = canonicalAADFor(oldHandle, id);
+        const newAAD = { ...canonicalAADFor(newHandle, id), epoch: newEpoch };
+        try {
+          const result = await reencryptRowIfNeeded(
+            oldHandle,
+            newHandle,
+            oldAAD,
+            newAAD,
+            record,
+            def.version,
+            migrators,
+            emptyEncPart,
+          );
+          if (result === "already-migrated") {
+            alreadyMigrated++;
+            continue;
+          }
+          await storage.updateById(def.name, userId, id, result, plain);
+          migrated++;
+        } catch (e) {
+          failed.push({ key: id, error: String(e) });
+        }
+      }
+      return { migrated, alreadyMigrated, failed };
+    },
   };
 
   if (def.optimisticLock) {
@@ -1151,6 +1282,36 @@ function buildPerUserStore<S extends z.ZodType>({
       }
       // Unreachable — the loop above always returns or throws on its last iteration.
       throw new OptimisticLockConflictError(def.name);
+    },
+    async rotateEpoch(userId, oldHandle, newHandle, newEpoch) {
+      const { storage } = getSecureStoreConfig();
+      const record = await storage.get(def.name, userId, []);
+      if (!record) return { migrated: 0, alreadyMigrated: 0, failed: [] };
+      const oldAAD = canonicalAAD(oldHandle, def.name);
+      const newAAD = { ...canonicalAAD(newHandle, def.name), epoch: newEpoch };
+      try {
+        const result = await reencryptRowIfNeeded(
+          oldHandle,
+          newHandle,
+          oldAAD,
+          newAAD,
+          record,
+          def.version,
+          def.migrators ?? [],
+          empty,
+        );
+        if (result === "already-migrated") {
+          return { migrated: 0, alreadyMigrated: 1, failed: [] };
+        }
+        await storage.put(def.name, userId, [], result);
+        return { migrated: 1, alreadyMigrated: 0, failed: [] };
+      } catch (e) {
+        return {
+          migrated: 0,
+          alreadyMigrated: 0,
+          failed: [{ key: userId, error: String(e) }],
+        };
+      }
     },
   };
 

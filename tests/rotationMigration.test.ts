@@ -12,6 +12,7 @@ import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import {
   reencryptRowToNewEpoch,
+  reencryptRowIfNeeded,
   migrateRotationBatch,
   type RotationCandidateRow,
   type RotationBatchIO,
@@ -160,6 +161,96 @@ test("reencryptRowToNewEpoch: throws if newAAD.epoch is missing (would silently 
   );
 });
 
+test("reencryptRowIfNeeded: a row still at the old epoch is genuinely re-encrypted (same behavior as reencryptRowToNewEpoch)", async () => {
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const rowId = "row-1";
+  const original = await encodeBlob(
+    oldHandle,
+    aadFor(oldHandle, rowId),
+    { name: "Bob" },
+    1,
+    false,
+  );
+
+  const result = await reencryptRowIfNeeded(
+    oldHandle,
+    newHandle,
+    aadFor(oldHandle, rowId),
+    aadFor(newHandle, rowId, NEW_EPOCH),
+    original,
+    1,
+    [],
+    {},
+  );
+
+  assert.notEqual(result, "already-migrated");
+  const { decodeBlob } = await import("../core/blobCodec.ts");
+  const { data } = await decodeBlob(
+    newHandle,
+    aadFor(newHandle, rowId, NEW_EPOCH),
+    result as BlobRecord,
+    1,
+    [],
+    {},
+  );
+  assert.deepEqual(data, { name: "Bob" });
+});
+
+test('reencryptRowIfNeeded: a row already re-encrypted under the new handle (e.g. a previous interrupted run) is reported as "already-migrated" and left byte-for-byte alone', async () => {
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const rowId = "row-1";
+  const alreadyMigrated = await encodeBlob(
+    newHandle,
+    aadFor(newHandle, rowId, NEW_EPOCH),
+    { name: "Carol" },
+    1,
+    false,
+  );
+
+  const result = await reencryptRowIfNeeded(
+    oldHandle,
+    newHandle,
+    aadFor(oldHandle, rowId),
+    aadFor(newHandle, rowId, NEW_EPOCH),
+    alreadyMigrated,
+    1,
+    [],
+    {},
+  );
+
+  assert.equal(result, "already-migrated");
+});
+
+test("reencryptRowIfNeeded: a row that decrypts under NEITHER handle throws (genuine corruption is never silently reported as already-migrated)", async () => {
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const rowId = "row-1";
+  const original = await encodeBlob(
+    oldHandle,
+    aadFor(oldHandle, rowId),
+    { name: "Dave" },
+    1,
+    false,
+  );
+  const corrupted: BlobRecord = { ...original };
+  corrupted.blob = corrupted.blob.slice(0, -4) + "abcd";
+
+  await assert.rejects(() =>
+    reencryptRowIfNeeded(
+      oldHandle,
+      newHandle,
+      aadFor(oldHandle, rowId),
+      aadFor(newHandle, rowId, NEW_EPOCH),
+      corrupted,
+      1,
+      [],
+      {},
+    ),
+  );
+});
+
 test("migrateRotationBatch: migrates every row in one batch when batchSize covers them all", async () => {
   const oldHandle = createDekHandle(randomBytes(32));
   const newHandle = createDekHandle(randomBytes(32));
@@ -198,7 +289,9 @@ test("migrateRotationBatch: migrates every row in one batch when batchSize cover
 
   assert.deepEqual(result, {
     migrated: 3,
+    alreadyMigrated: 0,
     conflicted: 0,
+    failed: [],
     processedThisBatch: 3,
   });
   for (const id of rowIds) assert.equal(io.rows[id].epoch, NEW_EPOCH);
@@ -315,7 +408,9 @@ test("migrateRotationBatch: a row that changes concurrently (contentHash mismatc
   const batch1 = await migrateRotationBatch(reencryptOne, io, 50);
   assert.deepEqual(batch1, {
     migrated: 0,
+    alreadyMigrated: 0,
     conflicted: 1,
+    failed: [],
     processedThisBatch: 1,
   });
   assert.equal(rows[rowId].epoch, OLD_EPOCH); // still there, not lost
@@ -324,7 +419,9 @@ test("migrateRotationBatch: a row that changes concurrently (contentHash mismatc
   const batch2 = await migrateRotationBatch(reencryptOne, io, 50);
   assert.deepEqual(batch2, {
     migrated: 1,
+    alreadyMigrated: 0,
     conflicted: 0,
+    failed: [],
     processedThisBatch: 1,
   });
   assert.equal(rows[rowId].epoch, NEW_EPOCH);
@@ -341,7 +438,92 @@ test("migrateRotationBatch: empty table → processedThisBatch 0 immediately, no
   );
   assert.deepEqual(result, {
     migrated: 0,
+    alreadyMigrated: 0,
     conflicted: 0,
+    failed: [],
     processedThisBatch: 0,
   });
+});
+
+test('migrateRotationBatch: reencryptOne reporting "already-migrated" is left untouched — no write, no conflict, counted separately', async () => {
+  const oldHandle = createDekHandle(randomBytes(32));
+  const rowId = "row-1";
+  const record = await encodeBlob(
+    oldHandle,
+    aadFor(oldHandle, rowId),
+    { id: rowId },
+    1,
+    false,
+  );
+  const rows = { [rowId]: { epoch: OLD_EPOCH, record } };
+  const io = fakeRotationTable(rows);
+
+  const result = await migrateRotationBatch(
+    async () => "already-migrated" as const,
+    io,
+    50,
+  );
+
+  assert.deepEqual(result, {
+    migrated: 0,
+    alreadyMigrated: 1,
+    conflicted: 0,
+    failed: [],
+    processedThisBatch: 1,
+  });
+  // No write issued — the row is exactly as it was, still tagged OLD_EPOCH in
+  // this fake (a real adapter wouldn't have a "current epoch" column to leave
+  // stale either, since rotateEpoch never touches storage for this row).
+  assert.equal(rows[rowId].epoch, OLD_EPOCH);
+});
+
+test("migrateRotationBatch: a row reencryptOne can't decrypt under EITHER handle is collected in failed[], not thrown — the rest of the batch still runs", async () => {
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const goodId = "good";
+  const corruptedId = "corrupted";
+  const goodRecord = await encodeBlob(
+    oldHandle,
+    aadFor(oldHandle, goodId),
+    { id: goodId },
+    1,
+    false,
+  );
+  const corruptedRecord: BlobRecord = {
+    ...(await encodeBlob(
+      oldHandle,
+      aadFor(oldHandle, corruptedId),
+      { id: corruptedId },
+      1,
+      false,
+    )),
+  };
+  corruptedRecord.blob = corruptedRecord.blob.slice(0, -4) + "abcd";
+  const rows = {
+    [goodId]: { epoch: OLD_EPOCH, record: goodRecord },
+    [corruptedId]: { epoch: OLD_EPOCH, record: corruptedRecord },
+  };
+  const io = fakeRotationTable(rows);
+
+  const result = await migrateRotationBatch(
+    (row) =>
+      reencryptRowIfNeeded(
+        oldHandle,
+        newHandle,
+        aadFor(oldHandle, row.key as string),
+        aadFor(newHandle, row.key as string, NEW_EPOCH),
+        row.record,
+        1,
+        [],
+        {},
+      ),
+    io,
+    50,
+  );
+
+  assert.equal(result.migrated, 1);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].key, corruptedId);
+  assert.equal(rows[goodId].epoch, NEW_EPOCH);
+  assert.equal(rows[corruptedId].epoch, OLD_EPOCH); // untouched, will surface on retry too — that's expected, an operator must intervene
 });

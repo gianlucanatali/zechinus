@@ -258,6 +258,31 @@ export function supabaseStorageAdapter(
       }));
     },
 
+    async listAll(
+      collection,
+      userId,
+      keyColumn,
+    ): Promise<Array<{ key: string; record: BlobRecord }>> {
+      const { data, error } = await getClient()
+        .from(collection)
+        .select(`${keyColumn}, schema_version, blob, content_hash`)
+        .eq("user_id", userId);
+      if (error)
+        throw new Error(
+          `supabaseStorageAdapter.listAll(${collection}, ${userId}, ${keyColumn}): ${error.message}`,
+        );
+      // Dynamic `keyColumn` in the select string → GenericStringError, same as list() above.
+      const rows = (data ?? []) as unknown as Record<string, unknown>[];
+      return rows.map((row) => ({
+        key: row[keyColumn] as string,
+        record: {
+          schemaVersion: (row.schema_version as number | null) ?? 1,
+          blob: row.blob as string,
+          contentHash: (row.content_hash as string | null) ?? null,
+        },
+      }));
+    },
+
     async list(
       collection,
       userId,

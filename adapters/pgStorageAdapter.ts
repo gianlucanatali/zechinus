@@ -273,6 +273,31 @@ export function pgStorageAdapter(getClient: () => PgClient): StorageAdapter {
       }));
     },
 
+    async listAll(
+      collection,
+      userId,
+      keyColumn,
+    ): Promise<Array<{ key: string; record: BlobRecord }>> {
+      const { rows } = await getClient().query<{
+        [k: string]: unknown;
+        content_hash: string | null;
+        schema_version: number | null;
+        blob: string;
+      }>(
+        `SELECT ${quoteIdent(keyColumn)}, schema_version, blob, content_hash FROM ${quoteIdent(collection)} ` +
+          `WHERE user_id = $1`,
+        [userId],
+      );
+      return rows.map((row) => ({
+        key: row[keyColumn] as string,
+        record: {
+          schemaVersion: row.schema_version ?? 1,
+          blob: row.blob,
+          contentHash: row.content_hash ?? null,
+        },
+      }));
+    },
+
     async list(
       collection,
       userId,

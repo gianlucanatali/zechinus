@@ -167,6 +167,20 @@ export interface StorageAdapter {
     to: string,
   ): Promise<Array<{ key: string; record: BlobRecord }>>;
   /**
+   * perKey FULL enumeration: every row for the user in this collection, no range
+   * bound — unlike `listByKeyRange` (needs `[from,to]`, meant for a UI querying a
+   * known window), this is for callers that genuinely need everything regardless
+   * of what the key sorts as. Today's only caller is `KeyedStore.rotateEpoch`,
+   * which must find every row to re-encrypt it, not just the ones inside some
+   * range. Optional: a perKey store still works fully (`load`/`save`/`list(range)`)
+   * without it — only `rotateEpoch` requires it (throws by name if missing).
+   */
+  listAll?(
+    collection: string,
+    userId: string,
+    keyColumn: string,
+  ): Promise<Array<{ key: string; record: BlobRecord }>>;
+  /**
    * perKey bulk creation: writes N distinct keys in a single round-trip. A real
    * INSERT, not an upsert — a key that already exists must make the WHOLE batch
    * fail (unique-constraint violation), never silently overwrite it. Built for

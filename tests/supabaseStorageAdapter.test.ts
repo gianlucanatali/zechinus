@@ -132,6 +132,38 @@ test("supabaseStorageAdapter.listByKeyRange: selects content_hash and maps it pe
   ]);
 });
 
+test("supabaseStorageAdapter.listAll: selects content_hash and maps every row for the user, no range filter", async () => {
+  const { client, calls } = fakeSupabase([
+    {
+      year_month: "2024-01",
+      schema_version: 1,
+      blob: "enc:a",
+      content_hash: "ha",
+    },
+    {
+      year_month: "2026-07",
+      schema_version: 1,
+      blob: "enc:b",
+      content_hash: "hb",
+    },
+  ]);
+  const adapter = supabaseStorageAdapter(() => client as never);
+
+  const rows = await adapter.listAll!("transaction_blobs", "u1", "year_month");
+
+  assert.match(calls[0].columns, /content_hash/);
+  assert.deepEqual(rows, [
+    {
+      key: "2024-01",
+      record: { schemaVersion: 1, blob: "enc:a", contentHash: "ha" },
+    },
+    {
+      key: "2026-07",
+      record: { schemaVersion: 1, blob: "enc:b", contentHash: "hb" },
+    },
+  ]);
+});
+
 test("supabaseStorageAdapter.getHashesByKeys: selects content_hash for the given key column with .in(), maps every requested key", async () => {
   const { client, calls, inCalls } = fakeSupabase([
     { year_month: "__dashboard__", content_hash: "hash-a" },

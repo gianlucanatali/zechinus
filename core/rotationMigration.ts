@@ -8,13 +8,24 @@
  * cardinality-specific (a `perUser` row's AAD `rowId` defaults to the handle's own
  * `pid` and is irrelevant to the physical row location; a `perKey`/`many` row's
  * `rowId` is a domain-stable key that IS the physical lookup key and must never
- * change across the migration). Wiring this engine into a real store's migration
- * entry point — building the actual `oldAAD`/`newAAD` per cardinality and the
- * `RotationBatchIO` against a real `StorageAdapter` — is future work, not this file.
+ * change across the migration). The actual per-cardinality wiring — building the
+ * `oldAAD`/`newAAD` and calling `reencryptRowIfNeeded` for every row — lives on
+ * each store's own `rotateEpoch()` (see `store.ts`'s three `buildXyzStore`
+ * functions), which already has `def`/`migrators`/`empty`/`canonicalAADFor` in
+ * scope; this file stays a pure, cardinality-blind engine.
  */
 import type { CryptoHandle, FieldAAD, BlobRecord } from "./types.ts";
 import { decodeBlob, encodeBlob } from "./blobCodec.ts";
 import type { BlobMigrator } from "./versioning.ts";
+
+/** Aggregate result of rotating one store's rows to a new epoch — returned by every cardinality's `rotateEpoch()`. */
+export interface RotationOutcome {
+  migrated: number;
+  /** Rows already re-encrypted under the new handle (e.g. by a previous interrupted run) — left untouched. */
+  alreadyMigrated: number;
+  /** Rows that decrypt under NEITHER handle — genuine corruption, collected rather than aborting the whole rotation. */
+  failed: Array<{ key: unknown; error: string }>;
+}
 
 /**
  * Re-encrypts ONE row from the old epoch's handle to the new one — decode under
@@ -58,6 +69,45 @@ export async function reencryptRowToNewEpoch<T>(
   );
 }
 
+/**
+ * Row-level rotation decision, used as the `reencryptOne` callback passed to
+ * `migrateRotationBatch`. Tries `newHandle` FIRST — if the row already decrypts
+ * under the new key/AAD, it was migrated by an earlier (possibly interrupted)
+ * run and is left untouched (`"already-migrated"`, no write). Only when that
+ * fails does it attempt the real old→new re-encryption. A row that decrypts
+ * under NEITHER handle is genuine corruption — the error from `decodeBlob`
+ * propagates to the caller (`migrateRotationBatch` catches it and records it
+ * in `failed`, it is never silently swallowed here).
+ */
+export async function reencryptRowIfNeeded<T>(
+  oldHandle: CryptoHandle,
+  newHandle: CryptoHandle,
+  oldAAD: FieldAAD,
+  newAAD: FieldAAD,
+  record: BlobRecord,
+  version: number,
+  migrators: BlobMigrator[],
+  empty: T,
+): Promise<BlobRecord | "already-migrated"> {
+  try {
+    await decodeBlob<T>(newHandle, newAAD, record, version, migrators, empty);
+    return "already-migrated";
+  } catch {
+    // Not yet migrated under the new key — fall through to the real attempt.
+    // (If it's genuinely corrupted, the line below throws for real.)
+  }
+  return reencryptRowToNewEpoch(
+    oldHandle,
+    newHandle,
+    oldAAD,
+    newAAD,
+    record,
+    version,
+    migrators,
+    empty,
+  );
+}
+
 /** One row still at the old epoch, as returned by `RotationBatchIO.listRowsAtOldEpoch`. `key` is opaque — this file never interprets it, only threads it back to `saveIfMatch`. */
 export interface RotationCandidateRow {
   key: unknown;
@@ -84,9 +134,13 @@ export interface RotationBatchIO {
 
 export interface RotationBatchResult {
   migrated: number;
+  /** Rows `reencryptOne` reported as `"already-migrated"` — left untouched, no write issued. */
+  alreadyMigrated: number;
   /** Rows that lost a race against a concurrent write this batch — still at the old epoch, will be retried by the next call. Not an error. */
   conflicted: number;
-  /** Rows `listRowsAtOldEpoch` returned this call, before migrate/conflict split — 0 means done; call again while > 0. */
+  /** Rows that threw from `reencryptOne` (genuine corruption/undecryptable under either handle) — collected, not thrown, so one bad row never aborts the rest of the batch. */
+  failed: Array<{ key: unknown; error: string }>;
+  /** Rows `listRowsAtOldEpoch` returned this call, before migrate/skip/conflict/failure split — 0 means done; call again while > 0. */
   processedThisBatch: number;
 }
 
@@ -100,22 +154,42 @@ export interface RotationBatchResult {
  * one left off, no separate "resume" code path.
  */
 export async function migrateRotationBatch(
-  reencryptOne: (row: RotationCandidateRow) => Promise<BlobRecord>,
+  reencryptOne: (
+    row: RotationCandidateRow,
+  ) => Promise<BlobRecord | "already-migrated">,
   io: RotationBatchIO,
   batchSize = 50,
 ): Promise<RotationBatchResult> {
   const rows = await io.listRowsAtOldEpoch(batchSize);
   let migrated = 0;
+  let alreadyMigrated = 0;
   let conflicted = 0;
+  const failed: Array<{ key: unknown; error: string }> = [];
   for (const row of rows) {
-    const newRecord = await reencryptOne(row);
+    let result: BlobRecord | "already-migrated";
+    try {
+      result = await reencryptOne(row);
+    } catch (e) {
+      failed.push({ key: row.key, error: String(e) });
+      continue;
+    }
+    if (result === "already-migrated") {
+      alreadyMigrated++;
+      continue;
+    }
     const ok = await io.saveIfMatch(
       row.key,
-      newRecord,
+      result,
       row.record.contentHash ?? null,
     );
     if (ok) migrated++;
     else conflicted++;
   }
-  return { migrated, conflicted, processedThisBatch: rows.length };
+  return {
+    migrated,
+    alreadyMigrated,
+    conflicted,
+    failed,
+    processedThisBatch: rows.length,
+  };
 }

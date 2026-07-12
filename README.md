@@ -20,7 +20,8 @@ encryption — so the domain only declares **the shape of its data**, never the 
 > `datacloak/`.
 >
 > **Threat model:** see `SECURITY.md` for what a compromised/curious server can and
-> cannot do, and what's a declared non-goal (rollback protection, true DEK rotation).
+> cannot do, and what's a declared non-goal (rollback protection). True DEK rotation
+> IS built — see "DEK rotation" below.
 
 ## Mental model
 
@@ -1307,15 +1308,49 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   decrypt under any other. `useAutoLock` (`react/useAutoLock.ts`) is still web-only
   (`window` events); the other React hooks (`useStore`/`useKeyedStore`/
   `useCollectionStore`/`useIsUnlocked`) have no DOM dependency and work on RN.
-- **True DEK rotation** (the DEK's actual bytes change — not `KeyHandle.wrapWithKek`,
-  which re-wraps the _same_ DEK under a new KEK and is already built and used by EW's
-  `RecoveryUnlockModal`/`Impostazioni`) — deliberately not built, no real trigger today.
-  A lazy per-row convergence (a "legacy DEK" fallback symmetric to `migrateLegacyAAD`)
-  was considered and **rejected**: it breaks multi-device consistency, and no production
-  zero-knowledge system rotates that way. **If ever built: a synchronous, session-
-  invalidating ceremony (Bitwarden-style), never a framework-level lazy mechanism.** Full
-  rationale (the multi-device failure mode, the 1Password/Bitwarden/Proton and Matrix/Olm
-  comparison): `_local/plans/done/20260626-1111000-secure-store-framework.md` § "Decisioni aperte".
+
+## DEK rotation
+
+**Built** (key-custody roadmap Fase 2.1–2.3) — exactly the "synchronous, session-
+invalidating ceremony" this section used to say rotation would need IF ever built (never
+a lazy per-row mechanism — a lazy "legacy DEK" convergence symmetric to `migrateLegacyAAD`
+was considered and rejected early on: it breaks multi-device consistency, and no
+production zero-knowledge system rotates that way — full rationale, the 1Password/
+Bitwarden/Proton and Matrix/Olm comparison: `_local/plans/done/20260626-1111000-secure-store-framework.md`
+§ "Decisioni aperte"):
+
+- **Epoch-tagged AAD** (`FieldAAD.epoch`, wire format `v:5/6` — "Wire format" above): every
+  row records which rotation cycle encrypted it, cryptographically bound into the AAD
+  (tamper-evident — an attacker can't relabel a row's epoch to trick a client into
+  decrypting with a compromised key). `docs/decisions/2026-07-12-dek-epoch-per-row-aad.md`.
+- **Generic per-store migration** — `Store`/`KeyedStore`/`CollectionStore.rotateEpoch(userId,
+oldHandle, newHandle, newEpoch)`, present on EVERY `defineStore`-created store
+  automatically, no app-level wiring per store. Fetches the user's full row set for that
+  store (`get`/`list`/`listAll` — no SQL-side epoch filtering, no new indexed column needed:
+  skip-detection is a decrypt probe, "does this row already read under the new handle?"),
+  re-encrypts whatever's still on the old key, and reports
+  `{migrated, alreadyMigrated, failed}` — a corrupted row is collected, never aborts the
+  rest. Idempotent: safe to call again after an interruption. The cardinality-blind engine
+  lives in `datacloak/core/rotationMigration.ts`;
+  `docs/decisions/2026-07-12-dek-rotation-migration-engine.md`.
+- **perKey enumeration**: `StorageAdapter.listAll` (optional, see "Extending
+  StorageAdapter" below) is the one new adapter capability rotation needed — `perUser`/
+  `many` already had an unconditional "everything for this user" read.
+- **Multi-device handshake**: a device that already has the new DEK can hand it to one
+  that doesn't via a one-shot ephemeral X25519 key (never persisted, never the device's
+  stable identity) — `datacloak/adapters/dekRotationCoordinator.ts`;
+  `docs/decisions/2026-07-12-dek-rotation-ephemeral-handshake-key.md`.
+- **Verify-before-retire**: the old epoch's key material is discarded only after every row
+  verifiably decrypts under the new one AND every device has confirmed it (or a 30-day
+  grace deadline forces the decision) — `datacloak/core/rotationRetirement.ts`;
+  `docs/decisions/2026-07-12-dek-rotation-retirement-policy.md`.
+
+**Not yet wired** (app-level, tracked in
+`_local/plans/20260712-0947-mobile-roadmap-consolidated.md` Fase 2.5): the actual "rotate
+my key" trigger in Impostazioni; a guard preventing a new rotation from starting before the
+previous one's old epoch is fully retired (starting one early risks destroying the only key
+that can still decrypt rows stuck behind — rotations are strictly sequential, never
+overlapping); and calling `rotateEpoch` across EW's real stores.
 
 ## Extending `StorageAdapter`
 
@@ -1327,9 +1362,10 @@ for the pattern). `defineStore` must throw an explicit, descriptive error if the
 configured adapter doesn't support the requested capability — never a silent fallback.
 Optional methods today: `putIfMatch`/`updateByIdIfMatch` (optimistic locking), `list`/
 `insert`/`updateById`/`deleteById` (`identity: "many"`), `listByKeyRange` (`perKey`
-range queries), and `getHash` (in-session skip-fetch revalidation, above) — an adapter
-missing one simply never unlocks that specific capability, every other capability keeps
-working.
+range queries), `listAll` (`perKey` full enumeration, needed only by `rotateEpoch` — see
+"DEK rotation" above), and `getHash` (in-session skip-fetch revalidation, above) — an
+adapter missing one simply never unlocks that specific capability, every other
+capability keeps working.
 
 ## Architecture: the ports
 

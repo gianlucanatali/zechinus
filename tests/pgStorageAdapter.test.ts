@@ -267,6 +267,32 @@ test("pgStorageAdapter.listByKeyRange: quotes the key column, binds from/to, ord
   ]);
 });
 
+test("pgStorageAdapter.listAll: quotes the key column, binds only user_id, no range filter", async () => {
+  const { client, calls } = fakeClient([
+    { year_month: "2024-01", schema_version: 1, blob: "enc:a" },
+    { year_month: "2026-07", schema_version: 1, blob: "enc:b" },
+  ]);
+  const adapter = pgStorageAdapter(() => client);
+
+  const rows = await adapter.listAll!("transaction_blobs", "u1", "year_month");
+
+  assert.match(
+    calls[0].text,
+    /SELECT "year_month", schema_version, blob, content_hash FROM "transaction_blobs" WHERE user_id = \$1/,
+  );
+  assert.deepEqual(calls[0].params, ["u1"]);
+  assert.deepEqual(rows, [
+    {
+      key: "2024-01",
+      record: { schemaVersion: 1, blob: "enc:a", contentHash: null },
+    },
+    {
+      key: "2026-07",
+      record: { schemaVersion: 1, blob: "enc:b", contentHash: null },
+    },
+  ]);
+});
+
 test("pgStorageAdapter.list: selects id/schema_version/blob plus the given plain columns", async () => {
   const { client, calls } = fakeClient([
     {

@@ -73,11 +73,12 @@ to a third party.
   verifies against). No consumer has asked for it; would need a place to store the
   high-water-mark the server can't tamper with either, which is a meaningfully bigger
   design than this package's current scope.
-- **True DEK rotation** (the DEK's actual bytes change, as opposed to `wrapWithKek`
-  re-wrapping the same DEK under a new KEK, which IS built). See README's "What DataCloak
-  doesn't do yet" section for the full rationale — every production zero-knowledge system
-  either keeps the DEK stable (1Password/Bitwarden-style re-wrap) or does rotation as a
-  synchronous, session-invalidating ceremony, never a lazy per-row migration.
+
+**True DEK rotation** (the DEK's actual bytes change, as opposed to `wrapWithKek`
+re-wrapping the same DEK under a new KEK) is no longer a non-goal — it IS built, as a
+synchronous, session-invalidating ceremony (epoch-tagged AAD + generic per-store
+migration + multi-device handshake + verify-before-retire), never a lazy per-row
+migration. See README's "DEK rotation" section.
 
 ## Where to look for more
 
