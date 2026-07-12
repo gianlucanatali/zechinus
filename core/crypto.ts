@@ -11,10 +11,18 @@
  * so a blob is self-describing at decrypt time (no try-and-fallback, no double
  * decrypt): `1`=raw+AAD-v1, `2`=gzip+AAD-v1 (read-only — AAD-v1 is the unescaped
  * pipe-join that let one component's `|` collide with another's, see AAD-v2 below),
- * `3`=raw+AAD-v2, `4`=gzip+AAD-v2 (always written from now on). AAD-v2 is
- * `JSON.stringify([userId, table, field, rowId])` — JSON's own escaping makes the
- * 4-tuple serialization unambiguous regardless of what characters a component
- * contains.
+ * `3`=raw+AAD-v2, `4`=gzip+AAD-v2 (canonical, written whenever `aad.epoch` is NOT
+ * set), `5`=raw+AAD-v3, `6`=gzip+AAD-v3 (written whenever `aad.epoch` IS set —
+ * key-custody rotation, Fase 2.1). AAD-v2 is `JSON.stringify([userId, table, field,
+ * rowId])`; AAD-v3 is the same 5-tuple PLUS `epoch`, so a row silently relabeled to a
+ * different epoch (without being re-encrypted under it) fails the GCM tag check
+ * instead of being trusted — the whole reason `epoch` lives in the AAD and not just as
+ * plain metadata next to the ciphertext. `enc.epoch` (not `aad.epoch`) is what decrypt
+ * actually rebuilds AAD-v3 from: it's the value the stored blob claims for itself,
+ * exactly like `enc.v` already is — trusting it for dispatch is safe because
+ * reconstructing AAD-v3 from a TAMPERED `enc.epoch` can never match a tag computed
+ * under the real one, so tampering fails verification rather than being silently
+ * accepted.
  */
 import { gcm } from "@noble/ciphers/aes.js";
 import { randomBytes, clean } from "@noble/ciphers/utils.js";
@@ -43,19 +51,45 @@ function buildAADBytesV1(aad: FieldAAD): Uint8Array {
   return ENCODER.encode(`${aad.userId}|${aad.table}|${aad.field}|${aad.rowId}`);
 }
 
-/** AAD-v2 (canonical): JSON-stringified 4-tuple — unambiguous regardless of content. */
+/** AAD-v2 (canonical, epoch-unaware): JSON-stringified 4-tuple — unambiguous regardless of content. */
 function buildAADBytesV2(aad: FieldAAD): Uint8Array {
   return ENCODER.encode(
     JSON.stringify([aad.userId, aad.table, aad.field, aad.rowId]),
   );
 }
 
-/** `1`/`2` = legacy AAD-v1 (read-only), `3`/`4` = canonical AAD-v2. */
-function buildAADBytes(aad: FieldAAD, v: 1 | 2 | 3 | 4): Uint8Array {
-  return v <= 2 ? buildAADBytesV1(aad) : buildAADBytesV2(aad);
+/** AAD-v3 (epoch-aware, Fase 2.1): JSON-stringified 5-tuple, epoch included. */
+function buildAADBytesV3(aad: FieldAAD, epoch: number): Uint8Array {
+  return ENCODER.encode(
+    JSON.stringify([aad.userId, aad.table, aad.field, aad.rowId, epoch]),
+  );
 }
 
-/** Encrypts a text field. Compresses automatically above `COMPRESS_THRESHOLD` bytes. */
+/**
+ * `1`/`2` = legacy AAD-v1 (read-only), `3`/`4` = canonical AAD-v2 (epoch-unaware),
+ * `5`/`6` = AAD-v3 (epoch-aware — `epoch` required, throws if missing/undefined, since
+ * a v5/v6 blob is only ever produced WITH an epoch).
+ */
+function buildAADBytes(
+  aad: FieldAAD,
+  v: 1 | 2 | 3 | 4 | 5 | 6,
+  epoch?: number,
+): Uint8Array {
+  if (v <= 2) return buildAADBytesV1(aad);
+  if (v <= 4) return buildAADBytesV2(aad);
+  if (epoch === undefined) {
+    throw new Error(
+      `crypto.buildAADBytes: envelope v=${v} is epoch-aware but no epoch was provided.`,
+    );
+  }
+  return buildAADBytesV3(aad, epoch);
+}
+
+/**
+ * Encrypts a text field. Compresses automatically above `COMPRESS_THRESHOLD` bytes.
+ * Emits epoch-aware AAD-v3 (`v: 5|6`, `enc.epoch` set) iff `aad.epoch` is provided —
+ * omit it entirely for the pre-rotation wire format (`v: 3|4`), unchanged.
+ */
 export async function encryptField(
   dek: Uint8Array,
   plaintext: string,
@@ -64,15 +98,21 @@ export async function encryptField(
   const raw = ENCODER.encode(plaintext);
   const shouldCompress = raw.length > COMPRESS_THRESHOLD;
   const payload = shouldCompress ? await gzipCompress(raw) : raw;
+  const epochAware = aad.epoch !== undefined;
 
   const nonce = randomBytes(12);
   try {
-    const cipher = gcm(dek, nonce, buildAADBytesV2(aad));
+    const cipher = gcm(
+      dek,
+      nonce,
+      epochAware ? buildAADBytesV3(aad, aad.epoch!) : buildAADBytesV2(aad),
+    );
     const ciphertext = cipher.encrypt(payload);
     return {
       ct: toBase64(ciphertext),
       n: toBase64(nonce),
-      v: shouldCompress ? 4 : 3,
+      v: epochAware ? (shouldCompress ? 6 : 5) : shouldCompress ? 4 : 3,
+      ...(epochAware ? { epoch: aad.epoch } : {}),
     };
   } finally {
     clean(nonce);
@@ -80,28 +120,35 @@ export async function encryptField(
 }
 
 /**
- * Decrypts a field. Throws if the AAD doesn't match (blob moved) or the key is
- * wrong. Dispatches compression AND AAD serialization from `enc.v` — see the
- * file-level doc comment for the 1–4 mapping.
+ * Decrypts a field. Throws if the AAD doesn't match (blob moved, or `enc.epoch`
+ * tampered without re-encrypting) or the key is wrong. Dispatches compression AND AAD
+ * serialization from `enc.v` — see the file-level doc comment for the 1–6 mapping.
+ * Epoch (for v5/v6) comes from `enc.epoch` (the STORED claim), never from `aad.epoch`
+ * — the caller doesn't assert which epoch a row is, the blob does.
  */
 export async function decryptField(
   dek: Uint8Array,
   enc: EncryptedField,
   aad: FieldAAD,
 ): Promise<string> {
-  if (enc.v < 1 || enc.v > 4) {
+  if (enc.v < 1 || enc.v > 6) {
     throw new Error(`decryptField: unknown envelope version ${enc.v}`);
   }
   const ciphertext = fromBase64(enc.ct);
   const nonce = fromBase64(enc.n);
-  const cipher = gcm(dek, nonce, buildAADBytes(aad, enc.v));
+  const cipher = gcm(dek, nonce, buildAADBytes(aad, enc.v, enc.epoch));
   const payload = cipher.decrypt(ciphertext);
   const raw =
-    enc.v === 2 || enc.v === 4 ? await gzipDecompress(payload) : payload;
+    enc.v === 2 || enc.v === 4 || enc.v === 6
+      ? await gzipDecompress(payload)
+      : payload;
   return DECODER.decode(raw);
 }
 
-/** Encrypts an arbitrary JSON value. Always gzips — JSON is always compressible. */
+/**
+ * Encrypts an arbitrary JSON value. Always gzips — JSON is always compressible.
+ * Epoch-aware iff `aad.epoch` is provided, same rule as `encryptField`.
+ */
 export async function encryptJson<T>(
   dek: Uint8Array,
   value: T,
@@ -110,14 +157,20 @@ export async function encryptJson<T>(
   const json = JSON.stringify(value);
   const raw = ENCODER.encode(json);
   const compressed = await gzipCompress(raw);
+  const epochAware = aad.epoch !== undefined;
 
   const nonce = randomBytes(12);
   try {
-    const cipher = gcm(dek, nonce, buildAADBytesV2(aad));
+    const cipher = gcm(
+      dek,
+      nonce,
+      epochAware ? buildAADBytesV3(aad, aad.epoch!) : buildAADBytesV2(aad),
+    );
     return {
       ct: toBase64(cipher.encrypt(compressed)),
       n: toBase64(nonce),
-      v: 4,
+      v: epochAware ? 6 : 4,
+      ...(epochAware ? { epoch: aad.epoch } : {}),
     };
   } finally {
     clean(nonce);

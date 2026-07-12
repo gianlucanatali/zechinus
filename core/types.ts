@@ -9,23 +9,32 @@
 /**
  * AAD for a specific field/row — cryptographically binds ciphertext to WHERE it
  * lives (table + row + user), never encrypted itself. See README's "Mental model".
+ *
+ * `epoch` (optional): which DEK generation this field is/should be encrypted under —
+ * key-custody rotation (Fase 2.1). Omit entirely for epoch-unaware code (today's
+ * default, single-DEK apps) — `encryptField` then emits the pre-rotation wire format
+ * unchanged (`v: 3|4`), byte-for-byte identical to before this field existed.
  */
 export type FieldAAD = {
   userId: string;
   table: string;
   field: string;
   rowId: string;
+  epoch?: number;
 };
 
 /**
  * Wire-serialized ciphertext shape (opaque to storage). `v` encodes both compression
  * and AAD serialization, so decrypt is deterministic from the stored value alone —
- * see `crypto.ts`'s file-level doc comment for the full 1–4 mapping.
+ * see `crypto.ts`'s file-level doc comment for the full 1–6 mapping. `epoch` is
+ * present iff `v` is 5|6 (rotation-aware AAD) — absent on every blob written before
+ * Fase 2.1 and on every blob written by code that never opts into rotation.
  */
 export type EncryptedField = {
   ct: string;
   n: string;
-  v: 1 | 2 | 3 | 4;
+  v: 1 | 2 | 3 | 4 | 5 | 6;
+  epoch?: number;
 };
 
 /**

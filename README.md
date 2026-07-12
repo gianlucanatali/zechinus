@@ -36,26 +36,33 @@ frontend/service → defineStore({ name, identity, encrypt, schema, version }) �
 
 ## Wire format: envelope version (`EncryptedField.v`)
 
-Every ciphertext blob carries a `v: 1 | 2 | 3 | 4` alongside the ciphertext and nonce —
-NOT the same thing as `StoreDef.version` (the schema's own version, used for migrators).
-`v` tells decrypt which compression AND which AAD serialization the blob was written
-with, so decoding is deterministic from the stored value alone (no try-and-fallback, no
-double decrypt):
+Every ciphertext blob carries a `v: 1 | 2 | 3 | 4 | 5 | 6` alongside the ciphertext and
+nonce — NOT the same thing as `StoreDef.version` (the schema's own version, used for
+migrators). `v` tells decrypt which compression AND which AAD serialization the blob
+was written with, so decoding is deterministic from the stored value alone (no
+try-and-fallback, no double decrypt):
 
-| `v` | Compression | AAD serialization |
-| --- | ----------- | ----------------- |
-| 1   | none (raw)  | v1 — pipe-join    |
-| 2   | gzip        | v1 — pipe-join    |
-| 3   | none (raw)  | v2 — JSON 4-tuple |
-| 4   | gzip        | v2 — JSON 4-tuple |
+| `v` | Compression | AAD serialization         |
+| --- | ----------- | ------------------------- |
+| 1   | none (raw)  | v1 — pipe-join            |
+| 2   | gzip        | v1 — pipe-join            |
+| 3   | none (raw)  | v2 — JSON 4-tuple         |
+| 4   | gzip        | v2 — JSON 4-tuple         |
+| 5   | none (raw)  | v3 — JSON 5-tuple + epoch |
+| 6   | gzip        | v3 — JSON 5-tuple + epoch |
 
 AAD-v1 (legacy) joined the 4 AAD fields (`userId|table|field|rowId`) with no escaping — a
 `|` inside any component made two logically different AADs serialize to the identical byte
 string, which AES-GCM then treated as interchangeable. AAD-v2 (canonical) is
 `JSON.stringify([userId, table, field, rowId])` — unambiguous regardless of what
 characters a component contains. **`1`/`2` are read-only** (a blob already on disk before
-this fix): every new write always emits `3` or `4`. A row still holding `1`/`2` converges
-to canonical the next time anything touches it, via the same lazy write-back
+this fix): every new write always emits `3` or `4`, UNLESS `FieldAAD.epoch` is set, in
+which case it emits `5`/`6` (AAD-v3 — the same 4-tuple plus `epoch`, key-custody rotation,
+Fase 2.1 of the mobile roadmap plan). `epoch` is optional and opt-in: omit it entirely and
+nothing changes, `encryptField`/`encryptJson` keep emitting `3`/`4` exactly as before —
+`5`/`6` only appear once a caller starts passing an epoch (`createKeyHandle`'s consumer,
+or a future rotation-aware `KeyHandle`). A row still holding `1`/`2` converges to
+canonical the next time anything touches it, via the same lazy write-back
 `legacyAAD`/schema-version migrations already use — no live migration script needed.
 
 ## Quickstart
