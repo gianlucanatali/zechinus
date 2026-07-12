@@ -25,28 +25,12 @@ memory of a past session.
 **This codebase is English-only — code, comments, docs, tests, error messages, test
 names.** No exceptions, even for a quick one-liner comment.
 
-## Package boundary — never import your own package name from inside `datacloak/`
+## Package boundary — `docs/package-boundary.md`
 
-`datacloak/` is a real npm package (`"name": "datacloak"`), linked into the the host app
-host app as an **npm workspace** (`"workspaces": ["datacloak"]` in the root
-`package.json`) — `node_modules/datacloak` is a real symlink, not a bundler path alias.
-It also has its own standalone `tsconfig.json` (no `paths` at all, no reliance on the
-host app's config). Any file under `datacloak/` — including tests — must import the rest
-of the package via **relative paths** (`../core/types.ts`, `./testKeyHandle.ts`), never
-its own package name (`datacloak`/`datacloak/*`) — that specifier is only meaningful for
-code OUTSIDE the package. Run `npm run datacloak:typecheck` before declaring work done on
-anything inside `datacloak/` — it type-checks the package standalone and fails
-immediately if a file crossed this boundary by accident (this caught 4 real violations
-the first time it was written).
-
-Also: `datacloak` (the bare barrel, `index.ts`) exports **only `core/`** — never an
-adapter. `supabaseStorageAdapter`, `pgStorageAdapter`, `webauthnKeyProvider`,
-`mnemonicRecovery`, `workerKeyHandle` each live at their own file path
-(`datacloak/adapters/<name>.ts`) so importing `datacloak` for `defineStore` never drags
-in Supabase, a Postgres driver, or the WebAuthn browser API. The React binding
-(`useStore`/`tanstackAdapter`/...) is its own separate sub-entry, `datacloak/react`, for
-the same reason (never pulls React into a non-React consumer). See README's "Package
-boundary" section for the consumer-facing version of this rule.
+Read that file before adding an export, touching `index.ts`/`react/index.ts`, or adding a
+new adapter file. Gist: never import `datacloak`/`datacloak/*` (own package name) from
+inside `datacloak/` — always relative paths; `npm run datacloak:typecheck` catches a
+violation. The bare barrel (`index.ts`) exports only `core/` — never an adapter.
 
 ## Reflection checkpoint
 
@@ -101,135 +85,73 @@ validateRead/Write) rather than closing over `defineStore`'s whole body. Adding 
 cardinality means writing one more `buildXyzStore` function + one dispatch branch in
 `defineStore` — never growing the existing branches.
 
-## Porting an existing table (legacy AAD)
+## Porting an existing table (legacy AAD) — `docs/legacy-aad-porting.md`
 
-For porting an existing table only — omit entirely for a brand-new store. If a table
-already has data encrypted under a different AAD convention than DataCloak's canonical
-one, declare `legacyAAD: (dek, rowKey) => ({...})` on `defineStore` — a function
-returning the FULL old AAD (not just the `field` piece; it can differ in `rowId` too,
-e.g. an old table that pinned `rowId: pid` for what is now a `perKey` store). The
-framework never guesses at historical conventions — the caller supplies the complete old
-shape.
-
-Behavior: **read-old-if-needed, always-write-canonical**, same pattern as
-`version`/migrators. Every read tries the canonical AAD first — that's the only attempt
-in the common case (new data, or an already-migrated row), one decrypt, forever. Only on
-failure does it retry under `legacyAAD`; a successful legacy decrypt is immediately
-re-encrypted under canonical AAD and persisted — that row converges permanently from then
-on. Writes (`save`/`create`/`update`) ALWAYS use canonical AAD, never the legacy one. If
-both attempts fail, the canonical error propagates (never masked). No live migration
-script needed — rows convert lazily, one at a time, exactly when touched.
-
-The underlying primitive, `migrateLegacyAAD` (still exported for one-shot scripts outside
-the `defineStore` read path), does only the generic decrypt-old/re-encrypt-new mechanics;
-a record that exists with a missing/malformed blob throws — never reported as
-`migrated: false` (reserved for a genuinely absent record).
+Read that file only when porting an existing table already encrypted under a different
+AAD convention — omit entirely for a brand-new store. Gist: `legacyAAD` on `defineStore`,
+read-old-if-needed/always-write-canonical, lazy per-row convergence, no live migration
+script needed.
 
 ## `content_hash` — `contentHash: true`, not an injected function
 
-If a table has a `content_hash` column, set `contentHash: true` — DataCloak computes it
-internally as a **keyed HMAC-SHA256** of the plaintext envelope (MAC key derived from the
-DEK, never the DEK itself) on every write; omit it for tables without the column. It's a
-boolean, not an app-supplied function (hashing JSON needs no app-specific knowledge) —
-though `createKeyHandle`'s optional `hashContent` override exists for the rare case the MAC
-should come from elsewhere (e.g. a KMS). Legacy rows carrying the old unkeyed SHA-256 are
-harmless and self-heal on first write. Why keyed (anti-fingerprinting) and the convergence
-path: README § "content_hash" + `SECURITY.md`.
+If a table has a `content_hash` column, set `contentHash: true` — DataCloak computes it as
+a keyed HMAC-SHA256 (anti-fingerprinting), self-heals legacy unkeyed rows on first write.
+Full mechanics: README § "content_hash" + `SECURITY.md`.
 
-Populating the column unlocks four independent capabilities: **optimistic locking**
-(built, below), **skip-write** (built — `mutate()` on perUser/perKey skips the
-encrypt+upload when the transform is a no-op relative to what it just read; needs only
-`contentHash: true`, no `cache`; automatically OFF when `optimisticLock: true` is also
-set, since skipping the write would also skip `saveIfMatch`'s server-side conflict check —
-see README's "content_hash" section for the full rationale), **in-session skip-fetch
-revalidation** (built — a cached `{data, hash}` slot is served without a full load once a
-lightweight `getHash()` call confirms the server's `content_hash` still matches it;
-memory-only, wiped on reload/lock, requires a configured `cache` and an adapter with
-`getHash`; excludes `identity: "many"`), and **cross-session persistent caching** (not
-built — needs a cache that survives a reload, which the current in-memory-only
-`CacheAdapter` doesn't provide; no consumer yet).
-Turning `contentHash` on gets you the column, not any capability automatically.
+Quick reference — turning it on gets you the column, not any capability automatically:
+**optimistic locking** (built, needs `optimisticLock: true` too, see below), **skip-write**
+(built — `mutate()` on perUser/perKey skips a no-op write; needs only `contentHash: true`;
+OFF when `optimisticLock: true` is also set, since it would also skip the server-side
+conflict check), **in-session skip-fetch revalidation** (built — needs a configured `cache`
+
+- an adapter with `getHash`; excludes `identity: "many"`), **cross-session persistent
+  caching for web** (not built, no consumer — but mobile has its own persistent
+  `CacheAdapter`, see "Known v1 boundaries" below).
 
 ## Optimistic locking — `optimisticLock: true`, requires `contentHash: true`
 
 Conditional write that rejects instead of silently overwriting a row changed since you
 last read it (two tabs editing the same record — without this, the second save silently
 clobbers the first, no error). `defineStore` throws at definition time if `optimisticLock`
-is set without `contentHash`.
-
-```ts
-const { data, hash } = await store.loadWithHash!(userId, dek);
-const result = await store.saveIfMatch!(userId, dek, data, hash);
-if (!result.ok) {
-  // conflict — someone else saved first. Never thrown: an expected, recoverable outcome.
-} else {
-  // result.hash is the new current hash — feed it into the next saveIfMatch,
-  // no extra fetch needed (computed client-side, before the write, in encodeBlob)
-}
-```
-
-Available on all 3 cardinalities: `Store.saveIfMatch` (perUser), `KeyedStore.saveIfMatch`
-(perKey, per-key lock), `CollectionStore.updateIfMatch` (many, per-row lock — a conflict
-on one row never touches another). Underlying adapter capability: `StorageAdapter.
-putIfMatch`/`updateByIdIfMatch` (optional — missing capability throws an explicit error at
-the first conditional write, never a silent unconditional fallback). Both shipped adapters
-implement it. `expectedHash: null` means "no REAL content yet" — covers both "no row" and
-"row exists but was never hashed" (legacy data); the only genuine conflict for `null` is a
-row that already has a REAL hash. How each adapter implements the conditional write (pg's
-atomic upsert vs supabase's insert-then-guarded-update): README § "Optimistic locking".
+is set without `contentHash`. Full pattern (`loadWithHash`/`saveIfMatch`, per-cardinality
+API, `expectedHash: null` semantics, per-adapter conditional-write implementation, and
+`mutate()`'s `retryOnConflict` option): README § "Optimistic locking".
 
 **The React hooks (`useStore`/`useKeyedStore`/`useCollectionStore`) thread the hash
-automatically** — their cache slot holds `{data, hash}` internally, `save`/`update` call
-`saveIfMatch`/`updateIfMatch` transparently when the store has the lock configured, and a
-conflict rolls back the optimistic update and throws `OptimisticLockConflictError` (from
-`datacloak/react`) instead of `{ok:false}` — app code using the hooks never sees
-`expectedHash` at all. Only code calling `Store`/`KeyedStore`/`CollectionStore` directly
-(outside React) uses the raw `saveIfMatch`/`updateIfMatch` pattern above.
+automatically** — `save`/`update` call `saveIfMatch`/`updateIfMatch` transparently, and a
+conflict throws `OptimisticLockConflictError` (from `datacloak/react`) instead of
+`{ok:false}` — app code using the hooks never sees `expectedHash` at all. Only code calling
+`Store`/`KeyedStore`/`CollectionStore` directly (outside React) uses the raw
+`saveIfMatch`/`updateIfMatch` pattern from the README.
 
 ## Versioning: bump `version`, migrators are checked at definition time
 
-`version: N` requires exactly N-1 `migrators` (v1→v2, …, v(N-1)→vN) — `defineStore` throws
-immediately at definition (boot/import) if the count is off, not just later when it hits
-old data. **Always pair a `version` bump with its migrator in the same change.**
+`version: N` requires exactly N-1 `migrators` — `defineStore` throws immediately at
+definition if the count is off, not just later when it hits old data. **Always pair a
+`version` bump with its migrator in the same change.** Not to be confused with
+`EncryptedField.v` (the wire format's own crypto envelope version — compression + AAD
+serialization, orthogonal to a store's `version`/migrators): README § "Wire format:
+envelope version".
 
-Not to be confused with `EncryptedField.v` (the wire format's own crypto envelope
-version, `1 | 2 | 3 | 4` — compression + AAD serialization, orthogonal to a store's
-`version`/migrators). `1`/`2` are legacy, read-only (unescaped pipe-join AAD); every
-write emits `3`/`4` (unambiguous JSON-serialized AAD). See README's "Wire format:
-envelope version" for the full mapping.
-
-This package also requires a `schemaFingerprint` on every store (see the README's
-"versioning is mandatory" guardrail): if you change a schema's shape without updating its
-fingerprint, `defineStore` throws immediately with the correct value to paste in — that's
-the moment to decide whether a `version` bump + migrator is also needed. Treat this as
-non-optional whenever you touch a `schema` or `version` field.
-
-**Fingerprint change does not automatically mean `version` change.** Two distinct cases:
-an additive change Zod can absorb on its own at parse time (a new field with `.default()`)
-only needs the fingerprint updated — old ciphertext still validates fine against the new
-schema, nothing to migrate. A change old data can't satisfy as-is (renamed/retyped field,
-new required field with no default) needs `version` bump + migrator too, since decrypted
-old data would otherwise fail `schema.safeParse()` on read. The error message names both
-options; read it before picking one.
-
-A "safe" change is still a different shape — the guardrail _allows_ skipping the `version`
-bump for a backward-compatible one, it doesn't _forbid_ bumping anyway (identity migrator
-`(d) => d`) if a team wants every shape tracked. Full rationale: README § "versioning is
+This package also requires a `schemaFingerprint` on every store: `defineStore` throws
+immediately if the schema's shape doesn't match the declared fingerprint, naming the
+correct value to paste in — that's the moment to decide whether a `version` bump +
+migrator is also needed, or whether it's a safe (Zod-absorbable) change that only needs
+the fingerprint updated. Full decision tree + rationale: README § "versioning is
 mandatory".
 
 **Never compute `schemaFingerprint` inline** (`fingerprintSchema(MySchema, ...)` in the
 same `defineStore()` call that uses `MySchema`) — that compares the schema against itself,
 a tautology that can never fail regardless of future drift. Always a frozen string literal,
-computed once, committed to git. Fix a fingerprint error with:
+committed to git. Fix a fingerprint error with:
 
 ```
 npm run datacloak:sync-fingerprints -- path/to/yourBlobService.ts
 ```
 
-It re-imports the file, catches the thrown error, and patches the correct value in for
-you (assumes one `defineStore()` per file). **Deliberately not wired into pre-commit** —
-auto-fixing on every commit would remove the "stop and decide: does this need a migrator?"
-moment the guardrail exists for. Run it yourself, after deciding, not before.
+**Deliberately not wired into pre-commit** — auto-fixing on every commit would remove the
+"stop and decide: does this need a migrator?" moment the guardrail exists for. Run it
+yourself, after deciding, not before.
 
 ## The guardrail you cannot bypass
 
@@ -264,122 +186,27 @@ methods move opaque records around, nothing assumes SQL — so a non-relational 
 (MongoDB, say) is a new adapter implementing the same interface, no core changes; but that
 adapter still needs its own collection/table set up correctly first.
 
-## Extending `StorageAdapter`
+## Extending `StorageAdapter` — `docs/extending-storage-adapter.md`
 
-If a new access pattern needs a capability the adapter doesn't have:
+Read that file when a new access pattern needs a capability the shipped adapters don't
+have. Gist: optional method on `StorageAdapter`, implement in the adapter(s), explicit
+throw if unsupported (never silent fallback), TDD test first. `getHashesByKeys` is the
+reference example of this recipe.
 
-1. Add the method as **optional** (`method?:`) on `StorageAdapter` in `core/types.ts` —
-   never required, so existing adapters keep compiling.
-2. Implement it in `adapters/supabaseStorageAdapter.ts` (or your own adapter). Any
-   query/update/delete should filter by the owning user id explicitly, even when
-   row-level security also enforces it — index usage, not just correctness.
-3. In `defineStore` (`core/store.ts`), the code path using the new capability must throw an
-   explicit, descriptive error if `storage.<method>` is undefined — mirror the existing
-   pattern (`the configured adapter doesn't support 'many' (list missing)`). Never
-   silently no-op or fall back.
-4. Write a TDD test in `tests/` **before** the implementation: an in-memory `StorageAdapter`
-   double (copy the pattern from `defineStoreMany.test.ts` or `defineStorePerKey.test.ts`),
-   4+ cases (roundtrip, AAD-per-row not movable across rows/keys/ids,
-   adapter-missing-capability → explicit error, Zod validation rejects bad writes).
+## Aggregation extras — `docs/aggregation-extras.md`
 
-`getHashesByKeys` (`core/types.ts`) is a real, already-shipped example of this exact
-recipe — a batch hash-only read for several keys of one `perKey` store in one round trip,
-implemented in both shipped adapters (`supabaseStorageAdapter.ts`/`pgStorageAdapter.ts`),
-consumed by `defineAggregation`'s cold-session check below. Use it as the template.
+Read that file when working with `defineAggregation` (not needed for plain `defineStore`
+work): `flush()`, `invalidateOn`/`invalidateChannel`, the cold-session hash check,
+`isAnyAggregationComputing()`, the aggregate-as-source cold-start gotcha, and why
+`tanstackAdapter` throws at construction unless `gcTime: Infinity`.
 
-## Aggregation extras: `flush()`, `invalidateOn`/`invalidateChannel`, cold-session check
+## Node scripts & multi-user concurrency — `docs/node-multi-user.md`
 
-Three capabilities layered on top of the core `defineAggregation`/`onSourceWrite`
-mechanics — full rationale and code examples in `README.md`'s own sections (same
-headings), this is just "when do I reach for which":
-
-- **`OnSourceWriteHandle.flush()`** (`core/onSourceWrite.ts`) — a caller that just
-  finished a known batch of writes (an import, a bulk edit) and needs the reaction's
-  effect (a derived snapshot) visible RIGHT NOW, without waiting out `debounceMs` or
-  duplicating the reaction's own logic at the call site. Never build a second "rebuild"
-  call site in app code for this — that's exactly what `flush()` replaces.
-- **`ExternalInput.invalidateOn` / `invalidateChannel(name)`** (`core/aggregation.ts`) —
-  an `external` whose data lives OUTSIDE any DataCloak `Store` (a plaintext table read
-  via plain REST, e.g. "which account ids exist") has no write-interception hook at all;
-  nothing marks the aggregation stale until the external's own `ttlMs` expires. Declare
-  the channel(s) the external depends on, then call `invalidateChannel(name)` ONCE, at
-  the single app-level place the underlying mutation happens (never scattered across
-  every caller of that mutation).
-- **Cold-session hash verification** — automatic, nothing to configure. `.get()` verifies
-  every source never observed live THIS session against the real current hash before
-  trusting the persisted envelope, the first time a fresh identity subscribes. Batches
-  `KeyedSourceRef` sources sharing one physical table into one `getHashesByKeys` call.
-  Know its real limit: it closes the "a write I never saw live gets missed on a NEW
-  session" gap (a reload self-heals) — it does NOT make an already-open idle tab pick up
-  another tab/device's write without a fresh `.get()` call (no server push/polling; the
-  `CacheAdapter` is in-memory, per tab/process).
-- **`isAnyAggregationComputing()` / `subscribeGlobalAggregationActivity(cb)`** — a single
-  cross-aggregation "is anything computing right now" counter, for a caller that doesn't
-  know or care WHICH aggregation(s) a write affects (typically an E2E test, or a host app's
-  hidden DOM indicator that test waits on — see README's own section for the exact wiring).
-  Do not reach for this when the caller already knows the specific aggregation — that's
-  `useAggregation(agg).computing` directly.
-
-**⚠️ Aggregate-as-source cold start throws once, then self-heals — this is expected, not a
-bug to "fix" with a retry loop.** A downstream aggregation reading an upstream one that has
-never itself computed in this session gets `data === null` and the downstream's compute
-throws (`computeAndPersist`, `core/aggregation.ts`) — it never waits on another
-aggregation's first compute. Reading the source is what kicks off ITS OWN background
-compute as a side effect, though; once that persists, the downstream (already subscribed to
-it like any other source) reacts and recomputes successfully, usually well under a second.
-**Consequence for any UI reading such an aggregation:** treat `data === null` as "not known
-yet", never as "confirmed empty" — a component that derives an empty/onboarding state from
-zero-valued fields without checking `data !== null` first will flash that empty state on
-every cold session, even when real data exists (`src/pages/Dashboard.tsx`'s
-`isCompletelyEmpty` in the the host app app is the reference fix). **Consequence for tests
-(E2E, tutorial recordings, anything driving a real browser):** after a write that could
-mark an aggregation stale, wait for `isAnyAggregationComputing()` to go false (or the app's
-hidden DOM indicator built on it) before asserting/screenshotting — never a fixed `sleep()`,
-which is either too short (races the recompute) or an arbitrary guess.
-
-## `tanstackAdapter` requires `gcTime: Infinity` — enforced, not just documented
-
-`tanstackAdapter` (`adapters/tanstackAdapter.ts`) writes via `setQueryData`/`getQueryData`
-and never mounts a real `useQuery` observer — every entry it creates has zero observers
-for its whole life. TanStack schedules that entry's garbage collection unconditionally at
-creation time (a separate axis from `staleTime`) and evicts it once `gcTime` elapses, no
-matter how many times it was refreshed in between. With the default 5-minute `gcTime`,
-cached decrypted data silently disappears from every DataCloak-backed hook after that long
-of the consuming app sitting idle — no error, since `CacheAdapter` has no "refetch" concept
-for a caller to notice or recover from. This is a real bug that shipped once (the host app's
-Dashboard going blank after ~5 minutes idle, filling again only on remount).
-
-Following the same idiom as the encryption guardrail above (`defineStore` throwing on a
-missing `encrypt` declaration): **`tanstackAdapter` throws immediately at construction**
-if `queryClient.getDefaultOptions().queries?.gcTime !== Infinity`. Documentation alone
-(a README note nobody reads before it bites them 5 minutes into a real session) was
-judged insufficient — the fix must fail loud at wiring time (app boot / `configureSecureStore`
-call), not silently at 3am in a real user's idle tab. If you extend or replace this
-adapter, or write a new `CacheAdapter` backed by anything with its own eviction/TTL
-concept, apply the same principle: assert the safe configuration at construction, don't
-just document it.
-
-## Node scripts & multi-user concurrency — which `KeyProvider` to use
-
-`configureSecureStore`'s ambient identity is one module-level variable — correct for a
-browser tab (one user per tab), wrong for a Node script/service touching more than one
-user's data concurrently (e.g. `Promise.all` over per-user jobs): every ambient call
-would see whichever identity was configured last, across every in-flight promise chain.
-
-- **Browser / single ambient user** (the app's normal runtime): the app's own
-  `KeyProvider` (bridging `PasskeyContext`/`UserContext`), as today.
-- **Node script/service, one user at a time, no concurrency**: still fine with a
-  simple fixed `KeyProvider` (see `fixedKeyProvider` pattern in `tests/defineStore.test.ts`).
-- **Node script/service handling MULTIPLE users concurrently**: use `alsKeyProvider` +
-  `withIdentity(userId, cryptoHandle, fn)` from `datacloak/node` (`AsyncLocalStorage`-backed).
-  Each `withIdentity` call isolates its identity to its own async context — safe under
-  `Promise.all`, never leaks across sibling chains. Outside any `withIdentity` scope the
-  getters return `null` and an ambient store call fails loud (`"no active session
-(locked)"`), never silently reusing a stale identity.
-
-**Never import `datacloak/node` from `datacloak/index.ts` or `datacloak/react/index.ts`**
-— `node:async_hooks` must never reach the browser bundle. It is a standalone entry point,
-by design, mirroring how `datacloak/react` is kept out of non-React consumers.
+Read that file when writing a Node script/service (not browser code) that touches
+DataCloak stores. Gist: `configureSecureStore`'s ambient identity is one module-level
+variable, unsafe for concurrent multi-user Node code — use `alsKeyProvider` +
+`withIdentity()` from `datacloak/node` for that case. Never import `datacloak/node` from
+`datacloak/index.ts` or `datacloak/react/index.ts`.
 
 ## The one invariant you must never break
 
@@ -409,27 +236,16 @@ tests, component tests, build) — not just this package's own test suite.
 - No `encrypt: "none"` (fully plaintext row) yet, and mixed `enc()` fields only work with
   `identity: "many"` — not `perUser`/`perKey`.
 - No hub-and-spoke storage adapter (cleartext+ref on one backend, blob on another).
-- No cross-session persistent skip-fetch cache (skip the round-trip across page reloads,
-  not just within a session) — needs a persisted cache (e.g. ciphertext on IndexedDB), no
+- No cross-session persistent skip-fetch cache **for web** (skip the round-trip across
+  page reloads, not just within a session) — `tanstackAdapter` stays in-memory only, no
   consumer yet. Optimistic locking AND in-session skip-fetch revalidation (the other two
   `content_hash` capabilities) ARE built — see the section above, don't confuse the three.
-- React binding exists for all 3 cardinalities (`useStore`/`useKeyedStore`/
-  `useCollectionStore`, all in `react/`). Each needs `keys` (`KeyProvider`) and `cache`
-  (`CacheAdapter`) in `configureSecureStore`; without them it throws explicitly. Both
-  ports are plain get/subscribe objects, deliberately not hook-shaped
-  (`useSyncExternalStore` reads them inside the hook, not inside the port itself) — don't
-  design a new port as `useXyz()`.
-- `useIsUnlocked()` (`react/useIsUnlocked.ts`) is the boolean-only counterpart — needs
-  just `keys`, never `cache`, and never hands the caller a `CryptoHandle`. Use it instead
-  of `useStore`/`usePasskeyDek` whenever a component only needs a lock/unlock gate.
-- `KeyProvider` has two known concrete implementations: the host app's browser one
-  (bridging `PasskeyContext`/`UserContext` — see README's React binding section for the
-  pointer), and `alsKeyProvider` (`datacloak/node`, `AsyncLocalStorage`-backed, for Node
-  scripts/services — see "Node scripts & multi-user concurrency" above). Whatever a
-  _future_ implementation looks like must not assume a browser: React Native needs a
-  different `getCryptoHandle`/`getUserId`/`subscribe` behind native passkey/biometrics, but the
-  port itself already doesn't require WebAuthn — only a future concrete implementation
-  would.
+  **Mobile already has a persistent `CacheAdapter`** — `mobilePersistentCacheAdapter`/
+  `expoPersistentCacheAdapter()` (`adapters/`), device-encrypted, hydrates on cold launch
+  — not yet wired into `mobile/`'s own bootstrap.
+- Existing hooks and `KeyProvider` implementations (React binding per cardinality,
+  `useIsUnlocked`, `passkeyDekController`/`usePasskeyDek`, `alsKeyProvider`,
+  `useDevDekInjection`, `useIsAnyKeyedStoreLoading`, `setGzipImpl`): `docs/capability-reference.md`.
 
 ## Keeping this guide honest
 

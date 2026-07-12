@@ -1004,6 +1004,15 @@ that already knows which aggregation to wait on already has `useAggregation(agg)
 directly — this primitive is for the "I don't know or care which ones, just tell me when
 it's quiet" case only.
 
+**`useIsAnyKeyedStoreLoading()`** (`react/useIsAnyKeyedStoreLoading.ts`) is the exact same
+pattern, one layer down: a cross-`KeyedStore` "is any keyed-store fetch in flight right
+now" signal (`isAnyKeyedStoreLoading()`/`subscribeGlobalKeyedStoreActivity()`, both in
+`react/useKeyedStore.ts`, also exported standalone from `datacloak/react`). Aggregation
+recomputes settle via the signal above; a plain keyed-store `load`/`mutate` in flight
+(no aggregation involved) has nothing that marks it — this fills that gap, typically for an
+E2E test waiting right after a DEK unlock, before any aggregation has even started
+computing.
+
 ### `invalidateOn` / `invalidateChannel` — externals sourced from non-Store data
 
 An `external` can depend on data that lives entirely OUTSIDE any DataCloak `Store` — a
@@ -1271,10 +1280,13 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
   real consumer needs them today.
 - **Hub-and-spoke storage** (plaintext columns + ref on one backend, blob on another,
   e.g. low-cost object storage) — planned capability, not implemented yet.
-- **Cross-session persistent skip-fetch cache** (skip the network round-trip across page
-  reloads, not just within a session) — needs a persisted cache (ciphertext on
-  IndexedDB, say), no consumer yet. See "`content_hash`" above — the in-session variant
-  IS built.
+- **Cross-session persistent skip-fetch cache for web** (skip the network round-trip
+  across page reloads, not just within a session) — `tanstackAdapter` stays in-memory
+  only, no persisted web cache (ciphertext on IndexedDB, say), no consumer yet. See
+  "`content_hash`" above — the in-session variant IS built. **Mobile already has this**:
+  `mobilePersistentCacheAdapter`/`expoPersistentCacheAdapter()` (`adapters/`) persist a
+  device-encrypted cache to `expo-secure-store`/`expo-file-system`, hydrated on cold
+  launch — not yet wired into `mobile/`'s own bootstrap (see that file's header comment).
 - **React Native**: the crypto engine (`@noble/*`) and `core/keyDerivation.ts` are
   already isomorphic — `webauthnKeyProvider` (`adapters/webauthnKeyProvider.ts`) is the
   **web** adapter (uses `navigator.credentials`, browser-only). RN needs its own adapter
@@ -1336,6 +1348,28 @@ rows }`, matching node-postgres's shape) — no hard dependency on `pg` or any s
 Both implement the exact same `StorageAdapter` interface (`core/types.ts`) — swapping one
 for the other requires no changes to `defineStore` calls, only to `configureSecureStore`.
 
+## `passkeyDekController` / `usePasskeyDek` — the passkey+recovery ceremony
+
+`adapters/passkeyDekController.ts` is a full, ready-to-use `KeyProvider` implementation —
+not just the port. It owns the entire zero-knowledge unlock ceremony any app doing WebAuthn
+PRF + BIP39 recovery needs: register a passkey, generate a recovery phrase, wrap the DEK
+under both, unlock via either, add an additional passkey to an already-unlocked DEK,
+regenerate recovery words. None of this is app-specific — it's the same sequence
+regardless of which app is asking. What stays app-side, injected via config: `storage`
+(a `PasskeyWrapStorage` — 5 methods, table/column names + DB client), `createHandle` (raw
+bytes → `KeyHandle`, plain or Worker-isolated), and the app's own
+`webauthnKeyProvider`/`mnemonicRecovery` instances. Framework-agnostic (no React import) —
+`react/usePasskeyDek.ts` is the thin React binding (`useSyncExternalStore`), the host app's
+own production `KeyProvider`.
+
+`react/useDevDekInjection.ts` (+ `DevDekInjectionBridge`) is the companion dev/E2E escape
+hatch: headless test runners have no passkey to authenticate with, so this hook exposes a
+`window.__setTestDek(hexKey)`/`window.__clearTestDek()` pair (gated by a runtime `enabled`
+flag) that injects raw key bytes directly into a `PasskeyDekController`, bypassing the
+ceremony. Mount `DevDekInjectionBridge` behind a static `import.meta.env.DEV &&` check
+(not the raw hook) so bundlers can dead-code-eliminate it from production entirely, not
+just disable it at runtime.
+
 ## Node scripts & multi-user concurrency — `datacloak/node`
 
 `configureSecureStore`'s ambient identity (`keys: KeyProvider`) is a single
@@ -1394,6 +1428,7 @@ it.
   ".": "./index.ts",
   "./react": "./react/index.ts",
   "./node": "./node/index.ts",
+  "./aggregate": "./aggregate/index.ts",
   "./adapters/*": "./adapters/*",
   "./core/*": "./core/*"
 }
