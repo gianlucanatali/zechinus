@@ -11,6 +11,14 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { getSecureStoreConfig } from "../core/config.ts";
 import type { KeyedStore } from "../core/store.ts";
 import { OptimisticLockConflictError } from "./errors.ts";
+import {
+  markKeyedFetchStart,
+  markKeyedFetchEnd,
+  isAnyKeyedStoreLoading,
+  subscribeGlobalKeyedStoreActivity,
+} from "./keyedStoreActivity.ts";
+
+export { isAnyKeyedStoreLoading, subscribeGlobalKeyedStoreActivity };
 
 interface CacheEntry<T> {
   data: T;
@@ -35,8 +43,10 @@ function fetchKeyDeduped<T>(
 ): Promise<CacheEntry<T>> {
   const existing = inflightKeyFetches.get(cacheKey);
   if (existing) return existing as Promise<CacheEntry<T>>;
+  markKeyedFetchStart();
   const promise = fetcher().finally(() => {
     inflightKeyFetches.delete(cacheKey);
+    markKeyedFetchEnd();
   });
   inflightKeyFetches.set(cacheKey, promise as Promise<CacheEntry<unknown>>);
   return promise;

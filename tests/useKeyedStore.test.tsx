@@ -18,7 +18,12 @@ import {
   type KeyProvider,
   type CacheAdapter,
 } from "../index.ts";
-import { useKeyedStore } from "../react/useKeyedStore.ts";
+import {
+  useKeyedStore,
+  isAnyKeyedStoreLoading,
+  subscribeGlobalKeyedStoreActivity,
+} from "../react/useKeyedStore.ts";
+import { __resetGlobalKeyedStoreActivity } from "../react/keyedStoreActivity.ts";
 import { OptimisticLockConflictError } from "../react/errors.ts";
 
 function keyedMemoryStorage(): StorageAdapter & {
@@ -110,6 +115,7 @@ describe("useKeyedStore", () => {
   afterEach(() => {
     cleanup();
     __resetSecureStoreConfig();
+    __resetGlobalKeyedStoreActivity();
   });
 
   it("locked: no data, locked:true, save() throws", async () => {
@@ -390,5 +396,123 @@ describe("useKeyedStore", () => {
     expect(getCalls).toBe(1);
     expect(first.result.current.data).toEqual({ transactions: ["seeded"] });
     expect(second.result.current.data).toEqual(first.result.current.data);
+  });
+
+  describe("isAnyKeyedStoreLoading / subscribeGlobalKeyedStoreActivity", () => {
+    it("is false when no fetch is in flight, true while one is pending, false again once it settles", async () => {
+      expect(isAnyKeyedStoreLoading()).toBe(false);
+
+      const cryptoHandle = createDekHandle(randomBytes(32));
+      const { provider } = fakeKeys(cryptoHandle);
+      let releaseGet!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseGet = resolve;
+      });
+      const storage: StorageAdapter = {
+        async get() {
+          await gate;
+          return null;
+        },
+        async put() {},
+      };
+      configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+      const store = defineStore({
+        name: "transaction_blobs",
+        identity: { perKey: "year_month" },
+        encrypt: "all",
+        schema: Batch,
+        version: 1,
+        schemaFingerprint: fingerprintSchema(Batch, "all"),
+      });
+
+      const { result } = renderHook(() => useKeyedStore(store, "2026-06"));
+      expect(result.current.loading).toBe(true);
+      await waitFor(() => expect(isAnyKeyedStoreLoading()).toBe(true));
+
+      releaseGet();
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(isAnyKeyedStoreLoading()).toBe(false);
+    });
+
+    it("subscribeGlobalKeyedStoreActivity notifies on both the start and the end of a fetch", async () => {
+      const cryptoHandle = createDekHandle(randomBytes(32));
+      const { provider } = fakeKeys(cryptoHandle);
+      let releaseGet!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseGet = resolve;
+      });
+      const storage: StorageAdapter = {
+        async get() {
+          await gate;
+          return null;
+        },
+        async put() {},
+      };
+      configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+      const store = defineStore({
+        name: "transaction_blobs",
+        identity: { perKey: "year_month" },
+        encrypt: "all",
+        schema: Batch,
+        version: 1,
+        schemaFingerprint: fingerprintSchema(Batch, "all"),
+      });
+
+      const notifications: boolean[] = [];
+      const unsubscribe = subscribeGlobalKeyedStoreActivity(() => {
+        notifications.push(isAnyKeyedStoreLoading());
+      });
+
+      renderHook(() => useKeyedStore(store, "2026-06"));
+      await waitFor(() => expect(notifications).toContain(true));
+
+      releaseGet();
+      await waitFor(() => expect(notifications).toContain(false));
+      unsubscribe();
+
+      expect(notifications[0]).toBe(true);
+      expect(notifications[notifications.length - 1]).toBe(false);
+    });
+
+    it("stays true while TWO independent keys are both in flight, only goes false once BOTH settle", async () => {
+      const cryptoHandle = createDekHandle(randomBytes(32));
+      const { provider } = fakeKeys(cryptoHandle);
+      let releaseJune!: () => void;
+      let releaseJuly!: () => void;
+      const juneGate = new Promise<void>((resolve) => {
+        releaseJune = resolve;
+      });
+      const julyGate = new Promise<void>((resolve) => {
+        releaseJuly = resolve;
+      });
+      const storage: StorageAdapter = {
+        async get(_collection, _userId, extraKeys) {
+          await (extraKeys[0]?.value === "2026-06" ? juneGate : julyGate);
+          return null;
+        },
+        async put() {},
+      };
+      configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+      const store = defineStore({
+        name: "transaction_blobs",
+        identity: { perKey: "year_month" },
+        encrypt: "all",
+        schema: Batch,
+        version: 1,
+        schemaFingerprint: fingerprintSchema(Batch, "all"),
+      });
+
+      renderHook(() => useKeyedStore(store, "2026-06"));
+      renderHook(() => useKeyedStore(store, "2026-07"));
+      await waitFor(() => expect(isAnyKeyedStoreLoading()).toBe(true));
+
+      releaseJune();
+      // June alone settling must NOT flip the global signal — July is still pending.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(isAnyKeyedStoreLoading()).toBe(true);
+
+      releaseJuly();
+      await waitFor(() => expect(isAnyKeyedStoreLoading()).toBe(false));
+    });
   });
 });

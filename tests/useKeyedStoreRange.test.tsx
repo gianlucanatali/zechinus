@@ -19,6 +19,7 @@ import {
   type CacheAdapter,
 } from "../index.ts";
 import { useKeyedStoreRange } from "../react/useKeyedStoreRange.ts";
+import { __resetGlobalKeyedStoreActivity } from "../react/keyedStoreActivity.ts";
 
 function rangeMemoryStorage(): StorageAdapter & {
   rows: Map<string, BlobRecord>;
@@ -96,6 +97,7 @@ describe("useKeyedStoreRange", () => {
   afterEach(() => {
     cleanup();
     __resetSecureStoreConfig();
+    __resetGlobalKeyedStoreActivity();
   });
 
   it("locked: no data, locked:true", () => {
@@ -452,5 +454,47 @@ describe("useKeyedStoreRange", () => {
       cache.get(`range_reload_lock:u1:range:2026-01:2026-01`),
     ).toBeUndefined();
     expect(result.current.data).toBeUndefined();
+  });
+
+  it("a range fetch registers with the shared isAnyKeyedStoreLoading() signal (same registry useKeyedStore uses)", async () => {
+    const { isAnyKeyedStoreLoading } =
+      await import("../react/keyedStoreActivity.ts");
+    expect(isAnyKeyedStoreLoading()).toBe(false);
+
+    const cryptoHandle = createDekHandle(randomBytes(32));
+    const { provider } = fakeKeys(cryptoHandle);
+    let releaseList!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    const storage: StorageAdapter = {
+      async get() {
+        return null;
+      },
+      async put() {},
+      async listByKeyRange() {
+        await gate;
+        return [];
+      },
+    };
+    configureSecureStore({ storage, keys: provider, cache: memoryCache() });
+    const store = defineStore({
+      name: "range_activity_signal",
+      identity: { perKey: "year_month" },
+      encrypt: "all",
+      schema: Batch,
+      version: 1,
+      schemaFingerprint: fingerprintSchema(Batch, "all"),
+    });
+
+    const { result } = renderHook(() =>
+      useKeyedStoreRange(store, { from: "2026-01", to: "2026-01" }),
+    );
+    expect(result.current.loading).toBe(true);
+    await waitFor(() => expect(isAnyKeyedStoreLoading()).toBe(true));
+
+    releaseList();
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(isAnyKeyedStoreLoading()).toBe(false);
   });
 });

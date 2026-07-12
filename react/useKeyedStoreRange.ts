@@ -18,6 +18,10 @@ import {
 } from "react";
 import { getSecureStoreConfig } from "../core/config.ts";
 import { keyedRangeEpochCacheKey, type KeyedStore } from "../core/store.ts";
+import {
+  markKeyedFetchStart,
+  markKeyedFetchEnd,
+} from "./keyedStoreActivity.ts";
 
 interface RangeCacheEntry<T> {
   rows: Array<{ key: string; data: T }>;
@@ -47,8 +51,10 @@ function fetchRangeDeduped<T>(
   if (existing) {
     return existing as Promise<Array<{ key: string; data: T }>>;
   }
+  markKeyedFetchStart();
   const promise = fetcher().finally(() => {
     inflightRangeFetches.delete(cacheKey);
+    markKeyedFetchEnd();
   });
   inflightRangeFetches.set(
     cacheKey,

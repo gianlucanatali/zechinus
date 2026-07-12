@@ -4,7 +4,12 @@
  */
 export { useStore, type UseStoreResult } from "./useStore.ts";
 export { useIsUnlocked } from "./useIsUnlocked.ts";
-export { useKeyedStore, type UseKeyedStoreResult } from "./useKeyedStore.ts";
+export {
+  useKeyedStore,
+  type UseKeyedStoreResult,
+  isAnyKeyedStoreLoading,
+  subscribeGlobalKeyedStoreActivity,
+} from "./useKeyedStore.ts";
 export {
   useKeyedStoreRange,
   type UseKeyedStoreRangeResult,
@@ -15,6 +20,7 @@ export {
 } from "./useCollectionStore.ts";
 export { useAggregation, type UseAggregationResult } from "./useAggregation.ts";
 export { useIsAnyAggregationComputing } from "./useIsAnyAggregationComputing.ts";
+export { useIsAnyKeyedStoreLoading } from "./useIsAnyKeyedStoreLoading.ts";
 export { tanstackAdapter } from "../adapters/tanstackAdapter.ts";
 export { OptimisticLockConflictError } from "./errors.ts";
 export { usePasskeyDek, type UsePasskeyDekResult } from "./usePasskeyDek.ts";
