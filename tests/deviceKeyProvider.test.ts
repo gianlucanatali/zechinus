@@ -11,6 +11,8 @@ import {
   deriveDevicePublicKey,
   wrapForDevicePublicKey,
   unwrapWithDeviceKey,
+  generateEphemeralDeviceKey,
+  unwrapWithEphemeralKey,
 } from "../adapters/deviceKeyProvider.ts";
 import { mobileDeviceKeyProvider } from "../adapters/mobileDeviceKeyProvider.ts";
 import { createKeyHandle, asRawDekBytes } from "../core/keyDerivation.ts";
@@ -69,6 +71,45 @@ test("unwrapWithDeviceKey: a different device's KEK cannot unwrap the wrap (devi
   const wrapped = wrapForDevicePublicKey(publicKeyA, dek);
 
   assert.throws(() => unwrapWithDeviceKey(kekB, wrapped));
+});
+
+test("generateEphemeralDeviceKey: two calls produce different keypairs (genuinely random, not derived from anything stable)", () => {
+  const a = generateEphemeralDeviceKey();
+  const b = generateEphemeralDeviceKey();
+  assert.notEqual(a.publicKeyB64, b.publicKeyB64);
+});
+
+test("wrapForDevicePublicKey + unwrapWithEphemeralKey: round-trips a DEK-sized payload for a one-shot handshake key (Fase 2.3 — device catching up on a rotated DEK)", () => {
+  const { seed, publicKeyB64 } = generateEphemeralDeviceKey();
+  const dek = bytesFromRange(32, (i) => (i * 3) % 256);
+
+  const wrapped = wrapForDevicePublicKey(publicKeyB64, dek);
+  const unwrapped = unwrapWithEphemeralKey(seed, wrapped);
+
+  assert.deepEqual(unwrapped, dek);
+});
+
+test("unwrapWithEphemeralKey: a different ephemeral seed cannot unwrap the wrap (one-shot key, not shared across handshakes)", () => {
+  const requester = generateEphemeralDeviceKey();
+  const someoneElse = generateEphemeralDeviceKey();
+  const dek = bytesFromRange(32, (i) => i);
+
+  const wrapped = wrapForDevicePublicKey(requester.publicKeyB64, dek);
+
+  assert.throws(() => unwrapWithEphemeralKey(someoneElse.seed, wrapped));
+});
+
+test("wrapForDevicePublicKey doesn't care whether the public key is KEK-derived or ephemeral — same function, same wire format, fulfilling a request never needs to know which kind of key it's addressing", () => {
+  const kek = bytesFromRange(32, (i) => i * 7);
+  const stableDevicePublicKey = deriveDevicePublicKey(kek);
+  const { publicKeyB64: ephemeralPublicKey } = generateEphemeralDeviceKey();
+  const dek = bytesFromRange(32, (i) => (i * 5) % 256);
+
+  const wrappedForStable = wrapForDevicePublicKey(stableDevicePublicKey, dek);
+  const wrappedForEphemeral = wrapForDevicePublicKey(ephemeralPublicKey, dek);
+
+  assert.equal("ephemeralPublicKeyB64" in wrappedForStable, true);
+  assert.equal("ephemeralPublicKeyB64" in wrappedForEphemeral, true);
 });
 
 test("createKeyHandle + wrapForDevice: the intended real usage — the DEK held by a KeyHandle (e.g. a Worker) is wrapped for a device's public key without ever being handed to the caller as a plain value", async () => {

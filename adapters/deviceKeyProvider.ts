@@ -40,10 +40,55 @@ const WRAP_KEK_INFO = "device-key-wrap-shared-secret-v1";
 
 export type DeviceWrappedKey = WrappedKey & { ephemeralPublicKeyB64: string };
 
+/** Public key for a raw 32-byte X25519 seed — however it was obtained (derived from a KEK, or freshly random for a one-shot handshake). Shared by both the KEK-derived and ephemeral flows below. */
+function publicKeyFromSeed(seed: Uint8Array): string {
+  return bytesToBase64(x25519.getPublicKey(seed));
+}
+
+/** Unwraps using a raw 32-byte X25519 seed directly — no KEK derivation. Shared by `unwrapWithDeviceKey` (seed = derived from KEK) and `unwrapWithEphemeralKey` (seed = freshly random, held only in memory for one handshake, never derived from anything persistent). */
+function unwrapWithSeed(
+  seed: Uint8Array,
+  wrapped: DeviceWrappedKey,
+): Uint8Array {
+  const ephemeralPublicKey = base64ToBytes(wrapped.ephemeralPublicKeyB64);
+  const sharedSecret = x25519.getSharedSecret(seed, ephemeralPublicKey);
+  const wrapKek = deriveKey(sharedSecret, DEVICE_KEY_SALT, WRAP_KEK_INFO, 32);
+  return unwrapKey(wrapKek, wrapped);
+}
+
 /** Deterministically derives this device's X25519 public key from the KEK. Same KEK → same public key, every time — nothing to persist, nothing to "create". */
 export function deriveDevicePublicKey(kek: Uint8Array): string {
-  const seed = deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32);
-  return bytesToBase64(x25519.getPublicKey(seed));
+  return publicKeyFromSeed(
+    deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32),
+  );
+}
+
+/**
+ * Generates a fresh, genuinely random X25519 keypair for a ONE-SHOT key-delivery
+ * handshake (key-custody roadmap Fase 2.3: a device that's fallen behind an epoch
+ * publishes this public key instead of relying on a persisted/derivable identity —
+ * any device already on the current epoch wraps the DEK for it, the requester
+ * unwraps with `seed` then discards it immediately). Deliberately NOT derived from
+ * the KEK: this key's only job is to exist for the few seconds/minutes of one
+ * handshake — persisting or re-deriving it would just recreate the exact standing-
+ * secret problem `deriveDevicePublicKey` exists to avoid (see
+ * `docs/decisions/2026-07-12-device-key-kek-derivation.md`), for no benefit, since
+ * nothing needs to address this key again after the handshake completes.
+ */
+export function generateEphemeralDeviceKey(): {
+  seed: Uint8Array;
+  publicKeyB64: string;
+} {
+  const seed = x25519.utils.randomSecretKey();
+  return { seed, publicKeyB64: publicKeyFromSeed(seed) };
+}
+
+/** Unwraps a DEK wrapped for an ephemeral handshake key (see `generateEphemeralDeviceKey`). `seed` is the raw private key returned by that call — discard it immediately after this returns, it is never reused. */
+export function unwrapWithEphemeralKey(
+  seed: Uint8Array,
+  wrapped: DeviceWrappedKey,
+): Uint8Array {
+  return unwrapWithSeed(seed, wrapped);
 }
 
 /**
@@ -70,9 +115,8 @@ export function unwrapWithDeviceKey(
   kek: Uint8Array,
   wrapped: DeviceWrappedKey,
 ): Uint8Array {
-  const seed = deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32);
-  const ephemeralPublicKey = base64ToBytes(wrapped.ephemeralPublicKeyB64);
-  const sharedSecret = x25519.getSharedSecret(seed, ephemeralPublicKey);
-  const wrapKek = deriveKey(sharedSecret, DEVICE_KEY_SALT, WRAP_KEK_INFO, 32);
-  return unwrapKey(wrapKek, wrapped);
+  return unwrapWithSeed(
+    deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32),
+    wrapped,
+  );
 }
