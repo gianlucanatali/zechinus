@@ -91,6 +91,13 @@ export interface PasskeyDekController {
   getSetupStatus(): PasskeySetupStatus;
   /** How the DEK was unlocked this session — `null` when locked. See `UnlockMethod`. */
   getUnlockMethod(): UnlockMethod | null;
+  /** The passkey credential id that unlocked/created the current DEK (base64url,
+   * as returned by WebAuthn) — `null` when locked, or when the session was unlocked
+   * via recovery phrase (no passkey credential involved). Any app tracking which
+   * specific passkey a device is bound to (e.g. to point a user at the right one to
+   * remove during a security incident) needs this — it's not derivable from
+   * `getUnlockMethod()` alone, which only says "passkey" vs "recovery". */
+  getUnlockCredentialId(): string | null;
   subscribe(callback: () => void): () => void;
 
   /** Activates a caller-supplied raw DEK directly — dev/test injection, or after a
@@ -152,6 +159,7 @@ export function createPasskeyDekController(
   let userId: string | null = null;
   let setupStatus: PasskeySetupStatus = "pending";
   let unlockMethod: UnlockMethod | null = null;
+  let unlockCredentialId: string | null = null;
   const listeners = new Set<() => void>();
 
   function notify(): void {
@@ -167,12 +175,14 @@ export function createPasskeyDekController(
     }
     userId = null;
     unlockMethod = null;
+    unlockCredentialId = null;
   }
 
   async function activate(
     uid: string,
     rawBytes: RawDekBytes,
     method: UnlockMethod,
+    credentialId: string | null = null,
   ): Promise<void> {
     const handle = await createHandle(rawBytes);
     clean(rawBytes);
@@ -180,6 +190,7 @@ export function createPasskeyDekController(
     userId = uid;
     setupStatus = "done";
     unlockMethod = method;
+    unlockCredentialId = credentialId;
     notify();
   }
 
@@ -188,6 +199,7 @@ export function createPasskeyDekController(
     getUserId: () => userId,
     getSetupStatus: () => setupStatus,
     getUnlockMethod: () => unlockMethod,
+    getUnlockCredentialId: () => unlockCredentialId,
     subscribe(callback) {
       listeners.add(callback);
       return () => listeners.delete(callback);
@@ -236,7 +248,12 @@ export function createPasskeyDekController(
       const kek = provider.deriveKEKFromPRF(prfOutput);
       try {
         const rawBytes = unwrapKey(kek, wrap);
-        await activate(uid, asRawDekBytes(rawBytes), "passkey");
+        await activate(
+          uid,
+          asRawDekBytes(rawBytes),
+          "passkey",
+          usedCredentialId,
+        );
       } catch {
         throw new Error(
           "passkeyDekController.unlockWithPasskey: passkey not recognized — data cannot be decrypted.",
@@ -299,6 +316,7 @@ export function createPasskeyDekController(
               uid,
               asRawDekBytes(new Uint8Array(masterKey)),
               "passkey",
+              credentialId,
             );
           } finally {
             clean(masterKey);

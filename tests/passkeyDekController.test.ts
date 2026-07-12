@@ -186,6 +186,60 @@ test("unlockWithPasskey: recovers the exact DEK set during registration", async 
   assert.equal(controller.getCryptoHandle()!.pid, pidAfterSetup);
 });
 
+test("getUnlockCredentialId: null until unlocked, set by registerPasskey/confirm, cleared by lock", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+
+  assert.equal(controller.getUnlockCredentialId(), null);
+  await (
+    await controller.registerPasskey("user-1", "u@test.example")
+  ).confirm();
+  assert.equal(controller.getUnlockCredentialId(), "cred-1");
+
+  controller.lock();
+  assert.equal(controller.getUnlockCredentialId(), null);
+});
+
+test("getUnlockCredentialId: reflects the credential used by unlockWithPasskey", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  await (
+    await controller.registerPasskey("user-1", "u@test.example")
+  ).confirm();
+  controller.lock();
+
+  await controller.unlockWithPasskey("user-1", "cred-1");
+  assert.equal(controller.getUnlockCredentialId(), "cred-1");
+});
+
+test("getUnlockCredentialId: null after unlockWithRecovery — no passkey credential involved", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  await (
+    await controller.registerPasskey("user-1", "u@test.example")
+  ).confirm();
+  assert.equal(controller.getUnlockCredentialId(), "cred-1");
+  controller.lock();
+
+  await controller.unlockWithRecovery("user-1", "fixed test recovery words");
+  assert.equal(controller.getUnlockCredentialId(), null);
+});
+
 test("unlockWithPasskey: unknown credential throws and never touches the DEK", async () => {
   const storage = memoryWrapStorage();
   const provider = fakeWebauthnProvider();
