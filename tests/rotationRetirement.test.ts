@@ -137,6 +137,68 @@ test("verifyRowsDecryptAtEpoch: empty result → processedThisBatch 0, lastKey u
 const NOW = 1_800_000_000_000; // fixed instant, tests never call Date.now()
 const ROTATION_STARTED = NOW - 10 * 24 * 60 * 60 * 1000; // 10 days ago — within grace
 
+test("verifyRowsDecryptAtEpoch: keyset pagination across multiple calls covers every row exactly once, no gaps or duplicates — the fake IO here actually implements the ordering/afterKey contract (unlike a naive 'return everything' double), catching the same class of bug a real unordered-LIMIT implementation hit live (docs/decisions/2026-07-12-dek-rotation-compat-test-2.2b.md)", async () => {
+  const handle = createDekHandle(randomBytes(32));
+  // 25 rows — enough to force multiple calls at batchSize 10, never a
+  // coincidental full cover in one shot.
+  const rowIds = Array.from(
+    { length: 25 },
+    (_, i) => `r${String(i).padStart(2, "0")}`,
+  );
+  const rows: Record<string, BlobRecord> = {};
+  for (const id of rowIds) {
+    rows[id] = await encodeBlob(handle, aadFor(handle, id), { id }, 1, false);
+  }
+
+  // Realistic fake: keyset-filtered by afterKey exactly like a real
+  // `WHERE key > afterKey ORDER BY key` would be — this is the contract
+  // documented on RetirementVerificationIO.listRowsAtEpoch, exercised for
+  // real here instead of assumed.
+  const returnedKeysByCall: string[][] = [];
+  const io: RetirementVerificationIO = {
+    async listRowsAtEpoch(_epoch, limit, afterKey) {
+      const sortedKeys = Object.keys(rows).sort();
+      const startIndex =
+        afterKey === null ? 0 : sortedKeys.findIndex((k) => k === afterKey) + 1;
+      const page = sortedKeys.slice(startIndex, startIndex + limit);
+      returnedKeysByCall.push(page);
+      return page.map(
+        (key) => ({ key, record: rows[key] }) as VerificationCandidateRow,
+      );
+    },
+  };
+
+  let cursor: unknown = null;
+  let totalVerified = 0;
+  let calls = 0;
+  for (;;) {
+    calls++;
+    const result = await verifyRowsDecryptAtEpoch(
+      handle,
+      TABLE,
+      EPOCH,
+      1,
+      [],
+      {},
+      io,
+      (key) => aadFor(handle, key as string),
+      10,
+      cursor,
+    );
+    totalVerified += result.verified;
+    assert.deepEqual(result.failures, []);
+    if (result.processedThisBatch === 0) break;
+    cursor = result.lastKey;
+  }
+
+  assert.equal(calls, 4); // 10 + 10 + 5, then a 4th call confirms empty
+  assert.equal(totalVerified, 25);
+
+  const allReturnedKeys = returnedKeysByCall.flat();
+  assert.equal(allReturnedKeys.length, 25); // no duplicates across calls
+  assert.deepEqual([...allReturnedKeys].sort(), Object.keys(rows).sort()); // no gaps
+});
+
 test("checkRetirementEligibility: blocked while rows remain at the old epoch, regardless of devices/verification", () => {
   const result = checkRetirementEligibility(
     5,

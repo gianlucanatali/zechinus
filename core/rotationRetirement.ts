@@ -17,7 +17,21 @@ export interface VerificationCandidateRow {
 }
 
 export interface RetirementVerificationIO {
-  /** Up to `limit` rows currently claiming `epoch` — any consistent order, paged via repeated calls (this file has no notion of "all rows in one call", same reasoning as `migrateRotationBatch`: bounded batches, no assumption about table size). */
+  /**
+   * Up to `limit` rows currently claiming `epoch`, keyset-paginated — REQUIRED
+   * contract, not "any consistent order": rows must be returned in a STABLE total
+   * order (e.g. `ORDER BY key`), and when `afterKey` is non-null, only rows strictly
+   * AFTER that key in that same order. This is the piece `migrateRotationBatch`
+   * doesn't need (its WHERE-filtered set shrinks as rows migrate, so a plain
+   * unordered LIMIT eventually drains it) but verification does: verifying a row
+   * never changes its epoch, so an implementation that ignores `afterKey` — or
+   * orders inconsistently between calls — would re-return the SAME first `limit`
+   * rows forever, silently never verifying the rest. See
+   * `datacloak/tests/rotationRetirement.test.ts`'s pagination test for a worked
+   * example, and the real bug this exact class of mistake caused live (unordered
+   * `LIMIT` in a migration script,
+   * `docs/decisions/2026-07-12-dek-rotation-compat-test-2.2b.md`).
+   */
   listRowsAtEpoch(
     epoch: number,
     limit: number,

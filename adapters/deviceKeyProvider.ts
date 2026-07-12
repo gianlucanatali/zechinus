@@ -22,8 +22,17 @@
  * a one-off ephemeral keypair, computes a shared secret against the recipient's
  * (derived) device public key, HKDF-derives a wrapping key from it, and reuses the
  * existing `wrapKey`/`unwrapKey` (AES-GCM) — no new AEAD implementation needed.
+ * `getSharedSecret` rejects low-order peer public keys by default (verified against
+ * `@noble/curves`'s own source, not assumed) — a malicious/invalid device public key
+ * can't force a predictable shared secret.
+ *
+ * Every derived secret (the X25519 seed, the ECDH shared secret, the AES wrap key)
+ * is `clean()`ed in a `finally` block as soon as it's no longer needed — same
+ * discipline `passkeyDekController.ts` already applies to its own KEKs, extended
+ * here rather than left as an inconsistency.
  */
 import { x25519 } from "@noble/curves/ed25519.js";
+import { clean } from "@noble/ciphers/utils.js";
 import {
   deriveKey,
   wrapKey,
@@ -40,27 +49,38 @@ const WRAP_KEK_INFO = "device-key-wrap-shared-secret-v1";
 
 export type DeviceWrappedKey = WrappedKey & { ephemeralPublicKeyB64: string };
 
-/** Public key for a raw 32-byte X25519 seed — however it was obtained (derived from a KEK, or freshly random for a one-shot handshake). Shared by both the KEK-derived and ephemeral flows below. */
+/** Public key for a raw 32-byte X25519 seed — however it was obtained (derived from a KEK, or freshly random for a one-shot handshake). Does NOT clean `seed` — the caller owns its lifetime, it's typically used again right after (e.g. to unwrap). */
 function publicKeyFromSeed(seed: Uint8Array): string {
   return bytesToBase64(x25519.getPublicKey(seed));
 }
 
-/** Unwraps using a raw 32-byte X25519 seed directly — no KEK derivation. Shared by `unwrapWithDeviceKey` (seed = derived from KEK) and `unwrapWithEphemeralKey` (seed = freshly random, held only in memory for one handshake, never derived from anything persistent). */
+/** Unwraps using a raw 32-byte X25519 seed directly — no KEK derivation. Shared by `unwrapWithDeviceKey` (seed = derived from KEK) and `unwrapWithEphemeralKey` (seed = freshly random, held only in memory for one handshake, never derived from anything persistent). Cleans the shared secret and derived wrap key before returning; does NOT clean `seed` — the caller owns it. */
 function unwrapWithSeed(
   seed: Uint8Array,
   wrapped: DeviceWrappedKey,
 ): Uint8Array {
   const ephemeralPublicKey = base64ToBytes(wrapped.ephemeralPublicKeyB64);
   const sharedSecret = x25519.getSharedSecret(seed, ephemeralPublicKey);
-  const wrapKek = deriveKey(sharedSecret, DEVICE_KEY_SALT, WRAP_KEK_INFO, 32);
-  return unwrapKey(wrapKek, wrapped);
+  try {
+    const wrapKek = deriveKey(sharedSecret, DEVICE_KEY_SALT, WRAP_KEK_INFO, 32);
+    try {
+      return unwrapKey(wrapKek, wrapped);
+    } finally {
+      clean(wrapKek);
+    }
+  } finally {
+    clean(sharedSecret);
+  }
 }
 
 /** Deterministically derives this device's X25519 public key from the KEK. Same KEK → same public key, every time — nothing to persist, nothing to "create". */
 export function deriveDevicePublicKey(kek: Uint8Array): string {
-  return publicKeyFromSeed(
-    deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32),
-  );
+  const seed = deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32);
+  try {
+    return publicKeyFromSeed(seed);
+  } finally {
+    clean(seed);
+  }
 }
 
 /**
@@ -74,6 +94,10 @@ export function deriveDevicePublicKey(kek: Uint8Array): string {
  * secret problem `deriveDevicePublicKey` exists to avoid (see
  * `docs/decisions/2026-07-12-device-key-kek-derivation.md`), for no benefit, since
  * nothing needs to address this key again after the handshake completes.
+ *
+ * Returns `seed` to the caller (not cleaned here) — it's needed once more, to
+ * `unwrapWithEphemeralKey` the reply when it arrives. The caller must `clean()` it
+ * themselves once the handshake is over (success or abandoned).
  */
 export function generateEphemeralDeviceKey(): {
   seed: Uint8Array;
@@ -83,7 +107,7 @@ export function generateEphemeralDeviceKey(): {
   return { seed, publicKeyB64: publicKeyFromSeed(seed) };
 }
 
-/** Unwraps a DEK wrapped for an ephemeral handshake key (see `generateEphemeralDeviceKey`). `seed` is the raw private key returned by that call — discard it immediately after this returns, it is never reused. */
+/** Unwraps a DEK wrapped for an ephemeral handshake key (see `generateEphemeralDeviceKey`). `seed` is the raw private key returned by that call — discard it (call `clean()` on it) immediately after this returns, it is never reused. */
 export function unwrapWithEphemeralKey(
   seed: Uint8Array,
   wrapped: DeviceWrappedKey,
@@ -102,12 +126,29 @@ export function wrapForDevicePublicKey(
 ): DeviceWrappedKey {
   const devicePublicKey = base64ToBytes(devicePublicKeyB64);
   const ephemeralSeed = x25519.utils.randomSecretKey();
-  const ephemeralPublicKeyB64 = bytesToBase64(
-    x25519.getPublicKey(ephemeralSeed),
-  );
-  const sharedSecret = x25519.getSharedSecret(ephemeralSeed, devicePublicKey);
-  const wrapKek = deriveKey(sharedSecret, DEVICE_KEY_SALT, WRAP_KEK_INFO, 32);
-  return { ...wrapKey(wrapKek, dek), ephemeralPublicKeyB64 };
+  try {
+    const ephemeralPublicKeyB64 = bytesToBase64(
+      x25519.getPublicKey(ephemeralSeed),
+    );
+    const sharedSecret = x25519.getSharedSecret(ephemeralSeed, devicePublicKey);
+    try {
+      const wrapKek = deriveKey(
+        sharedSecret,
+        DEVICE_KEY_SALT,
+        WRAP_KEK_INFO,
+        32,
+      );
+      try {
+        return { ...wrapKey(wrapKek, dek), ephemeralPublicKeyB64 };
+      } finally {
+        clean(wrapKek);
+      }
+    } finally {
+      clean(sharedSecret);
+    }
+  } finally {
+    clean(ephemeralSeed);
+  }
 }
 
 /** Unwraps a DEK wrapped for this device — re-derives this device's private key from the KEK on the spot, needs no persisted material. Throws if the wrap targets a different device's public key. */
@@ -115,8 +156,10 @@ export function unwrapWithDeviceKey(
   kek: Uint8Array,
   wrapped: DeviceWrappedKey,
 ): Uint8Array {
-  return unwrapWithSeed(
-    deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32),
-    wrapped,
-  );
+  const seed = deriveKey(kek, DEVICE_KEY_SALT, DEVICE_KEY_INFO, 32);
+  try {
+    return unwrapWithSeed(seed, wrapped);
+  } finally {
+    clean(seed);
+  }
 }
