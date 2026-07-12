@@ -21,6 +21,7 @@ export interface UsePasskeyDekResult {
   setupStatus: PasskeySetupStatus;
   unlockMethod: UnlockMethod | null;
   unlockCredentialId: string | null;
+  devicePublicKey: string | null;
   checkSetupNeeded: (userId: string) => Promise<void>;
   markSetupDone: () => void;
   setDek: (userId: string, rawBytes: RawDekBytes) => Promise<void>;
@@ -63,6 +64,10 @@ export function usePasskeyDek(
     controller.subscribe,
     controller.getUnlockCredentialId,
   );
+  const devicePublicKey = useSyncExternalStore(
+    controller.subscribe,
+    controller.getDevicePublicKey,
+  );
 
   return {
     cryptoHandle,
@@ -70,6 +75,7 @@ export function usePasskeyDek(
     setupStatus,
     unlockMethod,
     unlockCredentialId,
+    devicePublicKey,
     checkSetupNeeded: controller.checkSetupNeeded,
     markSetupDone: controller.markSetupDone,
     setDek: controller.setDek,

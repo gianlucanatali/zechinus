@@ -31,6 +31,7 @@ function fakeController(): PasskeyDekController & {
     getSetupStatus: () => "done",
     getUnlockMethod: () => null,
     getUnlockCredentialId: () => null,
+    getDevicePublicKey: () => null,
     subscribe: () => () => {},
     setDek: async (userId, rawBytes) => {
       setDekCalls.push({ userId, bytes: new Uint8Array(rawBytes) });

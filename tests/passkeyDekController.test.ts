@@ -240,6 +240,80 @@ test("getUnlockCredentialId: null after unlockWithRecovery — no passkey creden
   assert.equal(controller.getUnlockCredentialId(), null);
 });
 
+test("getDevicePublicKey: null until unlocked, set by registerPasskey/confirm, cleared by lock", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+
+  assert.equal(controller.getDevicePublicKey(), null);
+  await (
+    await controller.registerPasskey("user-1", "u@test.example")
+  ).confirm();
+  assert.ok(controller.getDevicePublicKey());
+
+  controller.lock();
+  assert.equal(controller.getDevicePublicKey(), null);
+});
+
+test("getDevicePublicKey: deterministic — re-unlocking with the same credential derives the SAME device public key (nothing persisted, always re-derived)", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  await (
+    await controller.registerPasskey("user-1", "u@test.example")
+  ).confirm();
+  const firstDevicePublicKey = controller.getDevicePublicKey();
+  controller.lock();
+
+  await controller.unlockWithPasskey("user-1", "cred-1");
+  assert.equal(controller.getDevicePublicKey(), firstDevicePublicKey);
+});
+
+test("getDevicePublicKey: null after unlockWithRecovery — no passkey KEK involved", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  await (
+    await controller.registerPasskey("user-1", "u@test.example")
+  ).confirm();
+  assert.ok(controller.getDevicePublicKey());
+  controller.lock();
+
+  await controller.unlockWithRecovery("user-1", "fixed test recovery words");
+  assert.equal(controller.getDevicePublicKey(), null);
+});
+
+test("getDevicePublicKey: set by addPasskeyToExistingDek too", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  await (
+    await controller.registerPasskey("user-1", "u@test.example")
+  ).confirm();
+  controller.lock();
+  await controller.unlockWithRecovery("user-1", "fixed test recovery words");
+  assert.equal(controller.getDevicePublicKey(), null);
+
+  await controller.addPasskeyToExistingDek("user-1", "u@test.example");
+  assert.ok(controller.getDevicePublicKey());
+});
+
 test("unlockWithPasskey: unknown credential throws and never touches the DEK", async () => {
   const storage = memoryWrapStorage();
   const provider = fakeWebauthnProvider();

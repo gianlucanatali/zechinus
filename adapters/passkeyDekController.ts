@@ -27,6 +27,7 @@ import { asRawDekBytes, type RawDekBytes } from "../core/keyDerivation.ts";
 import { clean, randomBytes } from "@noble/ciphers/utils.js";
 import type { WebauthnKeyProvider } from "./webauthnKeyProvider.ts";
 import type { MnemonicRecovery } from "./mnemonicRecovery.ts";
+import { deriveDevicePublicKey } from "./deviceKeyProvider.ts";
 
 export type WrappedKeyRow = { ciphertext: string; nonce: string };
 
@@ -98,6 +99,14 @@ export interface PasskeyDekController {
    * remove during a security incident) needs this — it's not derivable from
    * `getUnlockMethod()` alone, which only says "passkey" vs "recovery". */
   getUnlockCredentialId(): string | null;
+  /** This device's X25519 public key, deterministically derived from the current
+   * session's KEK (see `adapters/deviceKeyProvider.ts`) — `null` when locked, or when
+   * the session was unlocked via recovery phrase (no passkey KEK involved, mirrors
+   * `getUnlockCredentialId()`). Register this on the device's registry row so another
+   * device can address a rotated DEK to it later (key-custody roadmap Fase 2.3). Never
+   * persisted by this controller itself — nothing to persist, it re-derives identically
+   * every time the same passkey unlocks. */
+  getDevicePublicKey(): string | null;
   subscribe(callback: () => void): () => void;
 
   /** Activates a caller-supplied raw DEK directly — dev/test injection, or after a
@@ -160,6 +169,7 @@ export function createPasskeyDekController(
   let setupStatus: PasskeySetupStatus = "pending";
   let unlockMethod: UnlockMethod | null = null;
   let unlockCredentialId: string | null = null;
+  let devicePublicKey: string | null = null;
   const listeners = new Set<() => void>();
 
   function notify(): void {
@@ -176,6 +186,7 @@ export function createPasskeyDekController(
     userId = null;
     unlockMethod = null;
     unlockCredentialId = null;
+    devicePublicKey = null;
   }
 
   async function activate(
@@ -183,6 +194,7 @@ export function createPasskeyDekController(
     rawBytes: RawDekBytes,
     method: UnlockMethod,
     credentialId: string | null = null,
+    devicePublicKeyB64: string | null = null,
   ): Promise<void> {
     const handle = await createHandle(rawBytes);
     clean(rawBytes);
@@ -191,6 +203,7 @@ export function createPasskeyDekController(
     setupStatus = "done";
     unlockMethod = method;
     unlockCredentialId = credentialId;
+    devicePublicKey = devicePublicKeyB64;
     notify();
   }
 
@@ -200,6 +213,7 @@ export function createPasskeyDekController(
     getSetupStatus: () => setupStatus,
     getUnlockMethod: () => unlockMethod,
     getUnlockCredentialId: () => unlockCredentialId,
+    getDevicePublicKey: () => devicePublicKey,
     subscribe(callback) {
       listeners.add(callback);
       return () => listeners.delete(callback);
@@ -248,11 +262,13 @@ export function createPasskeyDekController(
       const kek = provider.deriveKEKFromPRF(prfOutput);
       try {
         const rawBytes = unwrapKey(kek, wrap);
+        const devicePublicKeyB64 = deriveDevicePublicKey(kek);
         await activate(
           uid,
           asRawDekBytes(rawBytes),
           "passkey",
           usedCredentialId,
+          devicePublicKeyB64,
         );
       } catch {
         throw new Error(
@@ -299,6 +315,7 @@ export function createPasskeyDekController(
 
       const kekPasskey = provider.deriveKEKFromPRF(prfOutput);
       const wrappedPasskey = wrapKey(kekPasskey, masterKey);
+      const devicePublicKeyB64 = deriveDevicePublicKey(kekPasskey);
       clean(kekPasskey);
 
       const recoveryWords = recovery.generateWords();
@@ -317,6 +334,7 @@ export function createPasskeyDekController(
               asRawDekBytes(new Uint8Array(masterKey)),
               "passkey",
               credentialId,
+              devicePublicKeyB64,
             );
           } finally {
             clean(masterKey);
@@ -341,6 +359,7 @@ export function createPasskeyDekController(
         const wrapped = await cryptoHandle.wrapWithKek(kek);
         await storage.savePasskeyWrap(uid, credentialId, wrapped);
         unlockMethod = "passkey";
+        devicePublicKey = deriveDevicePublicKey(kek);
         notify();
         return { credentialId };
       } finally {
