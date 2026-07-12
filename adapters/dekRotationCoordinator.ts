@@ -41,6 +41,26 @@ export interface DekRotationStorage {
     wrappedDek: DeviceWrappedKey,
   ): Promise<void>;
   deleteRequest(userId: string, requestId: string): Promise<void>;
+  /**
+   * Atomic guard: marks a rotation to `newEpoch` as in progress, but ONLY if
+   * none already is — `true` (started) or `false` (a rotation is already
+   * pending, no write happened). Must be a single conditional write (e.g.
+   * `UPDATE ... WHERE pending_dek_epoch IS NULL`), never read-then-write —
+   * two callers racing (two tabs, two devices) must never both succeed.
+   */
+  beginRotation(userId: string, newEpoch: number): Promise<boolean>;
+  /** The in-progress rotation's target epoch, or `null` if none is pending. */
+  getPendingRotation(userId: string): Promise<number | null>;
+  /**
+   * Clears the in-progress marker and bumps the canonical epoch. Call ONLY
+   * after the OLD epoch's key material has actually been retired (Fase 2.4's
+   * `checkRetirementEligibility` returned eligible AND the retire itself ran)
+   * — not merely after data migration finishes. Until this runs, `beginRotation`
+   * keeps refusing every new attempt, on purpose: a second rotation starting
+   * before the old epoch is retired risks destroying the only key that can
+   * still decrypt rows stuck behind it.
+   */
+  completeRotation(userId: string, newEpoch: number): Promise<void>;
 }
 
 /**
@@ -110,4 +130,37 @@ export async function fulfillPendingRotationRequests(
     fulfilled++;
   }
   return { fulfilled };
+}
+
+export interface BeginRotationResult {
+  ok: boolean;
+  /** Set only when `ok: false` — the epoch the already-in-progress rotation targets, for a clear "rotation to N already running" message. */
+  pendingEpoch?: number;
+}
+
+/**
+ * Anti-overlap guard (Fase 2.5): call BEFORE starting any rotation work.
+ * Refuses (`ok: false`) if one is already in progress — rotations are
+ * strictly sequential, never overlapping (see `DekRotationStorage.completeRotation`'s
+ * doc comment for why: overlapping rotations risk destroying key material a
+ * straggler row still needs).
+ */
+export async function beginRotation(
+  storage: DekRotationStorage,
+  userId: string,
+  requestedEpoch: number,
+): Promise<BeginRotationResult> {
+  const started = await storage.beginRotation(userId, requestedEpoch);
+  if (started) return { ok: true };
+  const pendingEpoch = await storage.getPendingRotation(userId);
+  return { ok: false, pendingEpoch: pendingEpoch ?? undefined };
+}
+
+/** Thin pass-through — see `DekRotationStorage.completeRotation`'s doc comment for the ordering requirement (only after the old epoch is actually retired). */
+export async function completeRotation(
+  storage: DekRotationStorage,
+  userId: string,
+  newEpoch: number,
+): Promise<void> {
+  await storage.completeRotation(userId, newEpoch);
 }

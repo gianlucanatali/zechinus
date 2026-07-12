@@ -9,6 +9,8 @@ import {
   publishRotationRequest,
   pollRotationRequest,
   fulfillPendingRotationRequests,
+  beginRotation,
+  completeRotation,
   type DekRotationStorage,
   type DekRotationRequestRow,
 } from "../adapters/dekRotationCoordinator.ts";
@@ -23,11 +25,14 @@ function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
 /** In-memory fake — mirrors the RLS-scoped, per-user shape a real Supabase-backed one would have. */
 function memoryRotationStorage(): DekRotationStorage & {
   rows: Map<string, DekRotationRequestRow>;
+  pendingEpochByUser: Map<string, number | null>;
 } {
   const rows = new Map<string, DekRotationRequestRow>();
+  const pendingEpochByUser = new Map<string, number | null>();
   let nextId = 1;
   return {
     rows,
+    pendingEpochByUser,
     async createRequest(_userId, requestedEpoch, requestPublicKey) {
       const id = `req-${nextId++}`;
       rows.set(id, {
@@ -51,6 +56,21 @@ function memoryRotationStorage(): DekRotationStorage & {
     },
     async deleteRequest(_userId, requestId) {
       rows.delete(requestId);
+    },
+    // Mirrors a real `UPDATE ... WHERE pending_dek_epoch IS NULL` conditional
+    // write — only succeeds (returns true) if nothing was pending yet.
+    async beginRotation(userId, newEpoch) {
+      const current = pendingEpochByUser.get(userId) ?? null;
+      if (current !== null) return false;
+      pendingEpochByUser.set(userId, newEpoch);
+      return true;
+    },
+    async getPendingRotation(userId) {
+      return pendingEpochByUser.get(userId) ?? null;
+    },
+    async completeRotation(userId, newEpoch) {
+      pendingEpochByUser.set(userId, null);
+      void newEpoch; // the fake has no separate current_dek_epoch to bump
     },
   };
 }
@@ -174,4 +194,55 @@ test("deriveDevicePublicKey (stable, KEK-derived) and the ephemeral request key 
   const row = storage.rows.get(requestId)!;
 
   assert.notEqual(row.requestPublicKey, stableDevicePublicKey);
+});
+
+test("beginRotation: no rotation pending → starts, returns ok:true", async () => {
+  const storage = memoryRotationStorage();
+
+  const result = await beginRotation(storage, USER_ID, 2);
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(storage.pendingEpochByUser.get(USER_ID), 2);
+});
+
+test("beginRotation: a rotation is already pending → refuses, reports the pending epoch, does NOT overwrite it", async () => {
+  const storage = memoryRotationStorage();
+  await beginRotation(storage, USER_ID, 2);
+
+  const second = await beginRotation(storage, USER_ID, 3);
+
+  assert.deepEqual(second, { ok: false, pendingEpoch: 2 });
+  // Still 2, not overwritten by the refused attempt at 3 — no overlapping rotations.
+  assert.equal(storage.pendingEpochByUser.get(USER_ID), 2);
+});
+
+test("beginRotation: two concurrent callers racing for the same user — only one wins (the storage's atomic conditional write, not this function, is what decides)", async () => {
+  const storage = memoryRotationStorage();
+
+  const [first, second] = await Promise.all([
+    beginRotation(storage, USER_ID, 2),
+    beginRotation(storage, USER_ID, 2),
+  ]);
+
+  const outcomes = [first.ok, second.ok].sort();
+  assert.deepEqual(outcomes, [false, true]);
+});
+
+test("completeRotation: clears the pending marker — a new rotation can start afterward", async () => {
+  const storage = memoryRotationStorage();
+  await beginRotation(storage, USER_ID, 2);
+
+  await completeRotation(storage, USER_ID, 2);
+  assert.equal(storage.pendingEpochByUser.get(USER_ID), null);
+
+  const next = await beginRotation(storage, USER_ID, 3);
+  assert.deepEqual(next, { ok: true });
+});
+
+test("beginRotation: a different user's pending rotation doesn't block this one (per-user, not global)", async () => {
+  const storage = memoryRotationStorage();
+  await beginRotation(storage, "user-other", 2);
+
+  const result = await beginRotation(storage, USER_ID, 2);
+  assert.deepEqual(result, { ok: true });
 });

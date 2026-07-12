@@ -1340,17 +1340,24 @@ oldHandle, newHandle, newEpoch)`, present on EVERY `defineStore`-created store
   that doesn't via a one-shot ephemeral X25519 key (never persisted, never the device's
   stable identity) — `datacloak/adapters/dekRotationCoordinator.ts`;
   `docs/decisions/2026-07-12-dek-rotation-ephemeral-handshake-key.md`.
-- **Verify-before-retire**: the old epoch's key material is discarded only after every row
-  verifiably decrypts under the new one AND every device has confirmed it (or a 30-day
-  grace deadline forces the decision) — `datacloak/core/rotationRetirement.ts`;
+- **Verify-before-retire**: the old epoch's key material is discarded the instant every row
+  verifiably decrypts under the new one — no per-device confirmation gate. A straggler
+  device's old wrap is useless to it either way (the old DEK can't decrypt any row once
+  migration is done), so it always needs the multi-device handshake above to get the
+  current DEK, whether its stale wrap still exists or was already deleted — waiting for it
+  buys nothing. Rotation is therefore a single fast phase (data migration + verification +
+  retirement, minutes), not a multi-day one — `datacloak/core/rotationRetirement.ts`;
   `docs/decisions/2026-07-12-dek-rotation-retirement-policy.md`.
+- **Anti-overlap guard**: a new rotation can't start before the previous one's old epoch is
+  retired (starting one early risks destroying the only key that can still decrypt rows
+  stuck behind — rotations are strictly sequential, never overlapping) —
+  `DekRotationStorage.beginRotation`/`completeRotation`, an atomic conditional write so two
+  racing callers (two tabs, two devices) can't both succeed —
+  `datacloak/adapters/dekRotationCoordinator.ts`.
 
 **Not yet wired** (app-level, tracked in
 `_local/plans/20260712-0947-mobile-roadmap-consolidated.md` Fase 2.5): the actual "rotate
-my key" trigger in Impostazioni; a guard preventing a new rotation from starting before the
-previous one's old epoch is fully retired (starting one early risks destroying the only key
-that can still decrypt rows stuck behind — rotations are strictly sequential, never
-overlapping); and calling `rotateEpoch` across EW's real stores.
+my key" trigger in Impostazioni, and calling `rotateEpoch` across EW's real stores.
 
 ## Extending `StorageAdapter`
 

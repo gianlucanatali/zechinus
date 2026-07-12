@@ -103,77 +103,42 @@ export async function verifyRowsDecryptAtEpoch<T>(
   };
 }
 
-export interface DeviceEpochStatus {
-  deviceId: string;
-  /** The highest epoch this device has confirmed a wrap for — `null` if it never has (shouldn't happen for a device that completed enrollment, but defensive: never assume). */
-  confirmedEpoch: number | null;
-}
-
 export type RetirementReason =
   | "rows-not-fully-migrated"
   | "verification-failures"
-  | "devices-still-pending-within-grace"
-  | "all-confirmed"
-  | "grace-deadline-passed-force-retire";
+  | "eligible";
 
 export interface RetirementEligibility {
   eligible: boolean;
   reason: RetirementReason;
-  /** Only meaningful for "grace-deadline-passed-force-retire": these devices will be dropped (their next unlock re-enrolls, per Fase 2.4's spec — never locked out of login, only loses the shortcut and must re-link). */
-  devicesToDrop: string[];
 }
 
 /**
  * Decides whether the old epoch's wraps may be deleted — the actual irreversible
- * step. Every gate is a hard block except the grace deadline, which the plan
- * explicitly decided should NOT wait forever (2.4: `GRACE_DEADLINE` = 30 days,
- * otherwise a graceful rotation could never terminate if one device never comes back
- * online). `remainingRowsAtOldEpoch` and `verificationFailureCount` are the caller's
+ * step. Deliberately does NOT gate on per-device confirmation: a straggler device's
+ * OLD wrap is useless to it the moment data migration completes (it would unwrap
+ * an old DEK that can no longer decrypt any current row — every row is already on
+ * the new epoch), so waiting for that device to catch up before retiring buys
+ * nothing. A straggler always needs the handshake (`dekRotationCoordinator.ts`) to
+ * get the CURRENT DEK regardless of whether its stale wrap still exists or was
+ * already deleted — so retirement can run the instant data is migrated+verified,
+ * no grace period needed (an earlier design gated this on device confirmation with
+ * a 30-day grace deadline; reconsidered as solving a problem that doesn't exist,
+ * see `docs/decisions/2026-07-12-dek-rotation-retirement-policy.md` "Deviazioni").
+ * `remainingRowsAtOldEpoch` and `verificationFailureCount` are the caller's
  * responsibility to have already computed (via `migrateRotationBatch`/
  * `verifyRowsDecryptAtEpoch` above, looped to completion) — this function is pure
- * decision logic, no I/O, so it stays trivially testable against any combination of
- * inputs without needing a real migration to have run first.
+ * decision logic, no I/O, so it stays trivially testable.
  */
 export function checkRetirementEligibility(
   remainingRowsAtOldEpoch: number,
   verificationFailureCount: number,
-  devices: DeviceEpochStatus[],
-  targetEpoch: number,
-  rotationStartedAtMs: number,
-  nowMs: number,
-  graceDeadlineMs: number,
 ): RetirementEligibility {
   if (remainingRowsAtOldEpoch > 0) {
-    return {
-      eligible: false,
-      reason: "rows-not-fully-migrated",
-      devicesToDrop: [],
-    };
+    return { eligible: false, reason: "rows-not-fully-migrated" };
   }
   if (verificationFailureCount > 0) {
-    return {
-      eligible: false,
-      reason: "verification-failures",
-      devicesToDrop: [],
-    };
+    return { eligible: false, reason: "verification-failures" };
   }
-
-  const pending = devices.filter((d) => d.confirmedEpoch !== targetEpoch);
-  if (pending.length === 0) {
-    return { eligible: true, reason: "all-confirmed", devicesToDrop: [] };
-  }
-
-  const deadlinePassed = nowMs - rotationStartedAtMs >= graceDeadlineMs;
-  if (!deadlinePassed) {
-    return {
-      eligible: false,
-      reason: "devices-still-pending-within-grace",
-      devicesToDrop: [],
-    };
-  }
-  return {
-    eligible: true,
-    reason: "grace-deadline-passed-force-retire",
-    devicesToDrop: pending.map((d) => d.deviceId),
-  };
+  return { eligible: true, reason: "eligible" };
 }

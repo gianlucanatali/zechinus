@@ -1,8 +1,10 @@
 /**
  * `rotationRetirement.ts` — the irreversible step (deleting an old epoch's wraps)
  * gets the most paranoid testing in this whole rotation feature: every gate the plan's
- * data-safety protocol names is exercised as its own scenario, plus the deliberate
- * "grace deadline forces a decision, it doesn't wait forever" policy (Fase 2.4).
+ * data-safety protocol names is exercised as its own scenario. No per-device gate —
+ * see `checkRetirementEligibility`'s doc comment for why that was reconsidered and
+ * dropped (an earlier design gated retirement on every device confirming, with a
+ * 30-day grace deadline; turned out to solve a problem that doesn't exist).
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -12,7 +14,6 @@ import {
   checkRetirementEligibility,
   type VerificationCandidateRow,
   type RetirementVerificationIO,
-  type DeviceEpochStatus,
 } from "../core/rotationRetirement.ts";
 import { encodeBlob } from "../core/blobCodec.ts";
 import type { FieldAAD, BlobRecord } from "../core/types.ts";
@@ -20,7 +21,6 @@ import { createDekHandle } from "./testKeyHandle.ts";
 
 const EPOCH = 2;
 const TABLE = "retirement_test_table";
-const GRACE_DEADLINE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matches the plan's decided value
 
 function aadFor(handle: { pid: string }, rowId: string): FieldAAD {
   return {
@@ -134,9 +134,6 @@ test("verifyRowsDecryptAtEpoch: empty result → processedThisBatch 0, lastKey u
   });
 });
 
-const NOW = 1_800_000_000_000; // fixed instant, tests never call Date.now()
-const ROTATION_STARTED = NOW - 10 * 24 * 60 * 60 * 1000; // 10 days ago — within grace
-
 test("verifyRowsDecryptAtEpoch: keyset pagination across multiple calls covers every row exactly once, no gaps or duplicates — the fake IO here actually implements the ordering/afterKey contract (unlike a naive 'return everything' double), catching the same class of bug a real unordered-LIMIT implementation hit live (docs/decisions/2026-07-12-dek-rotation-compat-test-2.2b.md)", async () => {
   const handle = createDekHandle(randomBytes(32));
   // 25 rows — enough to force multiple calls at batchSize 10, never a
@@ -199,121 +196,20 @@ test("verifyRowsDecryptAtEpoch: keyset pagination across multiple calls covers e
   assert.deepEqual([...allReturnedKeys].sort(), Object.keys(rows).sort()); // no gaps
 });
 
-test("checkRetirementEligibility: blocked while rows remain at the old epoch, regardless of devices/verification", () => {
-  const result = checkRetirementEligibility(
-    5,
-    0,
-    [],
-    2,
-    ROTATION_STARTED,
-    NOW,
-    GRACE_DEADLINE_MS,
-  );
+test("checkRetirementEligibility: blocked while rows remain at the old epoch, regardless of verification", () => {
+  const result = checkRetirementEligibility(5, 0);
   assert.equal(result.eligible, false);
   assert.equal(result.reason, "rows-not-fully-migrated");
 });
 
 test("checkRetirementEligibility: blocked on any verification failure, even with zero rows remaining", () => {
-  const result = checkRetirementEligibility(
-    0,
-    1,
-    [],
-    2,
-    ROTATION_STARTED,
-    NOW,
-    GRACE_DEADLINE_MS,
-  );
+  const result = checkRetirementEligibility(0, 1);
   assert.equal(result.eligible, false);
   assert.equal(result.reason, "verification-failures");
 });
 
-test("checkRetirementEligibility: eligible once data is migrated+verified AND every device has confirmed the new epoch", () => {
-  const devices: DeviceEpochStatus[] = [
-    { deviceId: "A", confirmedEpoch: 2 },
-    { deviceId: "B", confirmedEpoch: 2 },
-  ];
-  const result = checkRetirementEligibility(
-    0,
-    0,
-    devices,
-    2,
-    ROTATION_STARTED,
-    NOW,
-    GRACE_DEADLINE_MS,
-  );
+test("checkRetirementEligibility: eligible the instant data is migrated+verified — no device confirmation gate. A straggler device's old wrap is useless to it either way (the old DEK can't decrypt any current row once migration is done), so it always needs the handshake regardless of whether retirement waited for it or not", () => {
+  const result = checkRetirementEligibility(0, 0);
   assert.equal(result.eligible, true);
-  assert.equal(result.reason, "all-confirmed");
-  assert.deepEqual(result.devicesToDrop, []);
-});
-
-test("checkRetirementEligibility: NOT eligible while a device is still pending and the grace deadline hasn't passed (graceful rotation waits)", () => {
-  const devices: DeviceEpochStatus[] = [
-    { deviceId: "A", confirmedEpoch: 2 },
-    { deviceId: "B", confirmedEpoch: 1 }, // hasn't caught up yet
-  ];
-  const result = checkRetirementEligibility(
-    0,
-    0,
-    devices,
-    2,
-    ROTATION_STARTED,
-    NOW,
-    GRACE_DEADLINE_MS,
-  );
-  assert.equal(result.eligible, false);
-  assert.equal(result.reason, "devices-still-pending-within-grace");
-});
-
-test("checkRetirementEligibility: a device that never confirmed anything (confirmedEpoch: null) counts as pending, same as any mismatched epoch", () => {
-  const devices: DeviceEpochStatus[] = [
-    { deviceId: "A", confirmedEpoch: null },
-  ];
-  const result = checkRetirementEligibility(
-    0,
-    0,
-    devices,
-    2,
-    ROTATION_STARTED,
-    NOW,
-    GRACE_DEADLINE_MS,
-  );
-  assert.equal(result.eligible, false);
-  assert.equal(result.reason, "devices-still-pending-within-grace");
-});
-
-test("checkRetirementEligibility: past the 30-day grace deadline, eligible via force-retire — pending devices listed to drop, not left blocking forever", () => {
-  const rotationStartedLongAgo = NOW - 31 * 24 * 60 * 60 * 1000; // 31 days ago — past deadline
-  const devices: DeviceEpochStatus[] = [
-    { deviceId: "A", confirmedEpoch: 2 },
-    { deviceId: "B", confirmedEpoch: 1 }, // never came back online
-    { deviceId: "C", confirmedEpoch: null },
-  ];
-  const result = checkRetirementEligibility(
-    0,
-    0,
-    devices,
-    2,
-    rotationStartedLongAgo,
-    NOW,
-    GRACE_DEADLINE_MS,
-  );
-  assert.equal(result.eligible, true);
-  assert.equal(result.reason, "grace-deadline-passed-force-retire");
-  assert.deepEqual(result.devicesToDrop.sort(), ["B", "C"]);
-});
-
-test("checkRetirementEligibility: exactly at the deadline boundary (>=) counts as passed", () => {
-  const rotationStartedExactly30DaysAgo = NOW - GRACE_DEADLINE_MS;
-  const devices: DeviceEpochStatus[] = [{ deviceId: "A", confirmedEpoch: 1 }];
-  const result = checkRetirementEligibility(
-    0,
-    0,
-    devices,
-    2,
-    rotationStartedExactly30DaysAgo,
-    NOW,
-    GRACE_DEADLINE_MS,
-  );
-  assert.equal(result.eligible, true);
-  assert.equal(result.reason, "grace-deadline-passed-force-retire");
+  assert.equal(result.reason, "eligible");
 });
