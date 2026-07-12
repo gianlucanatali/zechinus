@@ -119,6 +119,42 @@ test("createWorkerKeyHandle: wrapWithKek proxies through to the worker's handle"
   assert.ok(wrapped.nonce);
 });
 
+test("createWorkerKeyHandle: wrapForDevice proxies through to the worker's handle (raw key never crosses postMessage)", async () => {
+  const { worker, workerCtx } = fakeWorkerPair();
+  handleKeyHandleMessages(
+    (rawBytes) =>
+      createKeyHandle(rawBytes, new Uint8Array(32).fill(7), "test-info", {
+        wrapForDevice: async (key, devicePublicKeyB64) => ({
+          ciphertext: `wrapped(${devicePublicKeyB64}):${key.length}bytes`,
+        }),
+      }),
+    workerCtx,
+  );
+
+  const rawBytes = asRawDekBytes(new Uint8Array(32).fill(1));
+  const handle = await createWorkerKeyHandle(worker, rawBytes);
+  const wrapped = await handle.wrapForDevice!("device-pubkey-b64");
+  assert.equal(wrapped.ciphertext, "wrapped(device-pubkey-b64):32bytes");
+});
+
+test("createWorkerKeyHandle: wrapForDevice rejects with context when the worker's handle has no wrapForDevice", async () => {
+  const { worker, workerCtx } = fakeWorkerPair();
+  handleKeyHandleMessages(
+    (rawBytes) =>
+      createKeyHandle(rawBytes, new Uint8Array(32).fill(7), "test-info"),
+    workerCtx,
+  );
+
+  const handle = await createWorkerKeyHandle(
+    worker,
+    asRawDekBytes(new Uint8Array(32).fill(1)),
+  );
+  await assert.rejects(
+    () => handle.wrapForDevice!("device-pubkey-b64"),
+    /has no wrapForDevice/,
+  );
+});
+
 test("createWorkerKeyHandle: hashContent proxies through to the worker's handle (matches the direct handle's HMAC)", async () => {
   const { worker, workerCtx } = fakeWorkerPair();
   handleKeyHandleMessages(

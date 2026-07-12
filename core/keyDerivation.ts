@@ -108,6 +108,12 @@ export interface KeyHandle extends CryptoHandle {
   decryptField(enc: EncryptedField, aad: FieldAAD): Promise<string>;
   /** Wraps this handle's key with a KEK, without ever exposing the raw bytes. */
   wrapWithKek(kek: Uint8Array): Promise<WrappedKey>;
+  /**
+   * Wraps this handle's key for a specific device's public key, without ever exposing
+   * the raw bytes — see `CreateKeyHandleOptions.wrapForDevice`. `undefined` if the
+   * handle was built without a `wrapForDevice` option.
+   */
+  wrapForDevice?(devicePublicKeyB64: string): Promise<{ ciphertext: string }>;
   /** Zeroes the internal key bytes — call on lock/logout. */
   destroy(): void;
 }
@@ -148,6 +154,20 @@ export interface CreateKeyHandleOptions {
    * exists to prevent. No guardrail can verify this at runtime; it's on the caller.
    */
   hashContent?(payload: unknown): Promise<string>;
+  /**
+   * Wraps this handle's key for delivery to a specific device's public key (an
+   * asymmetric wrap — RSA-OAEP on web today, a platform equivalent on mobile later),
+   * so a second device can receive a rotated DEK without the raw bytes ever leaving
+   * whichever context holds them (this closure, or the Worker it runs in). Deliberately
+   * NOT baked into core: the actual crypto is adapter-specific (`wrapForDevicePublicKey`
+   * in `adapters/deviceKeyProvider.ts` on web) — core only plumbs the raw `key` through
+   * to whatever the caller injects, exactly like `hashContent` above. Omit if this
+   * handle never needs to deliver its key to another device (e.g. a Node-side handle).
+   */
+  wrapForDevice?(
+    key: Uint8Array<ArrayBuffer>,
+    devicePublicKeyB64: string,
+  ): Promise<{ ciphertext: string }>;
 }
 
 /**
@@ -184,6 +204,10 @@ export function createKeyHandle(
       decryptJson<T>(key, enc, aad),
     hashContent,
     wrapWithKek: (kek) => Promise.resolve(wrapKey(kek, key)),
+    wrapForDevice: options?.wrapForDevice
+      ? (devicePublicKeyB64: string) =>
+          options.wrapForDevice!(key, devicePublicKeyB64)
+      : undefined,
     destroy() {
       clean(key);
       if (macKey) clean(macKey);

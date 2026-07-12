@@ -162,6 +162,38 @@ test("createKeyHandle: wrapWithKek produces a wrapped key unwrappable by wrapKey
   assert.deepEqual(unwrapped, key);
 });
 
+test("createKeyHandle: wrapForDevice is undefined when no wrapForDevice option is given (Node-side handles never need it)", () => {
+  const handle = createKeyHandle(
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+    bytesFromRange(32, (i) => i * 7),
+    "info",
+  );
+  assert.equal(handle.wrapForDevice, undefined);
+});
+
+test("createKeyHandle: wrapForDevice passes the closed-over key to the injected function, never returning it directly", async () => {
+  const key = bytesFromRange(32, (i) => i);
+  let receivedKey: Uint8Array | null = null;
+  let receivedPublicKey: string | null = null;
+  const handle = createKeyHandle(
+    asRawDekBytes(key),
+    bytesFromRange(32, (i) => i * 7),
+    "info",
+    {
+      wrapForDevice: async (k, devicePublicKeyB64) => {
+        receivedKey = k;
+        receivedPublicKey = devicePublicKeyB64;
+        return { ciphertext: "fake-ciphertext" };
+      },
+    },
+  );
+
+  const result = await handle.wrapForDevice!("device-pubkey-b64");
+  assert.deepEqual(receivedKey, key);
+  assert.equal(receivedPublicKey, "device-pubkey-b64");
+  assert.deepEqual(result, { ciphertext: "fake-ciphertext" });
+});
+
 test("bindKeyHandleFactory: bound factory produces the same handle as calling createKeyHandle directly", () => {
   const key = bytesFromRange(32, (i) => i);
   const pidSalt = bytesFromRange(32, (i) => i * 7);

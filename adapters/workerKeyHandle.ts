@@ -81,6 +81,10 @@ export async function createWorkerKeyHandle(
     hashContent: (payload: unknown) =>
       send("hashContent", { payload }) as Promise<string>,
     wrapWithKek: (kek) => send("wrapWithKek", { kek }) as Promise<WrappedKey>,
+    wrapForDevice: (devicePublicKeyB64) =>
+      send("wrapForDevice", { devicePublicKeyB64 }) as Promise<{
+        ciphertext: string;
+      }>,
     destroy() {
       worker.postMessage({ id: nextId++, type: "destroy" });
       worker.terminate();
@@ -150,6 +154,16 @@ export function handleKeyHandleMessages(
           break;
         case "wrapWithKek":
           result = await cryptoHandle!.wrapWithKek(args.kek as Uint8Array);
+          break;
+        case "wrapForDevice":
+          if (!cryptoHandle!.wrapForDevice) {
+            throw new Error(
+              "workerKeyHandle: the underlying KeyHandle has no wrapForDevice — cannot proxy it through the worker.",
+            );
+          }
+          result = await cryptoHandle!.wrapForDevice(
+            args.devicePublicKeyB64 as string,
+          );
           break;
         case "destroy":
           cryptoHandle?.destroy();

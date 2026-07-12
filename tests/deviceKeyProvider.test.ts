@@ -14,6 +14,7 @@ import {
   wrapForDevicePublicKey,
 } from "../adapters/deviceKeyProvider.ts";
 import { mobileDeviceKeyProvider } from "../adapters/mobileDeviceKeyProvider.ts";
+import { createKeyHandle, asRawDekBytes } from "../core/keyDerivation.ts";
 
 function memoryStorage(): DeviceKeyPairStorage {
   let stored: CryptoKeyPair | null = null;
@@ -74,6 +75,30 @@ test("unwrapWithDeviceKey: a different device's private key cannot unwrap the wr
   const wrapped = await wrapForDevicePublicKey(publicKeyA, dek);
 
   await assert.rejects(() => providerB.unwrapWithDeviceKey(wrapped));
+});
+
+test("createKeyHandle + wrapForDevice: the intended real usage — the DEK held by a KeyHandle (e.g. a Worker) is wrapped for a device's public key without ever being handed to the caller as a plain value", async () => {
+  const recipientStorage = memoryStorage();
+  const { publicKeyB64 } =
+    await webDeviceKeyProvider(recipientStorage).getOrCreateDevicePublicKey();
+
+  const dek = crypto.getRandomValues(new Uint8Array(32));
+  const handle = createKeyHandle(
+    asRawDekBytes(dek),
+    new Uint8Array(32).fill(7),
+    "test-info",
+    {
+      wrapForDevice: (key, devicePublicKeyB64) =>
+        wrapForDevicePublicKey(devicePublicKeyB64, key),
+    },
+  );
+
+  // The handle's public surface never returns `dek` — only `wrapForDevice`'s result.
+  const wrapped = await handle.wrapForDevice!(publicKeyB64);
+  const unwrapped =
+    await webDeviceKeyProvider(recipientStorage).unwrapWithDeviceKey(wrapped);
+
+  assert.deepEqual(unwrapped, dek);
 });
 
 test("mobileDeviceKeyProvider: both methods throw a FIXME-referencing error (Fase 3.2 stub, never a silent no-op)", async () => {
