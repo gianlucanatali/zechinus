@@ -1333,6 +1333,16 @@ oldHandle, newHandle, newEpoch)`, present on EVERY `defineStore`-created store
   rest. Idempotent: safe to call again after an interruption. The cardinality-blind engine
   lives in `datacloak/core/rotationMigration.ts`;
   `docs/decisions/2026-07-12-dek-rotation-migration-engine.md`.
+- **Per-store paranoid re-check** — `Store`/`KeyedStore`/`CollectionStore.verifyRotatedRows(userId,
+oldHandle, newHandle, newEpoch)`, present on every `defineStore`-created store like
+  `rotateEpoch` itself. Deliberately redundant with `rotateEpoch`'s own `failed` count: it
+  re-reads every row AFTER migration completes, catching rows written ambiently
+  (`set()`/`mutate()`) during the rotation window that `rotateEpoch`'s one-time pass never
+  saw. Tries the new handle first (tagged `newEpoch`), falls back to the old handle on
+  failure (`atOldEpoch` — not yet migrated, not an error), and only a row decrypting under
+  NEITHER counts as `failed` (genuine corruption). The app-level orchestrator calls this
+  after `rotateEpoch` and feeds `{atOldEpoch, failed.length}` into
+  `checkRetirementEligibility` below.
 - **perKey enumeration**: `StorageAdapter.listAll` (optional, see "Extending
   StorageAdapter" below) is the one new adapter capability rotation needed — `perUser`/
   `many` already had an unconditional "everything for this user" read.
