@@ -17,7 +17,11 @@ import {
   type PasskeyWrapStorage,
   type WrappedKeyRow,
 } from "../adapters/passkeyDekController.ts";
-import { createKeyHandle, asRawDekBytes } from "../core/keyDerivation.ts";
+import {
+  createKeyHandle,
+  asRawDekBytes,
+  wrapKey,
+} from "../core/keyDerivation.ts";
 import type { WebauthnKeyProvider } from "../adapters/webauthnKeyProvider.ts";
 import type { MnemonicRecovery } from "../adapters/mnemonicRecovery.ts";
 import { deriveKey } from "../core/keyDerivation.ts";
@@ -110,7 +114,10 @@ function fakeMnemonicRecovery(): MnemonicRecovery {
 
 /** In-memory `PasskeyWrapStorage` double — mirrors the shape of a real DB-backed one. */
 function memoryWrapStorage(): PasskeyWrapStorage {
-  const passkeyWraps = new Map<string, WrappedKeyRow>(); // key: `${userId}|${credentialId}`
+  const passkeyWraps = new Map<
+    string,
+    Array<WrappedKeyRow & { dekEpoch: number }>
+  >(); // key: `${userId}|${credentialId}`
   let recoveryWrap: { userId: string; wrap: WrappedKeyRow } | null = null;
 
   return {
@@ -118,11 +125,14 @@ function memoryWrapStorage(): PasskeyWrapStorage {
       return [...passkeyWraps.keys()].filter((k) => k.startsWith(`${userId}|`))
         .length;
     },
-    async loadPasskeyWrap(userId, credentialId) {
-      return passkeyWraps.get(`${userId}|${credentialId}`) ?? null;
+    async loadPasskeyWraps(userId, credentialId) {
+      return passkeyWraps.get(`${userId}|${credentialId}`) ?? [];
     },
-    async savePasskeyWrap(userId, credentialId, wrapped) {
-      passkeyWraps.set(`${userId}|${credentialId}`, wrapped);
+    async savePasskeyWrap(userId, credentialId, wrapped, dekEpoch) {
+      const key = `${userId}|${credentialId}`;
+      const rows = passkeyWraps.get(key) ?? [];
+      rows.push({ ...wrapped, dekEpoch });
+      passkeyWraps.set(key, rows);
     },
     async loadRecoveryWrap(userId) {
       return recoveryWrap && recoveryWrap.userId === userId
@@ -774,4 +784,144 @@ test("checkSetupNeeded: a different uid must never reuse a handle unlocked for s
     "user-a's handle must be destroyed, not silently reused for user-b",
   );
   assert.equal(controller.getUserId(), null);
+});
+
+// --- Task 1: passkey_key_wraps epoch coexistence (unlockWithPasskey rebuilds
+// getPreviousCryptoHandle() from DB) + wrapCurrentDekForDevice
+
+test("unlockWithPasskey: a single row for the credential behaves exactly as before — getPreviousCryptoHandle() stays null", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const pidAfterSetup = controller.getCryptoHandle()!.pid;
+  controller.lock();
+
+  await controller.unlockWithPasskey("user-1");
+
+  assert.equal(controller.getCryptoHandle()!.pid, pidAfterSetup);
+  assert.equal(controller.getPreviousCryptoHandle(), null);
+});
+
+test("unlockWithPasskey: two rows for the same credential (old + new epoch) reconstruct BOTH the current and the previous crypto handle from DB — each decrypts its own known bytes", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+
+  // Same credential, same KEK — mirrors a rotation that already durably
+  // wrote the new epoch's wrap without retiring the old one yet.
+  const credentialId = "cred-1";
+  const prfOutput = await provider.getPRFOutput(credentialId);
+  const kek = provider.deriveKEKFromPRF(prfOutput);
+  const epoch1Bytes = asRawDekBytes(bytesFromRange(32, (i) => i));
+  const epoch2Bytes = asRawDekBytes(bytesFromRange(32, (i) => i + 50));
+  await storage.savePasskeyWrap(
+    "user-1",
+    credentialId,
+    wrapKey(kek, epoch1Bytes),
+    1,
+  );
+  await storage.savePasskeyWrap(
+    "user-1",
+    credentialId,
+    wrapKey(kek, epoch2Bytes),
+    2,
+  );
+
+  await controller.unlockWithPasskey("user-1", credentialId);
+
+  const expectedCurrent = testCreateHandle(epoch2Bytes);
+  const expectedPrevious = testCreateHandle(epoch1Bytes);
+  assert.equal(
+    controller.getCryptoHandle()!.pid,
+    expectedCurrent.pid,
+    "current handle must decrypt the HIGHEST-epoch wrap (epoch 2)",
+  );
+  assert.notEqual(controller.getPreviousCryptoHandle(), null);
+  assert.equal(
+    controller.getPreviousCryptoHandle()!.pid,
+    expectedPrevious.pid,
+    "previous handle must decrypt the LOWER-epoch wrap (epoch 1), not just be non-null",
+  );
+});
+
+test("memoryWrapStorage double: savePasskeyWrap with different dekEpoch for the same credential coexist, never overwrite (mirrors the real 3-column unique constraint)", async () => {
+  const storage = memoryWrapStorage();
+  await storage.savePasskeyWrap(
+    "user-1",
+    "cred-1",
+    { ciphertext: "ct-epoch-1", nonce: "nonce-1" },
+    1,
+  );
+  await storage.savePasskeyWrap(
+    "user-1",
+    "cred-1",
+    { ciphertext: "ct-epoch-2", nonce: "nonce-2" },
+    2,
+  );
+
+  const rows = await storage.loadPasskeyWraps("user-1", "cred-1");
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.dekEpoch).sort(), [1, 2]);
+});
+
+test("wrapCurrentDekForDevice: throws when locked (no crypto handle unlocked)", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await assert.rejects(() =>
+    controller.wrapCurrentDekForDevice("some-device-pubkey-b64"),
+  );
+});
+
+test("wrapCurrentDekForDevice: unlocked with wrapForDevice support delegates to the handle and returns its shape", async () => {
+  let calledWith: string | undefined;
+  const createHandleWithWrapForDevice = (
+    rawBytes: ReturnType<typeof asRawDekBytes>,
+  ) =>
+    createKeyHandle(rawBytes, TEST_PID_SALT, "test-pid-info", {
+      wrapForDevice: async (_key, devicePublicKeyB64) => {
+        calledWith = devicePublicKeyB64;
+        return {
+          ciphertext: "fake-ciphertext",
+          nonce: "fake-nonce",
+          ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
+        };
+      },
+    });
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: createHandleWithWrapForDevice,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+
+  const result = await controller.wrapCurrentDekForDevice("device-pubkey-b64");
+
+  assert.equal(calledWith, "device-pubkey-b64");
+  assert.deepEqual(result, {
+    ciphertext: "fake-ciphertext",
+    nonce: "fake-nonce",
+    ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
+  });
 });

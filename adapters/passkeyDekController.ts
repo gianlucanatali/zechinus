@@ -38,14 +38,18 @@ export type WrappedKeyRow = { ciphertext: string; nonce: string };
  */
 export interface PasskeyWrapStorage {
   countPasskeyWraps(userId: string): Promise<number>;
-  loadPasskeyWrap(
+  /** ALL rows for this credential — 0, 1, or 2 (old epoch + new epoch) if a
+   * rotation is mid-flight. See `passkey_key_wraps_user_id_credential_id_epoch_key`
+   * (unique on user_id, credential_id, dek_epoch). */
+  loadPasskeyWraps(
     userId: string,
     credentialId: string,
-  ): Promise<WrappedKeyRow | null>;
+  ): Promise<Array<WrappedKeyRow & { dekEpoch: number }>>;
   savePasskeyWrap(
     userId: string,
     credentialId: string,
     wrapped: WrappedKeyRow,
+    dekEpoch: number,
   ): Promise<void>;
   loadRecoveryWrap(userId: string): Promise<WrappedKeyRow | null>;
   saveRecoveryWrap(userId: string, wrapped: WrappedKeyRow): Promise<void>;
@@ -192,6 +196,21 @@ export interface PasskeyDekController {
    * rotation in progress.
    */
   completeRotationSession(): void;
+
+  /**
+   * Wraps the currently-unlocked DEK for another device's ephemeral public key —
+   * used to fulfil a pending rotation handshake request (`dek_rotation_requests`)
+   * from a device that fell behind. Delegates to `KeyHandle.wrapForDevice` — raw
+   * DEK bytes never leave this call, unlike `wrapForDevicePublicKey` (which the
+   * rotation-driving device uses transiently in `beginRotation`, before this
+   * handle even exists). Requires `getCryptoHandle()` non-null; throws otherwise,
+   * and throws if the current handle was built without `wrapForDevice` support.
+   */
+  wrapCurrentDekForDevice(devicePublicKeyB64: string): Promise<{
+    ciphertext: string;
+    nonce: string;
+    ephemeralPublicKeyB64: string;
+  }>;
 }
 
 export function createPasskeyDekController(
@@ -293,16 +312,22 @@ export function createPasskeyDekController(
       const { prfOutput, credentialId: usedCredentialId } =
         await provider.getPRFOutputWithCredentialId(credentialId);
 
-      const wrap = await storage.loadPasskeyWrap(uid, usedCredentialId);
-      if (!wrap) {
+      const wraps = await storage.loadPasskeyWraps(uid, usedCredentialId);
+      if (wraps.length === 0) {
         throw new Error(
           "passkeyDekController.unlockWithPasskey: no wrap found for this credential — complete setup first.",
         );
       }
+      // Highest dek_epoch is the row to unlock as CURRENT. A second (lower-epoch)
+      // row means a rotation is mid-flight on this device — see
+      // passkey_key_wraps_user_id_credential_id_epoch_key.
+      const [currentWrap, previousWrap] = [...wraps].sort(
+        (a, b) => b.dekEpoch - a.dekEpoch,
+      );
 
       const kek = provider.deriveKEKFromPRF(prfOutput);
       try {
-        const rawBytes = unwrapKey(kek, wrap);
+        const rawBytes = unwrapKey(kek, currentWrap);
         const devicePublicKeyB64 = deriveDevicePublicKey(kek);
         await activate(
           uid,
@@ -311,6 +336,23 @@ export function createPasskeyDekController(
           usedCredentialId,
           devicePublicKeyB64,
         );
+
+        if (previousWrap) {
+          // Same KEK/credential — only which wrapped_key gets decrypted
+          // differs. A failure here must never fail the unlock: the current
+          // row above is already valid and activated; the ambient rotation
+          // fallback (`getPreviousCryptoHandle()`) is simply unavailable for
+          // this session.
+          try {
+            const previousRawBytes = unwrapKey(kek, previousWrap);
+            if (previousCryptoHandle) previousCryptoHandle.destroy();
+            previousCryptoHandle = await createHandle(
+              asRawDekBytes(previousRawBytes),
+            );
+          } catch {
+            // Ignore — see comment above.
+          }
+        }
       } catch {
         throw new Error(
           "passkeyDekController.unlockWithPasskey: passkey not recognized — data cannot be decrypted.",
@@ -368,7 +410,7 @@ export function createPasskeyDekController(
         recoveryWords,
         async confirm() {
           try {
-            await storage.savePasskeyWrap(uid, credentialId, wrappedPasskey);
+            await storage.savePasskeyWrap(uid, credentialId, wrappedPasskey, 1);
             await storage.saveRecoveryWrap(uid, wrappedRecovery);
             await activate(
               uid,
@@ -398,7 +440,7 @@ export function createPasskeyDekController(
       const kek = provider.deriveKEKFromPRF(prfOutput);
       try {
         const wrapped = await cryptoHandle.wrapWithKek(kek);
-        await storage.savePasskeyWrap(uid, credentialId, wrapped);
+        await storage.savePasskeyWrap(uid, credentialId, wrapped, 1);
         unlockMethod = "passkey";
         devicePublicKey = deriveDevicePublicKey(kek);
         notify();
@@ -452,6 +494,20 @@ export function createPasskeyDekController(
         previousCryptoHandle = null;
         notify();
       }
+    },
+
+    async wrapCurrentDekForDevice(devicePublicKeyB64) {
+      if (!cryptoHandle) {
+        throw new Error(
+          "passkeyDekController.wrapCurrentDekForDevice: no crypto handle currently unlocked — unlock first.",
+        );
+      }
+      if (!cryptoHandle.wrapForDevice) {
+        throw new Error(
+          "passkeyDekController.wrapCurrentDekForDevice: current handle was not built with wrapForDevice support.",
+        );
+      }
+      return cryptoHandle.wrapForDevice(devicePublicKeyB64);
     },
   };
 }

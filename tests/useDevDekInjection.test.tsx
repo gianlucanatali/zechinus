@@ -57,6 +57,9 @@ function fakeController(): PasskeyDekController & {
       throw new Error("not used in this test");
     },
     completeRotationSession: () => {},
+    wrapCurrentDekForDevice: async () => {
+      throw new Error("not used in this test");
+    },
   } as PasskeyDekController & {
     setDekCalls: Array<{ userId: string; bytes: Uint8Array }>;
     lockCalls: number;
