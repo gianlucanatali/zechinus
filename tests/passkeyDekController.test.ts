@@ -976,3 +976,120 @@ test("wrapCurrentDekForDevice: unlocked with wrapForDevice support delegates to 
     ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
   });
 });
+
+// --- Task 3: rewrapCurrentCredentialAtEpoch — rotation-driving device re-wraps
+// its OWN passkey credential under the newly-promoted DEK, at a new epoch,
+// without touching the old epoch's row.
+
+test("rewrapCurrentCredentialAtEpoch: happy path — re-wraps the SAME credential under the new DEK at a new epoch, coexisting with the original epoch's row", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const credentialId = controller.getUnlockCredentialId()!;
+  assert.equal(credentialId, "cred-1");
+
+  // beginRotation() zeroes the bytes it's given (clean(rawBytes)), so keep an
+  // independent copy for the later equality check.
+  const newDekBytes = asRawDekBytes(bytesFromRange(32, (i) => i + 200));
+  const newDekBytesCopy = asRawDekBytes(bytesFromRange(32, (i) => i + 200));
+  await controller.beginRotation(newDekBytes);
+
+  await controller.rewrapCurrentCredentialAtEpoch(2);
+
+  const rows = await storage.loadPasskeyWraps("user-1", credentialId);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((r) => r.dekEpoch).sort(), [1, 2]);
+
+  // Isolate the epoch-2 row into a FRESH storage/controller (containing only
+  // that row) and confirm a fresh unlock decodes it to the NEW dek's bytes,
+  // not the old one.
+  const epoch2Row = rows.find((r) => r.dekEpoch === 2)!;
+  const freshStorage = memoryWrapStorage();
+  await freshStorage.savePasskeyWrap("user-1", credentialId, epoch2Row, 2);
+  const freshController = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: freshStorage,
+    createHandle: testCreateHandle,
+  });
+  await freshController.unlockWithPasskey("user-1", credentialId);
+
+  const expectedNewHandle = testCreateHandle(newDekBytesCopy);
+  assert.equal(
+    freshController.getCryptoHandle()!.pid,
+    expectedNewHandle.pid,
+    "the new epoch's row must decode to the NEW dek, not the old one",
+  );
+});
+
+test("rewrapCurrentCredentialAtEpoch: the original epoch's row is left untouched — bit-for-bit identical before and after", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const credentialId = controller.getUnlockCredentialId()!;
+
+  const rowsBefore = await storage.loadPasskeyWraps("user-1", credentialId);
+  assert.equal(rowsBefore.length, 1);
+  const epoch1Before = rowsBefore[0];
+
+  await controller.beginRotation(
+    asRawDekBytes(bytesFromRange(32, (i) => i + 200)),
+  );
+  await controller.rewrapCurrentCredentialAtEpoch(2);
+
+  const rowsAfter = await storage.loadPasskeyWraps("user-1", credentialId);
+  const epoch1After = rowsAfter.find((r) => r.dekEpoch === 1)!;
+  assert.deepEqual(
+    epoch1After,
+    epoch1Before,
+    "the old epoch's wrap must never be overwritten by rewrapCurrentCredentialAtEpoch",
+  );
+});
+
+test("rewrapCurrentCredentialAtEpoch: throws when locked (no crypto handle unlocked)", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await assert.rejects(() => controller.rewrapCurrentCredentialAtEpoch(2));
+});
+
+test("rewrapCurrentCredentialAtEpoch: throws when unlocked via recovery — no passkey credential to re-wrap", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  controller.lock();
+  await controller.unlockWithRecovery("user-1", "fixed test recovery words");
+
+  await assert.rejects(() => controller.rewrapCurrentCredentialAtEpoch(2));
+});

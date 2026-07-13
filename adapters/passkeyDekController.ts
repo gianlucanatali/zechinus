@@ -221,6 +221,22 @@ export interface PasskeyDekController {
     nonce: string;
     ephemeralPublicKeyB64: string;
   }>;
+
+  /**
+   * Re-derives this device's KEK via a fresh WebAuthn PRF prompt on the SAME
+   * credential that unlocked the current session, and re-wraps the CURRENT
+   * crypto handle under it at `newEpoch` — a new `passkey_key_wraps` row
+   * coexists with the old one (dek_epoch differs), never overwrites or deletes
+   * it. Call AFTER `beginRotation(rawNewDekBytes)` has already promoted
+   * `getCryptoHandle()` to the new DEK — this method never generates or
+   * touches raw DEK bytes itself, it only re-wraps whatever `getCryptoHandle()`
+   * currently returns. Used by the rotation-driving device to keep its own
+   * passkey working after a rotation. Requires the current session to have
+   * been unlocked via passkey (`getUnlockCredentialId()` non-null) and
+   * `getCryptoHandle()` non-null; throws otherwise (e.g. unlocked via recovery
+   * phrase — no credential to re-wrap under).
+   */
+  rewrapCurrentCredentialAtEpoch(newEpoch: number): Promise<void>;
 }
 
 export function createPasskeyDekController(
@@ -532,6 +548,32 @@ export function createPasskeyDekController(
         );
       }
       return cryptoHandle.wrapForDevice(devicePublicKeyB64);
+    },
+
+    async rewrapCurrentCredentialAtEpoch(newEpoch) {
+      if (!cryptoHandle) {
+        throw new Error(
+          "passkeyDekController.rewrapCurrentCredentialAtEpoch: no crypto handle currently unlocked — unlock first.",
+        );
+      }
+      if (!userId || !unlockCredentialId) {
+        throw new Error(
+          "passkeyDekController.rewrapCurrentCredentialAtEpoch: current session was not unlocked via passkey — no credential to re-wrap.",
+        );
+      }
+      const prfOutput = await provider.getPRFOutput(unlockCredentialId);
+      const kek = provider.deriveKEKFromPRF(prfOutput);
+      try {
+        const wrapped = await cryptoHandle.wrapWithKek(kek);
+        await storage.savePasskeyWrap(
+          userId,
+          unlockCredentialId,
+          wrapped,
+          newEpoch,
+        );
+      } finally {
+        clean(kek);
+      }
     },
   };
 }

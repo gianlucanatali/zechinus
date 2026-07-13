@@ -60,6 +60,9 @@ function fakeController(): PasskeyDekController & {
     wrapCurrentDekForDevice: async () => {
       throw new Error("not used in this test");
     },
+    rewrapCurrentCredentialAtEpoch: async () => {
+      throw new Error("not used in this test");
+    },
   } as PasskeyDekController & {
     setDekCalls: Array<{ userId: string; bytes: Uint8Array }>;
     lockCalls: number;
