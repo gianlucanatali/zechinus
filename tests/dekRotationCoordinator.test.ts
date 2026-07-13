@@ -26,13 +26,16 @@ function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
 function memoryRotationStorage(): DekRotationStorage & {
   rows: Map<string, DekRotationRequestRow>;
   pendingEpochByUser: Map<string, number | null>;
+  currentEpochByUser: Map<string, number>;
 } {
   const rows = new Map<string, DekRotationRequestRow>();
   const pendingEpochByUser = new Map<string, number | null>();
+  const currentEpochByUser = new Map<string, number>();
   let nextId = 1;
   return {
     rows,
     pendingEpochByUser,
+    currentEpochByUser,
     async createRequest(_userId, requestedEpoch, requestPublicKey) {
       const id = `req-${nextId++}`;
       rows.set(id, {
@@ -68,9 +71,12 @@ function memoryRotationStorage(): DekRotationStorage & {
     async getPendingRotation(userId) {
       return pendingEpochByUser.get(userId) ?? null;
     },
+    async getCurrentEpoch(userId) {
+      return currentEpochByUser.get(userId) ?? 1;
+    },
     async completeRotation(userId, newEpoch) {
       pendingEpochByUser.set(userId, null);
-      void newEpoch; // the fake has no separate current_dek_epoch to bump
+      currentEpochByUser.set(userId, newEpoch);
     },
   };
 }
@@ -237,6 +243,24 @@ test("completeRotation: clears the pending marker — a new rotation can start a
 
   const next = await beginRotation(storage, USER_ID, 3);
   assert.deepEqual(next, { ok: true });
+});
+
+test("getCurrentEpoch: a user with no rotation history is at epoch 1", async () => {
+  const storage = memoryRotationStorage();
+  assert.equal(await storage.getCurrentEpoch(USER_ID), 1);
+});
+
+test("getCurrentEpoch: bumps only after completeRotation, not merely after beginRotation", async () => {
+  const storage = memoryRotationStorage();
+  await beginRotation(storage, USER_ID, 2);
+  assert.equal(
+    await storage.getCurrentEpoch(USER_ID),
+    1,
+    "a pending (not-yet-completed) rotation must not change the canonical epoch",
+  );
+
+  await completeRotation(storage, USER_ID, 2);
+  assert.equal(await storage.getCurrentEpoch(USER_ID), 2);
 });
 
 test("beginRotation: a different user's pending rotation doesn't block this one (per-user, not global)", async () => {

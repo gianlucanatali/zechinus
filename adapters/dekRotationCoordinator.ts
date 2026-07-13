@@ -52,6 +52,14 @@ export interface DekRotationStorage {
   /** The in-progress rotation's target epoch, or `null` if none is pending. */
   getPendingRotation(userId: string): Promise<number | null>;
   /**
+   * The account's canonical DEK epoch right now (`profiles.current_dek_epoch`,
+   * bumped only by `completeRotation`). A device compares its own passkey
+   * wrap's `dekEpoch` against this to discover it fell behind a rotation and
+   * needs to publish a handshake request. Always defined (the column defaults
+   * to 1) — never `null`, unlike `getPendingRotation`.
+   */
+  getCurrentEpoch(userId: string): Promise<number>;
+  /**
    * Clears the in-progress marker and bumps the canonical epoch. Call ONLY
    * after the OLD epoch's key material has actually been retired (Fase 2.4's
    * `checkRetirementEligibility` returned eligible AND the retire itself ran)
