@@ -14,7 +14,7 @@
 import { type BlobMigrator } from "./versioning.ts";
 import { loadRow, saveRow, saveRowIfMatch, canonicalAAD } from "./rowStore.ts";
 import { getSecureStoreConfig } from "./config.ts";
-import type { CryptoHandle, FieldAAD } from "./types.ts";
+import type { CryptoHandle, LegacyAADCandidates } from "./types.ts";
 
 export interface BlobStore<T> {
   readonly name: string;
@@ -54,7 +54,7 @@ export interface BlobStoreDef<T> {
    * `StoreDef.legacyAAD` in `store.ts` for the full contract (read-old-if-needed,
    * always-write-canonical, never masks a real error).
    */
-  legacyAAD?: (cryptoHandle: CryptoHandle) => FieldAAD;
+  legacyAAD?: (cryptoHandle: CryptoHandle) => LegacyAADCandidates;
   /**
    * Set `true` if this table has a `content_hash` column — DataCloak computes it
    * internally as a keyed HMAC-SHA256 of the plaintext envelope (see

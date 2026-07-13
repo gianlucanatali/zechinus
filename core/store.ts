@@ -36,7 +36,13 @@ import { randomId } from "./randomId.ts";
 import { toEnvelope, type BlobMigrator } from "./versioning.ts";
 import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
-import type { BlobRecord, CryptoHandle, FieldAAD, KeyColumn } from "./types.ts";
+import type {
+  BlobRecord,
+  CryptoHandle,
+  FieldAAD,
+  KeyColumn,
+  LegacyAADCandidates,
+} from "./types.ts";
 import { LockedSessionError, OptimisticLockConflictError } from "./errors.ts";
 import {
   reencryptRowIfNeeded,
@@ -113,17 +119,24 @@ export interface StoreDef<S extends z.ZodType> {
    * For PORTING an existing table only — omit entirely for a brand-new store (the
    * vast majority of stores never set this). A function reconstructing the OLD
    * (pre-DataCloak) AAD shape for a given row — `rowKey` is `cryptoHandle.pid` for `perUser`,
-   * the domain key for `perKey`, the row id for `many`.
+   * the domain key for `perKey`, the row id for `many`. Returns either ONE `FieldAAD`
+   * (the common case) or an ORDERED `FieldAAD[]` when the table has been through MORE
+   * THAN ONE historical AAD convention (e.g. a table rename on top of an even older
+   * pre-typed-store format) — see `types.ts`'s `LegacyAADCandidates`.
    *
    * On read, the canonical AAD (`field:"data"`) is always tried FIRST; only if that
-   * fails to decrypt does the store retry under this legacy AAD. A successful legacy
-   * decrypt is immediately re-encrypted and persisted under the canonical AAD — every
-   * touched row converges permanently, one row at a time, no live migration script.
-   * ALL writes (save/create/update) ALWAYS use the canonical AAD, never this one — a
-   * store never has two ways to write. If both the canonical and legacy attempts
-   * fail, the canonical error propagates (never masked by the legacy attempt).
+   * fails to decrypt does the store retry under the legacy AAD candidate(s), IN ORDER,
+   * stopping at the first one that decrypts. A successful legacy decrypt is immediately
+   * re-encrypted and persisted under the canonical AAD — every touched row converges
+   * permanently, one row at a time, no live migration script. ALL writes
+   * (save/create/update) ALWAYS use the canonical AAD, never a legacy one — a store
+   * never has two ways to write. If the canonical attempt AND every legacy candidate
+   * fail, the canonical error propagates (never masked by a legacy attempt's error).
    */
-  legacyAAD?: (cryptoHandle: CryptoHandle, rowKey: string) => FieldAAD;
+  legacyAAD?: (
+    cryptoHandle: CryptoHandle,
+    rowKey: string,
+  ) => LegacyAADCandidates;
   migrators?: BlobMigrator[];
   /**
    * Set `true` if this table has a `content_hash` column — DataCloak computes it

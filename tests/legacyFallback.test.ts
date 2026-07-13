@@ -382,6 +382,195 @@ test("decodeWithCandidates: row already on the current handle — decoded on fir
   assert.equal(persisted, false, "first candidate won — nothing to re-persist");
 });
 
+// --- decodeWithLegacyFallback: legacyAAD as a list of candidate formats ----
+// A store can have MORE THAN ONE historical AAD shape to fall back to (e.g.
+// accountMetaService: a canonical-under-old-table-name format, plus an even
+// older pre-typed-store format) — see
+// docs/decisions/2026-07-13-account-meta-dedicated-table.md. `legacyAAD`
+// accepts either a single `FieldAAD` (unchanged) or an ordered `FieldAAD[]`,
+// tried in sequence, stopping at the first one that decrypts.
+
+test("decodeWithLegacyFallback: legacyAAD as a single (non-array) FieldAAD — unchanged regression, still migrates + persists", async () => {
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const legacyAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "legacy",
+    rowId: "r1",
+  };
+  const canonicalAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  const legacyRecord = await encodeBlob(
+    cryptoHandle,
+    legacyAAD,
+    { v: "single-format-data" },
+    1,
+  );
+
+  let persistedRecord: unknown;
+  const result = await decodeWithLegacyFallback({
+    cryptoHandle,
+    record: legacyRecord,
+    canonicalAAD,
+    legacyAAD, // single object, not an array
+    version: 1,
+    migrators: [],
+    empty: { v: "" },
+    persistMigrated: async (record) => {
+      persistedRecord = record;
+    },
+  });
+
+  assert.deepEqual(result.data, { v: "single-format-data" });
+  assert.ok(
+    persistedRecord,
+    "single-format legacyAAD still migrates as before",
+  );
+});
+
+test("decodeWithLegacyFallback: legacyAAD array of 2 formats — record matches the FIRST format in the list", async () => {
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const legacyAADFirst = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "legacy-first",
+  };
+  const legacyAADSecond = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "legacy-second-field",
+    rowId: cryptoHandle.pid,
+  };
+  const canonicalAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  const legacyRecord = await encodeBlob(
+    cryptoHandle,
+    legacyAADFirst,
+    { v: "first-format-data" },
+    1,
+  );
+
+  let persistedRecord: unknown;
+  const result = await decodeWithLegacyFallback({
+    cryptoHandle,
+    record: legacyRecord,
+    canonicalAAD,
+    legacyAAD: [legacyAADFirst, legacyAADSecond],
+    version: 1,
+    migrators: [],
+    empty: { v: "" },
+    persistMigrated: async (record) => {
+      persistedRecord = record;
+    },
+  });
+
+  assert.deepEqual(result.data, { v: "first-format-data" });
+  assert.ok(
+    persistedRecord,
+    "matched on the first candidate, migrated + persisted",
+  );
+});
+
+test("decodeWithLegacyFallback: legacyAAD array of 2 formats — record matches the SECOND format when the first doesn't decrypt", async () => {
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const legacyAADFirst = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "legacy-first",
+  };
+  const legacyAADSecond = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "legacy-second-field",
+    rowId: cryptoHandle.pid,
+  };
+  const canonicalAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  // Encrypted under the SECOND legacy format only — the first candidate's AAD
+  // will fail to authenticate against this ciphertext.
+  const legacyRecord = await encodeBlob(
+    cryptoHandle,
+    legacyAADSecond,
+    { v: "second-format-data" },
+    1,
+  );
+
+  let persistedRecord: unknown;
+  const result = await decodeWithLegacyFallback({
+    cryptoHandle,
+    record: legacyRecord,
+    canonicalAAD,
+    legacyAAD: [legacyAADFirst, legacyAADSecond],
+    version: 1,
+    migrators: [],
+    empty: { v: "" },
+    persistMigrated: async (record) => {
+      persistedRecord = record;
+    },
+  });
+
+  assert.deepEqual(result.data, { v: "second-format-data" });
+  assert.ok(
+    persistedRecord,
+    "first candidate failed to authenticate, second matched — migrated + persisted",
+  );
+});
+
+test("decodeWithLegacyFallback: legacyAAD array — none of the formats match → fails clean, the ORIGINAL canonical error propagates (no crash)", async () => {
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const otherDek = createDekHandle(randomBytes(32)); // wrong key entirely
+  const legacyAADFirst = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "legacy-first",
+  };
+  const legacyAADSecond = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "legacy-second-field",
+    rowId: cryptoHandle.pid,
+  };
+  const canonicalAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  const record = await encodeBlob(otherDek, canonicalAAD, { v: "hello" }, 1);
+
+  await assert.rejects(() =>
+    decodeWithLegacyFallback({
+      cryptoHandle, // wrong DEK for this record — no candidate can decrypt it
+      record,
+      canonicalAAD,
+      legacyAAD: [legacyAADFirst, legacyAADSecond],
+      version: 1,
+      migrators: [],
+      empty: { v: "" },
+      persistMigrated: async () => {
+        throw new Error(
+          "must not be called — nothing was successfully migrated",
+        );
+      },
+    }),
+  );
+});
+
 test("decodeWithCandidates: all candidates fail — the FIRST candidate's error propagates, not a later one's", async () => {
   const currentHandle = createDekHandle(randomBytes(32));
   const previousHandle = createDekHandle(randomBytes(32));

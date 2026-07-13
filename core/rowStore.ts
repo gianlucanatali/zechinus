@@ -14,7 +14,12 @@ import {
   type DecodeCandidate,
 } from "./legacyFallback.ts";
 import type { BlobMigrator } from "./versioning.ts";
-import type { BlobRecord, CryptoHandle, FieldAAD } from "./types.ts";
+import type {
+  BlobRecord,
+  CryptoHandle,
+  FieldAAD,
+  LegacyAADCandidates,
+} from "./types.ts";
 
 export interface RowReadIO {
   get(): Promise<BlobRecord | null>;
@@ -31,7 +36,7 @@ export interface RowReadIO {
 export interface PreviousRowCandidate {
   cryptoHandle: CryptoHandle;
   aad: FieldAAD;
-  legacyAAD?: FieldAAD;
+  legacyAAD?: LegacyAADCandidates;
 }
 
 /**
@@ -58,7 +63,7 @@ export interface LoadRowOpts<T> {
   version: number;
   migrators: BlobMigrator[];
   empty: T;
-  legacyAAD?: FieldAAD;
+  legacyAAD?: LegacyAADCandidates;
 }
 
 /**

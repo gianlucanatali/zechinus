@@ -24,6 +24,18 @@ export type FieldAAD = {
 };
 
 /**
+ * `legacyAAD` accepts either ONE historical AAD shape (the common case) or an
+ * ORDERED LIST of them, tried in sequence on read, stopping at the first one
+ * that decrypts — needed when a store has been through more than one
+ * historical AAD convention (e.g. a table rename that changed the canonical
+ * AAD, on top of an even older pre-typed-store format still present for a
+ * long-dormant row). See `core/legacyFallback.ts`'s `decodeWithLegacyFallback`
+ * for the cascade logic. A single `FieldAAD` behaves exactly as before this
+ * type existed — no behavior change for the common single-format case.
+ */
+export type LegacyAADCandidates = FieldAAD | FieldAAD[];
+
+/**
  * Wire-serialized ciphertext shape (opaque to storage). `v` encodes both compression
  * and AAD serialization, so decrypt is deterministic from the stored value alone —
  * see `crypto.ts`'s file-level doc comment for the full 1–6 mapping. `epoch` is

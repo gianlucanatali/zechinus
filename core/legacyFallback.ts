@@ -4,26 +4,33 @@
  * option. Not a new crypto primitive: pure orchestration of two already-tested pieces.
  *
  * Flow: try the canonical AAD first (the common case — new stores, or rows already
- * migrated). If that throws (decrypt failure — the row may still be under the OLD
- * AAD convention), attempt `migrateLegacyAAD` with the caller-supplied legacy AAD.
- * If the legacy attempt ALSO fails to find anything to migrate, the ORIGINAL
- * (canonical) error is what propagates — it's the more likely real cause (corruption,
- * wrong DEK) when both attempts fail, never masked by the second attempt's error.
- * On a successful legacy decrypt, the row is immediately re-encrypted under the
- * canonical AAD and persisted via `persistMigrated` — every future read (and every
- * write) uses only the canonical AAD from then on.
+ * migrated). If that throws (decrypt failure — the row may still be under an OLD AAD
+ * convention), attempt `migrateLegacyAAD` against each candidate in `legacyAAD` (a
+ * single `FieldAAD`, or an ordered `FieldAAD[]` when a store has more than one
+ * historical format — see `types.ts`'s `LegacyAADCandidates`), IN ORDER, stopping at
+ * the first one that decrypts. If NONE of the candidates find anything to migrate, the
+ * ORIGINAL (canonical) error is what propagates — it's the more likely real cause
+ * (corruption, wrong DEK) when every attempt fails, never masked by a later attempt's
+ * error. On a successful legacy decrypt (whichever candidate matched), the row is
+ * immediately re-encrypted under the canonical AAD and persisted via `persistMigrated`
+ * — every future read (and every write) uses only the canonical AAD from then on.
  */
 import { decodeBlob, encodeBlob, type DecodeResult } from "./blobCodec.ts";
 import { migrateLegacyAAD } from "./legacyMigration.ts";
 import type { BlobMigrator } from "./versioning.ts";
-import type { BlobRecord, CryptoHandle, FieldAAD } from "./types.ts";
+import type {
+  BlobRecord,
+  CryptoHandle,
+  FieldAAD,
+  LegacyAADCandidates,
+} from "./types.ts";
 
 export interface DecodeWithLegacyFallbackParams<T> {
   cryptoHandle: CryptoHandle;
   record: BlobRecord | null;
   canonicalAAD: FieldAAD;
   /** Omit when the store has no `legacyAAD` configured — the canonical error propagates as-is. */
-  legacyAAD?: FieldAAD;
+  legacyAAD?: LegacyAADCandidates;
   version: number;
   migrators: BlobMigrator[];
   empty: T;
@@ -44,45 +51,57 @@ export async function decodeWithLegacyFallback<T>(
       params.empty,
     );
   } catch (canonicalError) {
-    if (!params.legacyAAD) throw canonicalError;
-    let migration;
-    try {
-      migration = await migrateLegacyAAD(
+    const legacyCandidates: FieldAAD[] =
+      params.legacyAAD === undefined
+        ? []
+        : Array.isArray(params.legacyAAD)
+          ? params.legacyAAD
+          : [params.legacyAAD];
+
+    for (const legacyAAD of legacyCandidates) {
+      let migration;
+      try {
+        migration = await migrateLegacyAAD(
+          params.cryptoHandle,
+          params.record,
+          legacyAAD,
+          params.canonicalAAD,
+        );
+      } catch {
+        // In this catch path the blob exists and is a well-formed EncryptedField
+        // (decodeBlob returns `empty` for both missing and malformed blobs without
+        // throwing), so the only throw migrateLegacyAAD can produce here is a GCM
+        // auth-tag mismatch — meaning the row isn't under THIS candidate's AAD.
+        // Try the next candidate, if any.
+        continue;
+      }
+      if (!migration.migrated || !migration.record) {
+        // `record` is null — true for every candidate (it's the same fetched row),
+        // so no other candidate will find anything either, but trying them is
+        // harmless (each short-circuits on the same null check). Move on.
+        continue;
+      }
+      await params.persistMigrated(migration.record);
+      return decodeBlob<T>(
         params.cryptoHandle,
-        params.record,
-        params.legacyAAD,
         params.canonicalAAD,
+        migration.record,
+        params.version,
+        params.migrators,
+        params.empty,
       );
-    } catch {
-      // In this catch path the blob exists and is a well-formed EncryptedField
-      // (decodeBlob returns `empty` for both missing and malformed blobs without
-      // throwing), so the only throw migrateLegacyAAD can produce here is a GCM
-      // auth-tag mismatch — meaning the row was never a legacy-AAD row. The
-      // canonical failure (e.g. a migrator bug) is the real error; surfacing the
-      // legacy one would mask it behind a misleading "invalid ghash tag".
-      throw canonicalError;
     }
-    if (!migration.migrated || !migration.record) {
-      // Nothing found under the legacy AAD either — the canonical failure is the
-      // real, more informative error (corruption, wrong DEK). Never masked.
-      throw canonicalError;
-    }
-    await params.persistMigrated(migration.record);
-    return decodeBlob<T>(
-      params.cryptoHandle,
-      params.canonicalAAD,
-      migration.record,
-      params.version,
-      params.migrators,
-      params.empty,
-    );
+    // No candidate (zero configured, or all attempted and none matched) found
+    // anything to migrate — the canonical failure is the real, more informative
+    // error (corruption, wrong DEK). Never masked by a legacy attempt's error.
+    throw canonicalError;
   }
 }
 
 export interface DecodeCandidate {
   cryptoHandle: CryptoHandle;
   canonicalAAD: FieldAAD;
-  legacyAAD?: FieldAAD;
+  legacyAAD?: LegacyAADCandidates;
 }
 
 /**
