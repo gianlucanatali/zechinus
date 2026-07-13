@@ -27,7 +27,11 @@ import { asRawDekBytes, type RawDekBytes } from "../core/keyDerivation.ts";
 import { clean, randomBytes } from "@noble/ciphers/utils.js";
 import type { WebauthnKeyProvider } from "./webauthnKeyProvider.ts";
 import type { MnemonicRecovery } from "./mnemonicRecovery.ts";
-import { deriveDevicePublicKey } from "./deviceKeyProvider.ts";
+import {
+  deriveDevicePublicKey,
+  unwrapWithDeviceKey,
+  type DeviceWrappedKey,
+} from "./deviceKeyProvider.ts";
 
 export type WrappedKeyRow = { ciphertext: string; nonce: string };
 
@@ -237,6 +241,33 @@ export interface PasskeyDekController {
    * phrase — no credential to re-wrap under).
    */
   rewrapCurrentCredentialAtEpoch(newEpoch: number): Promise<void>;
+
+  /**
+   * Consumes a DEK proactively delivered to THIS device's stable
+   * `device_public_key` (key-custody roadmap Fase E, point 3 — a device that
+   * missed a rotation entirely, e.g. was offline the whole time, finds this
+   * waiting for it instead of depending on the reactive ephemeral handshake).
+   * Re-derives this device's KEK via a fresh WebAuthn PRF prompt on the
+   * credential that unlocked the current session (same credential as
+   * `rewrapCurrentCredentialAtEpoch` — requires `getUnlockCredentialId()`
+   * non-null), unwraps `wrapped` with it (`unwrapWithDeviceKey` — the KEK
+   * doubles as the seed for this device's stable X25519 keypair, see
+   * `deviceKeyProvider.ts`), promotes the resulting DEK to `getCryptoHandle()`
+   * (the OLD handle becomes `getPreviousCryptoHandle()`, same invariant as
+   * `beginRotation` — an in-flight ambient read still falls back correctly),
+   * then re-wraps THIS device's own passkey under the new DEK at `newEpoch`
+   * (mirrors `rewrapCurrentCredentialAtEpoch`'s persistence, same KEK, no
+   * second PRF prompt needed for that half). Requires `getCryptoHandle()`
+   * non-null (already unlocked) and `getUnlockCredentialId()` non-null
+   * (unlocked via passkey, not recovery); throws otherwise. If the unwrap
+   * itself fails (e.g. `wrapped` was encrypted for a different device's
+   * public key), the error propagates and no handle is promoted — the
+   * current session stays exactly as it was before the call.
+   */
+  consumePendingDeviceWrap(
+    wrapped: DeviceWrappedKey,
+    newEpoch: number,
+  ): Promise<void>;
 }
 
 export function createPasskeyDekController(
@@ -571,6 +602,39 @@ export function createPasskeyDekController(
           wrapped,
           newEpoch,
         );
+      } finally {
+        clean(kek);
+      }
+    },
+
+    async consumePendingDeviceWrap(wrapped, newEpoch) {
+      if (!cryptoHandle) {
+        throw new Error(
+          "passkeyDekController.consumePendingDeviceWrap: no crypto handle currently unlocked — unlock first.",
+        );
+      }
+      if (!userId || !unlockCredentialId) {
+        throw new Error(
+          "passkeyDekController.consumePendingDeviceWrap: current session was not unlocked via passkey — no credential to re-wrap.",
+        );
+      }
+      const prfOutput = await provider.getPRFOutput(unlockCredentialId);
+      const kek = provider.deriveKEKFromPRF(prfOutput);
+      try {
+        const newRawBytes = unwrapWithDeviceKey(kek, wrapped);
+        const newHandle = await createHandle(asRawDekBytes(newRawBytes));
+        clean(newRawBytes);
+        if (previousCryptoHandle) previousCryptoHandle.destroy();
+        previousCryptoHandle = cryptoHandle;
+        cryptoHandle = newHandle;
+        const rewrapped = await newHandle.wrapWithKek(kek);
+        await storage.savePasskeyWrap(
+          userId,
+          unlockCredentialId,
+          rewrapped,
+          newEpoch,
+        );
+        notify();
       } finally {
         clean(kek);
       }

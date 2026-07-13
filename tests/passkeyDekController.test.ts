@@ -25,6 +25,10 @@ import {
 import type { WebauthnKeyProvider } from "../adapters/webauthnKeyProvider.ts";
 import type { MnemonicRecovery } from "../adapters/mnemonicRecovery.ts";
 import { deriveKey } from "../core/keyDerivation.ts";
+import {
+  deriveDevicePublicKey,
+  wrapForDevicePublicKey,
+} from "../adapters/deviceKeyProvider.ts";
 
 function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
   const out = new Uint8Array(len);
@@ -1092,4 +1096,185 @@ test("rewrapCurrentCredentialAtEpoch: throws when unlocked via recovery — no p
   await controller.unlockWithRecovery("user-1", "fixed test recovery words");
 
   await assert.rejects(() => controller.rewrapCurrentCredentialAtEpoch(2));
+});
+
+// --- Task 8: consumePendingDeviceWrap — proactive multi-device delivery. A
+// device that missed a rotation entirely (e.g. was offline the whole time)
+// finds a DEK already wrapped for its OWN stable device_public_key, delivered
+// by whichever device drove the rotation. Unlike rewrapCurrentCredentialAtEpoch
+// (re-wraps a DEK this device ALREADY has), this method receives a DEK from
+// OUTSIDE and must decode it before it can do anything else.
+
+test("consumePendingDeviceWrap: happy path — unwraps the delivered DEK, promotes it to current, demotes the old one to previous, and persists a new epoch row for this device's own credential", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const credentialId = controller.getUnlockCredentialId()!;
+  assert.equal(credentialId, "cred-1");
+  const devicePublicKeyB64 = controller.getDevicePublicKey()!;
+
+  const rowsBefore = await storage.loadPasskeyWraps("user-1", credentialId);
+  assert.equal(rowsBefore.length, 1);
+  const epoch1Before = rowsBefore[0];
+
+  // Simulate ANOTHER device that drove the rotation: it only knows this
+  // device's device_public_key (from device_links), never its KEK — mirrors
+  // production, where wrapForDevicePublicKey is the only tool it has.
+  const newDekBytes = bytesFromRange(32, (i) => i + 200);
+  const newDekBytesCopy = asRawDekBytes(bytesFromRange(32, (i) => i + 200));
+  const wrapped = wrapForDevicePublicKey(devicePublicKeyB64, newDekBytes);
+
+  await controller.consumePendingDeviceWrap(wrapped, 2);
+
+  // New DEK is now current — verified against an independently-built handle
+  // from known raw bytes, not just non-null.
+  const expectedNewHandle = testCreateHandle(newDekBytesCopy);
+  assert.equal(controller.getCryptoHandle()!.pid, expectedNewHandle.pid);
+
+  const rowsAfter = await storage.loadPasskeyWraps("user-1", credentialId);
+  assert.equal(rowsAfter.length, 2);
+  assert.deepEqual(rowsAfter.map((r) => r.dekEpoch).sort(), [1, 2]);
+  const epoch1After = rowsAfter.find((r) => r.dekEpoch === 1)!;
+  assert.deepEqual(
+    epoch1After,
+    epoch1Before,
+    "the old epoch's wrap must never be overwritten by consumePendingDeviceWrap",
+  );
+
+  // getPreviousCryptoHandle() must decode to the OLD dek, not the new one —
+  // verified by isolating the epoch-1 row into a fresh controller/storage and
+  // independently unlocking it (same pattern as
+  // rewrapCurrentCredentialAtEpoch's happy-path test).
+  const freshStorageOld = memoryWrapStorage();
+  await freshStorageOld.savePasskeyWrap(
+    "user-1",
+    credentialId,
+    epoch1Before,
+    1,
+  );
+  const freshControllerOld = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: freshStorageOld,
+    createHandle: testCreateHandle,
+  });
+  await freshControllerOld.unlockWithPasskey("user-1", credentialId);
+  assert.equal(
+    controller.getPreviousCryptoHandle()!.pid,
+    freshControllerOld.getCryptoHandle()!.pid,
+    "getPreviousCryptoHandle() must decode to the OLD dek, not the new one",
+  );
+
+  // The persisted epoch-2 row must independently decode to the SAME new dek
+  // that is now current — same isolation pattern, for the new epoch.
+  const epoch2After = rowsAfter.find((r) => r.dekEpoch === 2)!;
+  const freshStorageNew = memoryWrapStorage();
+  await freshStorageNew.savePasskeyWrap("user-1", credentialId, epoch2After, 2);
+  const freshControllerNew = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: freshStorageNew,
+    createHandle: testCreateHandle,
+  });
+  await freshControllerNew.unlockWithPasskey("user-1", credentialId);
+  assert.equal(
+    freshControllerNew.getCryptoHandle()!.pid,
+    expectedNewHandle.pid,
+    "the persisted epoch-2 row must decode to the delivered new dek",
+  );
+});
+
+test("consumePendingDeviceWrap: throws when locked (no crypto handle unlocked)", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  const fakeWrapped = {
+    ciphertext: "ct",
+    nonce: "nonce",
+    ephemeralPublicKeyB64: "epk",
+  };
+  await assert.rejects(() =>
+    controller.consumePendingDeviceWrap(fakeWrapped, 2),
+  );
+});
+
+test("consumePendingDeviceWrap: throws when unlocked via recovery — no passkey credential to re-wrap", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  controller.lock();
+  await controller.unlockWithRecovery("user-1", "fixed test recovery words");
+
+  const fakeWrapped = {
+    ciphertext: "ct",
+    nonce: "nonce",
+    ephemeralPublicKeyB64: "epk",
+  };
+  await assert.rejects(() =>
+    controller.consumePendingDeviceWrap(fakeWrapped, 2),
+  );
+});
+
+test("consumePendingDeviceWrap: wrapped for a different device's public key throws, and leaves the current handle (and getPreviousCryptoHandle()) untouched", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const handleBefore = controller.getCryptoHandle();
+  assert.equal(controller.getPreviousCryptoHandle(), null);
+
+  // Wrapped for a DIFFERENT device's public key (an unrelated KEK) — this
+  // device's real KEK cannot reconstruct the same X25519 shared secret used
+  // to wrap it, so the underlying AES-GCM unwrap must fail (tag mismatch).
+  const someOtherDevicePublicKeyB64 = deriveDevicePublicKey(
+    deriveKey(new Uint8Array(32).fill(9), TEST_KEK_SALT, "kek-info", 32),
+  );
+  const wrapped = wrapForDevicePublicKey(
+    someOtherDevicePublicKeyB64,
+    bytesFromRange(32, (i) => i + 200),
+  );
+
+  await assert.rejects(() => controller.consumePendingDeviceWrap(wrapped, 2));
+
+  assert.equal(
+    controller.getCryptoHandle(),
+    handleBefore,
+    "a failed unwrap must never promote a partial/incorrect handle",
+  );
+  assert.equal(
+    controller.getPreviousCryptoHandle(),
+    null,
+    "a failed unwrap must never touch getPreviousCryptoHandle() either",
+  );
 });
