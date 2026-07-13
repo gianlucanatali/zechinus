@@ -16,10 +16,18 @@ afterEach(() => {
 });
 
 function fakeController(): PasskeyDekController & {
-  setDekCalls: Array<{ userId: string; bytes: Uint8Array }>;
+  setDekCalls: Array<{
+    userId: string;
+    bytes: Uint8Array;
+    credentialId: string | null | undefined;
+  }>;
   lockCalls: number;
 } {
-  const setDekCalls: Array<{ userId: string; bytes: Uint8Array }> = [];
+  const setDekCalls: Array<{
+    userId: string;
+    bytes: Uint8Array;
+    credentialId: string | null | undefined;
+  }> = [];
   let lockCalls = 0;
   return {
     setDekCalls,
@@ -34,8 +42,12 @@ function fakeController(): PasskeyDekController & {
     getDevicePublicKey: () => null,
     getPreviousCryptoHandle: () => null,
     subscribe: () => () => {},
-    setDek: async (userId, rawBytes) => {
-      setDekCalls.push({ userId, bytes: new Uint8Array(rawBytes) });
+    setDek: async (userId, rawBytes, credentialId) => {
+      setDekCalls.push({
+        userId,
+        bytes: new Uint8Array(rawBytes),
+        credentialId,
+      });
     },
     lock: () => {
       lockCalls += 1;
@@ -67,7 +79,11 @@ function fakeController(): PasskeyDekController & {
       throw new Error("not used in this test");
     },
   } as PasskeyDekController & {
-    setDekCalls: Array<{ userId: string; bytes: Uint8Array }>;
+    setDekCalls: Array<{
+      userId: string;
+      bytes: Uint8Array;
+      credentialId: string | null | undefined;
+    }>;
     lockCalls: number;
   };
 }
@@ -132,6 +148,52 @@ describe("useDevDekInjection", () => {
     );
   });
 
+  it("registers window.__setTestDek(hex, credentialId) — forwards the credential id to the controller and persists it", async () => {
+    const controller = fakeController();
+    render(
+      <Harness
+        controller={controller}
+        userId="user-1"
+        cryptoHandle={null}
+        enabled={true}
+      />,
+    );
+
+    await act(async () => {
+      await (
+        w().__setTestDek as (
+          hex: string,
+          credentialId?: string,
+        ) => Promise<void>
+      )("aabbcc", "e2e-test-credential");
+    });
+
+    expect(controller.setDekCalls).toHaveLength(1);
+    expect(controller.setDekCalls[0].credentialId).toBe("e2e-test-credential");
+    expect(sessionStorage.getItem("__testDekCredentialId__")).toBe(
+      "e2e-test-credential",
+    );
+  });
+
+  it("__setTestDek(hex) without a credentialId does not write __testDekCredentialId__ (no regression)", async () => {
+    const controller = fakeController();
+    render(
+      <Harness
+        controller={controller}
+        userId="user-1"
+        cryptoHandle={null}
+        enabled={true}
+      />,
+    );
+
+    await act(async () => {
+      await (w().__setTestDek as (hex: string) => Promise<void>)("aabbcc");
+    });
+
+    expect(controller.setDekCalls[0].credentialId).toBeUndefined();
+    expect(sessionStorage.getItem("__testDekCredentialId__")).toBeNull();
+  });
+
   it("__setTestDek throws when there is no active user id", async () => {
     const controller = fakeController();
     render(
@@ -169,6 +231,24 @@ describe("useDevDekInjection", () => {
     expect(onLock).toHaveBeenCalledTimes(1);
   });
 
+  it("__clearTestDek also clears a persisted credential id", () => {
+    const controller = fakeController();
+    sessionStorage.setItem("__testDek__", JSON.stringify([1, 2, 3]));
+    sessionStorage.setItem("__testDekCredentialId__", "e2e-test-credential");
+    render(
+      <Harness
+        controller={controller}
+        userId="user-1"
+        cryptoHandle={null}
+        enabled={true}
+      />,
+    );
+
+    (w().__clearTestDek as () => void)();
+
+    expect(sessionStorage.getItem("__testDekCredentialId__")).toBeNull();
+  });
+
   it("restores a stored test DEK on mount when no cryptoHandle is active yet", async () => {
     sessionStorage.setItem("__testDek__", JSON.stringify([9, 8, 7]));
     const controller = fakeController();
@@ -184,6 +264,23 @@ describe("useDevDekInjection", () => {
     await waitFor(() => expect(controller.setDekCalls).toHaveLength(1));
     expect(controller.setDekCalls[0].userId).toBe("user-1");
     expect([...controller.setDekCalls[0].bytes]).toEqual([9, 8, 7]);
+  });
+
+  it("restores a stored credential id alongside the DEK on mount (e.g. after a full page navigation mid-test)", async () => {
+    sessionStorage.setItem("__testDek__", JSON.stringify([9, 8, 7]));
+    sessionStorage.setItem("__testDekCredentialId__", "e2e-test-credential");
+    const controller = fakeController();
+    render(
+      <Harness
+        controller={controller}
+        userId="user-1"
+        cryptoHandle={null}
+        enabled={true}
+      />,
+    );
+
+    await waitFor(() => expect(controller.setDekCalls).toHaveLength(1));
+    expect(controller.setDekCalls[0].credentialId).toBe("e2e-test-credential");
   });
 
   it("does not restore a stored test DEK once a cryptoHandle is already active", async () => {

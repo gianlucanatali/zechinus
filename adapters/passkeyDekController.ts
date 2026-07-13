@@ -128,8 +128,19 @@ export interface PasskeyDekController {
   subscribe(callback: () => void): () => void;
 
   /** Activates a caller-supplied raw DEK directly — dev/test injection, or after a
-   * ceremony that derived the bytes some other way. */
-  setDek(userId: string, rawBytes: RawDekBytes): Promise<void>;
+   * ceremony that derived the bytes some other way. `credentialId` is optional and
+   * `null` by default (mirrors `activate`'s own default) — passing one populates
+   * `getUnlockCredentialId()` exactly as a real `unlockWithPasskey()`/`registerPasskey()`
+   * would, which a dev/test caller needs when it also wants to exercise
+   * `rewrapCurrentCredentialAtEpoch`/`consumePendingDeviceWrap` (both require a non-null
+   * `getUnlockCredentialId()`) without a real WebAuthn ceremony — e.g. an E2E test
+   * driving a DEK-rotation flow end-to-end. Omitting it keeps today's behavior
+   * unchanged (`getUnlockCredentialId()` stays `null`). */
+  setDek(
+    userId: string,
+    rawBytes: RawDekBytes,
+    credentialId?: string | null,
+  ): Promise<void>;
   /** Destroys the current handle (if any) and clears state. Idempotent. Also
    * destroys and clears any in-progress rotation's previous handle — a locked
    * session must never leak a stale rotation candidate into the next unlock. */
@@ -341,8 +352,8 @@ export function createPasskeyDekController(
       return () => listeners.delete(callback);
     },
 
-    async setDek(uid, rawBytes) {
-      await activate(uid, rawBytes, "passkey");
+    async setDek(uid, rawBytes, credentialId = null) {
+      await activate(uid, rawBytes, "passkey", credentialId);
     },
 
     lock() {

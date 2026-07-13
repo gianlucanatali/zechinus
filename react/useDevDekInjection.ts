@@ -25,6 +25,11 @@ import type { PasskeyDekController } from "../adapters/passkeyDekController.ts";
 // directly; see that component's own doc comment below.
 
 const STORAGE_KEY = "__testDek__";
+// Separate key from STORAGE_KEY (dek bytes) so a caller that never passes a
+// credentialId to the injected setter — the overwhelming majority — leaves
+// this key entirely absent from sessionStorage, not just holding a `null`
+// placeholder.
+const CREDENTIAL_STORAGE_KEY = "__testDekCredentialId__";
 
 export interface UseDevDekInjectionOptions {
   /** Gate — the caller decides what "dev mode" means (e.g. `import.meta.env.DEV`). Default `false`. */
@@ -57,18 +62,29 @@ export function useDevDekInjection(
   useEffect(() => {
     if (!enabled) return;
     const w = window as unknown as Record<string, unknown>;
-    w[setName] = async (hexKey: string) => {
+    // `credentialId` is optional and app-agnostic here (just forwarded to
+    // `controller.setDek`) — a consuming app that needs `getUnlockCredentialId()`
+    // populated (e.g. to drive a flow gated on "unlocked via passkey" without a
+    // real WebAuthn ceremony, like a DEK-rotation E2E test) passes it; every
+    // existing caller that omits it keeps today's exact behavior.
+    w[setName] = async (hexKey: string, credentialId?: string) => {
       if (!userId)
         throw new Error(`${setName}: no active user id to inject a DEK for`);
       const bytes = hexToBytes(hexKey);
       // Persisted BEFORE setDek: a Worker-isolated createHandle wipes the raw
       // bytes as soon as the handoff completes, so this is the last safe point.
       sessionStorage.setItem(STORAGE_KEY, JSON.stringify([...bytes]));
-      await controller.setDek(userId, asRawDekBytes(bytes));
+      if (credentialId) {
+        sessionStorage.setItem(CREDENTIAL_STORAGE_KEY, credentialId);
+      } else {
+        sessionStorage.removeItem(CREDENTIAL_STORAGE_KEY);
+      }
+      await controller.setDek(userId, asRawDekBytes(bytes), credentialId);
     };
     w[clearName] = () => {
       controller.lock();
       sessionStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem(CREDENTIAL_STORAGE_KEY);
       onLock?.();
     };
     return () => {
@@ -84,7 +100,14 @@ export function useDevDekInjection(
     const stored = sessionStorage.getItem(STORAGE_KEY);
     if (!stored) return;
     const bytes = new Uint8Array(JSON.parse(stored));
-    controller.setDek(userId, asRawDekBytes(bytes)).catch(console.error);
+    // Restores the credential id alongside the bytes (if one was injected) —
+    // otherwise a full page navigation mid-E2E-test would silently drop
+    // `getUnlockCredentialId()` even though the raw DEK itself survives.
+    const credentialId =
+      sessionStorage.getItem(CREDENTIAL_STORAGE_KEY) ?? undefined;
+    controller
+      .setDek(userId, asRawDekBytes(bytes), credentialId)
+      .catch(console.error);
   }, [enabled, userId, cryptoHandle, controller]);
 }
 

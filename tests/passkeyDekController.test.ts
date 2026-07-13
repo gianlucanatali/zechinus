@@ -470,6 +470,63 @@ test("setDek: activates a caller-supplied raw DEK directly (dev/test injection p
   assert.equal(controller.getUserId(), "user-1");
 });
 
+test("setDek: no credentialId argument behaves exactly as before — getUnlockCredentialId() stays null (no regression)", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+  assert.equal(controller.getUnlockCredentialId(), null);
+});
+
+test("setDek: an explicit credentialId populates getUnlockCredentialId() — dev/test bypass of the real passkey ceremony", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+    "e2e-test-credential",
+  );
+  assert.equal(controller.getUnlockCredentialId(), "e2e-test-credential");
+});
+
+test("setDek: credentialId + beginRotation + rewrapCurrentCredentialAtEpoch — the dev/test bypass unblocks the exact call `rewrapCurrentCredentialAtEpoch` makes, which otherwise throws 'no credential to re-wrap'", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+    "e2e-test-credential",
+  );
+
+  await controller.beginRotation(
+    asRawDekBytes(bytesFromRange(32, (i) => i + 200)),
+  );
+
+  // Before the fix this call throws "no credential to re-wrap" because
+  // getUnlockCredentialId() was null — setDek() never set it.
+  await controller.rewrapCurrentCredentialAtEpoch(2);
+
+  const rows = await storage.loadPasskeyWraps("user-1", "e2e-test-credential");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].dekEpoch, 2);
+});
+
 test("lock: destroys the handle and clears state", async () => {
   const storage = memoryWrapStorage();
   const controller = createPasskeyDekController({
