@@ -1278,3 +1278,83 @@ test("consumePendingDeviceWrap: wrapped for a different device's public key thro
     "a failed unwrap must never touch getPreviousCryptoHandle() either",
   );
 });
+
+test("consumePendingDeviceWrap: savePasskeyWrap persist failure leaves cryptoHandle and previousCryptoHandle byte-for-byte unchanged (regression for promote-before-persist ordering bug)", async () => {
+  const baseStorage = memoryWrapStorage();
+  let failNextSave = false;
+  // Wraps memoryWrapStorage so the ONE fallible I/O step
+  // (`storage.savePasskeyWrap`) can be made to reject on demand — every other
+  // method delegates straight through, mirroring a transient DB/network error
+  // on that specific call.
+  const flakyStorage: PasskeyWrapStorage = {
+    ...baseStorage,
+    async savePasskeyWrap(userId, credentialId, wrapped, dekEpoch) {
+      if (failNextSave) {
+        throw new Error("flakyStorage: simulated transient persist failure");
+      }
+      return baseStorage.savePasskeyWrap(
+        userId,
+        credentialId,
+        wrapped,
+        dekEpoch,
+      );
+    },
+  };
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: flakyStorage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const devicePublicKeyB64 = controller.getDevicePublicKey()!;
+
+  const handleBefore = controller.getCryptoHandle();
+  const previousHandleBefore = controller.getPreviousCryptoHandle();
+  assert.equal(previousHandleBefore, null);
+
+  const newDekBytes = bytesFromRange(32, (i) => i + 200);
+  const wrapped = wrapForDevicePublicKey(devicePublicKeyB64, newDekBytes);
+
+  failNextSave = true;
+  await assert.rejects(
+    () => controller.consumePendingDeviceWrap(wrapped, 2),
+    /simulated transient persist failure/,
+  );
+
+  // The critical assertion: a persist failure must leave BOTH handles
+  // exactly as they were before the call — not just non-null, but the SAME
+  // object references, proving no promote-then-fail-to-persist mutation
+  // happened. Against the old promote-before-persist code this fails:
+  // cryptoHandle would already be the new (unpersisted) handle and
+  // previousCryptoHandle would already hold the old one.
+  assert.equal(
+    controller.getCryptoHandle(),
+    handleBefore,
+    "cryptoHandle must be untouched when savePasskeyWrap fails",
+  );
+  assert.equal(
+    controller.getPreviousCryptoHandle(),
+    previousHandleBefore,
+    "previousCryptoHandle must be untouched (still null) when savePasskeyWrap fails",
+  );
+
+  // A subsequent retry must succeed cleanly — proving the failed attempt
+  // left no partial/corrupted state behind.
+  failNextSave = false;
+  await controller.consumePendingDeviceWrap(wrapped, 2);
+  const expectedNewHandle = testCreateHandle(
+    asRawDekBytes(bytesFromRange(32, (i) => i + 200)),
+  );
+  assert.equal(controller.getCryptoHandle()!.pid, expectedNewHandle.pid);
+  assert.equal(
+    controller.getPreviousCryptoHandle()!.pid,
+    handleBefore!.pid,
+    "retry after the failed attempt must demote the ORIGINAL handle to previous — not a duplicate of the new one",
+  );
+});

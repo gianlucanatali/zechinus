@@ -259,10 +259,15 @@ export interface PasskeyDekController {
    * (mirrors `rewrapCurrentCredentialAtEpoch`'s persistence, same KEK, no
    * second PRF prompt needed for that half). Requires `getCryptoHandle()`
    * non-null (already unlocked) and `getUnlockCredentialId()` non-null
-   * (unlocked via passkey, not recovery); throws otherwise. If the unwrap
-   * itself fails (e.g. `wrapped` was encrypted for a different device's
-   * public key), the error propagates and no handle is promoted — the
-   * current session stays exactly as it was before the call.
+   * (unlocked via passkey, not recovery); throws otherwise. Persists the
+   * re-wrap (`storage.savePasskeyWrap`) BEFORE promoting anything in memory —
+   * mirrors `registerPasskey().confirm()`, which persists first and only
+   * activates last. If EITHER the unwrap (e.g. `wrapped` was encrypted for a
+   * different device's public key) or the persist call fails, the error
+   * propagates and NOTHING is promoted — `getCryptoHandle()` and
+   * `getPreviousCryptoHandle()` stay exactly as they were before the call, so
+   * a caller may safely retry the whole method without risking a
+   * double-promotion that would overwrite the true `previousCryptoHandle`.
    */
   consumePendingDeviceWrap(
     wrapped: DeviceWrappedKey,
@@ -624,16 +629,34 @@ export function createPasskeyDekController(
         const newRawBytes = unwrapWithDeviceKey(kek, wrapped);
         const newHandle = await createHandle(asRawDekBytes(newRawBytes));
         clean(newRawBytes);
+        try {
+          // Persist BEFORE mutating any in-memory state — savePasskeyWrap is a
+          // genuinely fallible I/O call (transient DB/network error). Mirrors
+          // registerPasskey().confirm(), which also persists first and only
+          // promotes (activate()) last. If this throws, nothing below has run
+          // yet — cryptoHandle/previousCryptoHandle are byte-for-byte what they
+          // were before this call, so a caller retrying the whole method sees a
+          // clean, un-promoted session, never a double-promotion that would
+          // clobber the true previousCryptoHandle with a duplicate of the
+          // (already current) new DEK.
+          const rewrapped = await newHandle.wrapWithKek(kek);
+          await storage.savePasskeyWrap(
+            userId,
+            unlockCredentialId,
+            rewrapped,
+            newEpoch,
+          );
+        } catch (e) {
+          // newHandle never got promoted — nothing else references it, so it
+          // would otherwise be GC'd with its key material never explicitly
+          // zeroed. Same key-hygiene discipline as every other handle this
+          // file builds (see beginRotation/unlockWithPasskey).
+          newHandle.destroy();
+          throw e;
+        }
         if (previousCryptoHandle) previousCryptoHandle.destroy();
         previousCryptoHandle = cryptoHandle;
         cryptoHandle = newHandle;
-        const rewrapped = await newHandle.wrapWithKek(kek);
-        await storage.savePasskeyWrap(
-          userId,
-          unlockCredentialId,
-          rewrapped,
-          newEpoch,
-        );
         notify();
       } finally {
         clean(kek);
