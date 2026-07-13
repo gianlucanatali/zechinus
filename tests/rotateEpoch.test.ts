@@ -305,3 +305,284 @@ test("many rotateEpoch: idempotent — a re-run reports the row as alreadyMigrat
   const second = await store.rotateEpoch("u1", oldHandle, newHandle, 2);
   assert.deepEqual(second, { migrated: 0, alreadyMigrated: 1, failed: [] });
 });
+
+// ── verifyRotatedRows (key-custody roadmap Fase E): paranoid post-rotation
+// re-check, deliberately redundant with rotateEpoch's own `failed` — see
+// datacloak/core/store.ts's doc comment and
+// docs/decisions/2026-07-13-dek-rotation-ambient-read-fallback.md. ──────────
+
+test("perUser verifyRotatedRows: after a clean rotateEpoch, the row reports atNewEpoch", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perUserAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_peruser_clean",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  await store.save("u1", oldHandle, { label: "hello" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 1, atOldEpoch: 0, failed: [] });
+});
+
+test("perUser verifyRotatedRows: a row never migrated is counted in atOldEpoch, not failed", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perUserAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_peruser_notmigrated",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  // Written with the OLD handle, rotateEpoch never called — simulates a row
+  // rotateEpoch's one-time pass never saw.
+  await store.save("u1", oldHandle, { label: "not-yet" });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 0, atOldEpoch: 1, failed: [] });
+});
+
+test("perUser verifyRotatedRows: a genuinely corrupted row is collected in failed with a non-empty error", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perUserAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_peruser_corrupted",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  await store.save("u1", oldHandle, { label: "doomed" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+  const key = "verify_peruser_corrupted:u1";
+  const record = adapter.rows.get(key)!;
+  adapter.rows.set(key, { ...record, blob: record.blob.slice(0, -4) + "abcd" });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.equal(result.atNewEpoch, 0);
+  assert.equal(result.atOldEpoch, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].key, "u1");
+  assert.ok(result.failed[0].error.length > 0);
+});
+
+test("perUser verifyRotatedRows: no row ever saved → all zero, no error", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perUserAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_peruser_empty",
+    identity: "perUser",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 0, atOldEpoch: 0, failed: [] });
+});
+
+test("perKey verifyRotatedRows: after a clean rotateEpoch, every key reports atNewEpoch", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perKeyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_perkey_clean",
+    identity: { perKey: "year_month" },
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  await store.save("u1", oldHandle, "2026-01", { label: "jan" });
+  await store.save("u1", oldHandle, "2026-02", { label: "feb" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 2, atOldEpoch: 0, failed: [] });
+});
+
+test("perKey verifyRotatedRows: a key written ambiently AFTER rotateEpoch's pass is counted in atOldEpoch, not failed", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perKeyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_perkey_ambient",
+    identity: { perKey: "year_month" },
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  await store.save("u1", oldHandle, "2026-01", { label: "jan" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+  // Simulates a key written ambiently DURING the rotation window, after
+  // rotateEpoch's one-time pass already ran — it never sees this key.
+  await store.save("u1", oldHandle, "2026-02", { label: "feb" });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 1, atOldEpoch: 1, failed: [] });
+});
+
+test("perKey verifyRotatedRows: a genuinely corrupted key is collected in failed with a non-empty error", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perKeyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_perkey_corrupted",
+    identity: { perKey: "year_month" },
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  await store.save("u1", oldHandle, "2026-01", { label: "doomed" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+  const key = "verify_perkey_corrupted:u1:2026-01";
+  const record = adapter.rows.get(key)!;
+  adapter.rows.set(key, { ...record, blob: record.blob.slice(0, -4) + "abcd" });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.equal(result.atNewEpoch, 0);
+  assert.equal(result.atOldEpoch, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].key, "2026-01");
+  assert.ok(result.failed[0].error.length > 0);
+});
+
+test("perKey verifyRotatedRows: no key ever saved → all zero, no error", async () => {
+  __resetSecureStoreConfig();
+  const adapter = perKeyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_perkey_empty",
+    identity: { perKey: "year_month" },
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 0, atOldEpoch: 0, failed: [] });
+});
+
+test("many verifyRotatedRows: after a clean rotateEpoch, every row reports atNewEpoch", async () => {
+  __resetSecureStoreConfig();
+  const adapter = manyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_many_clean",
+    identity: "many",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  await store.create("u1", oldHandle, { label: "one" });
+  await store.create("u1", oldHandle, { label: "two" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 2, atOldEpoch: 0, failed: [] });
+});
+
+test("many verifyRotatedRows: a row created ambiently AFTER rotateEpoch's pass is counted in atOldEpoch, not failed", async () => {
+  __resetSecureStoreConfig();
+  const adapter = manyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_many_ambient",
+    identity: "many",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  await store.create("u1", oldHandle, { label: "migrated" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+  // Simulates a row created ambiently DURING the rotation window, after
+  // rotateEpoch's one-time pass already ran — it never sees this row.
+  await store.create("u1", oldHandle, { label: "ambient" });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 1, atOldEpoch: 1, failed: [] });
+});
+
+test("many verifyRotatedRows: a genuinely corrupted row is collected in failed with a non-empty error", async () => {
+  __resetSecureStoreConfig();
+  const adapter = manyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_many_corrupted",
+    identity: "many",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+  const id = await store.create("u1", oldHandle, { label: "doomed" });
+  await store.rotateEpoch("u1", oldHandle, newHandle, 2);
+  const key = `verify_many_corrupted:u1:${id}`;
+  const record = adapter.rows.get(key)!;
+  adapter.rows.set(key, { ...record, blob: record.blob.slice(0, -4) + "abcd" });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.equal(result.atNewEpoch, 0);
+  assert.equal(result.atOldEpoch, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(result.failed[0].key, id);
+  assert.ok(result.failed[0].error.length > 0);
+});
+
+test("many verifyRotatedRows: no row ever created → all zero, no error", async () => {
+  __resetSecureStoreConfig();
+  const adapter = manyAdapter();
+  configureSecureStore({ storage: adapter });
+  const oldHandle = createDekHandle(randomBytes(32));
+  const newHandle = createDekHandle(randomBytes(32));
+  const store = defineStore({
+    name: "verify_many_empty",
+    identity: "many",
+    encrypt: "all",
+    schema: Item,
+    version: 1,
+    schemaFingerprint: fingerprintSchema(Item, "all"),
+  });
+
+  const result = await store.verifyRotatedRows("u1", oldHandle, newHandle, 2);
+  assert.deepEqual(result, { atNewEpoch: 0, atOldEpoch: 0, failed: [] });
+});

@@ -26,7 +26,7 @@
 import { z } from "zod";
 import { defineBlobStore } from "./blobStore.ts";
 import { loadRow, saveRow, saveRowIfMatch, canonicalAAD } from "./rowStore.ts";
-import { encodeBlob } from "./blobCodec.ts";
+import { encodeBlob, decodeBlob } from "./blobCodec.ts";
 import {
   decodeWithCandidates,
   type DecodeCandidate,
@@ -150,6 +150,23 @@ export interface StoreDef<S extends z.ZodType> {
   idGenerator?: () => string;
 }
 
+/**
+ * Aggregate result of `verifyRotatedRows()` — the post-rotation paranoid
+ * re-check (key-custody roadmap Fase E), returned by every cardinality.
+ * Deliberately a distinct shape from `RotationOutcome`: this is an
+ * independent re-read, not a migration pass, so there is no `migrated`
+ * count — only where each row was actually found to be (new epoch, old
+ * epoch, or undecryptable).
+ */
+export interface RotationVerificationOutcome {
+  /** Rows that decrypt under `newHandle` tagged with `newEpoch` — successfully rotated. */
+  atNewEpoch: number;
+  /** Rows that decrypt only under `oldHandle` — not yet migrated, NOT corruption. */
+  atOldEpoch: number;
+  /** Rows that decrypt under NEITHER handle — genuine corruption. */
+  failed: Array<{ key: unknown; error: string }>;
+}
+
 /** `perUser`-cardinality store: one blob per user. */
 export interface Store<T> {
   readonly name: string;
@@ -240,6 +257,26 @@ export interface Store<T> {
     newHandle: CryptoHandle,
     newEpoch: number,
   ): Promise<RotationOutcome>;
+
+  /**
+   * Post-rotation paranoid re-check (key-custody roadmap Fase E): independently
+   * re-reads every row for this user and confirms it decrypts under the
+   * expected handle — deliberately redundant with `rotateEpoch()`'s own
+   * `RotationOutcome.failed`, since it also catches rows written AMBIENTLY
+   * (via `set()`/`mutate()`) during the rotation window that `rotateEpoch()`'s
+   * earlier pass never saw. Always present, like `rotateEpoch`. Tries
+   * `newHandle` first (tagged `newEpoch`, matching how `rotateEpoch` tags
+   * migrated rows); on failure falls back to `oldHandle` (untagged) — a row
+   * landing there is still on the OLD epoch, not yet migrated. A row
+   * decrypting under NEITHER is genuine corruption, collected in `failed`
+   * rather than aborting.
+   */
+  verifyRotatedRows(
+    userId: string,
+    oldHandle: CryptoHandle,
+    newHandle: CryptoHandle,
+    newEpoch: number,
+  ): Promise<RotationVerificationOutcome>;
 }
 
 /** `perKey`-cardinality store: one blob per `(user, domain key)`. */
@@ -326,6 +363,19 @@ export interface KeyedStore<T> {
     newHandle: CryptoHandle,
     newEpoch: number,
   ): Promise<RotationOutcome>;
+
+  /**
+   * Post-rotation paranoid re-check (key-custody roadmap Fase E) — same
+   * contract as `Store.verifyRotatedRows`, applied to EVERY key this user has
+   * in this `perKey` store. Requires `listAll` on the configured adapter (same
+   * requirement `rotateEpoch` already has).
+   */
+  verifyRotatedRows(
+    userId: string,
+    oldHandle: CryptoHandle,
+    newHandle: CryptoHandle,
+    newEpoch: number,
+  ): Promise<RotationVerificationOutcome>;
 }
 
 /** `identity: "many"` — a collection with a framework-generated id, one encrypted blob per row. */
@@ -389,6 +439,19 @@ export interface CollectionStore<T> {
     newHandle: CryptoHandle,
     newEpoch: number,
   ): Promise<RotationOutcome>;
+
+  /**
+   * Post-rotation paranoid re-check (key-custody roadmap Fase E) — same
+   * contract as `Store.verifyRotatedRows`, applied to EVERY row this user has
+   * in this collection. Requires `list` on the configured adapter (same
+   * requirement `rotateEpoch` already has).
+   */
+  verifyRotatedRows(
+    userId: string,
+    oldHandle: CryptoHandle,
+    newHandle: CryptoHandle,
+    newEpoch: number,
+  ): Promise<RotationVerificationOutcome>;
 }
 
 /** `defineStore`'s return type based on cardinality: perKey → KeyedStore, many → CollectionStore, else Store. */
@@ -916,6 +979,51 @@ function buildKeyedStore<S extends z.ZodType>(
       }
       return { migrated, alreadyMigrated, failed };
     },
+
+    async verifyRotatedRows(userId, oldHandle, newHandle, newEpoch) {
+      const { storage } = getSecureStoreConfig();
+      if (!storage.listAll) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support perKey enumeration (listAll missing) — required for DEK rotation verify.`,
+        );
+      }
+      const rows = await storage.listAll(def.name, userId, keyColumn);
+      let atNewEpoch = 0;
+      let atOldEpoch = 0;
+      const failed: Array<{ key: unknown; error: string }> = [];
+      for (const { key, record } of rows) {
+        const newAAD = { ...canonicalAADFor(newHandle, key), epoch: newEpoch };
+        try {
+          await decodeBlob(
+            newHandle,
+            newAAD,
+            record,
+            def.version,
+            migrators,
+            empty,
+          );
+          atNewEpoch++;
+          continue;
+        } catch {
+          // Not decryptable at the new epoch — fall through to the old-handle check.
+        }
+        const oldAAD = canonicalAADFor(oldHandle, key);
+        try {
+          await decodeBlob(
+            oldHandle,
+            oldAAD,
+            record,
+            def.version,
+            migrators,
+            empty,
+          );
+          atOldEpoch++;
+        } catch (e) {
+          failed.push({ key, error: String(e) });
+        }
+      }
+      return { atNewEpoch, atOldEpoch, failed };
+    },
   };
 
   if (def.contentHash) {
@@ -1177,6 +1285,51 @@ function buildCollectionStore<S extends z.ZodType>(
       }
       return { migrated, alreadyMigrated, failed };
     },
+
+    async verifyRotatedRows(userId, oldHandle, newHandle, newEpoch) {
+      const { storage } = getSecureStoreConfig();
+      if (!storage.list) {
+        throw new Error(
+          `defineStore(${def.name}): the configured adapter doesn't support 'many' (list missing) — required for DEK rotation verify.`,
+        );
+      }
+      const rows = await storage.list(def.name, userId, plaintextKeys);
+      let atNewEpoch = 0;
+      let atOldEpoch = 0;
+      const failed: Array<{ key: unknown; error: string }> = [];
+      for (const { id, record } of rows) {
+        const newAAD = { ...canonicalAADFor(newHandle, id), epoch: newEpoch };
+        try {
+          await decodeBlob(
+            newHandle,
+            newAAD,
+            record,
+            def.version,
+            migrators,
+            emptyEncPart,
+          );
+          atNewEpoch++;
+          continue;
+        } catch {
+          // Not decryptable at the new epoch — fall through to the old-handle check.
+        }
+        const oldAAD = canonicalAADFor(oldHandle, id);
+        try {
+          await decodeBlob(
+            oldHandle,
+            oldAAD,
+            record,
+            def.version,
+            migrators,
+            emptyEncPart,
+          );
+          atOldEpoch++;
+        } catch (e) {
+          failed.push({ key: id, error: String(e) });
+        }
+      }
+      return { atNewEpoch, atOldEpoch, failed };
+    },
   };
 
   if (def.optimisticLock) {
@@ -1366,6 +1519,44 @@ function buildPerUserStore<S extends z.ZodType>({
         return {
           migrated: 0,
           alreadyMigrated: 0,
+          failed: [{ key: userId, error: String(e) }],
+        };
+      }
+    },
+
+    async verifyRotatedRows(userId, oldHandle, newHandle, newEpoch) {
+      const { storage } = getSecureStoreConfig();
+      const record = await storage.get(def.name, userId, []);
+      if (!record) return { atNewEpoch: 0, atOldEpoch: 0, failed: [] };
+      const newAAD = { ...canonicalAAD(newHandle, def.name), epoch: newEpoch };
+      try {
+        await decodeBlob(
+          newHandle,
+          newAAD,
+          record,
+          def.version,
+          def.migrators ?? [],
+          empty,
+        );
+        return { atNewEpoch: 1, atOldEpoch: 0, failed: [] };
+      } catch {
+        // Not decryptable at the new epoch — fall through to the old-handle check.
+      }
+      const oldAAD = canonicalAAD(oldHandle, def.name);
+      try {
+        await decodeBlob(
+          oldHandle,
+          oldAAD,
+          record,
+          def.version,
+          def.migrators ?? [],
+          empty,
+        );
+        return { atNewEpoch: 0, atOldEpoch: 1, failed: [] };
+      } catch (e) {
+        return {
+          atNewEpoch: 0,
+          atOldEpoch: 0,
           failed: [{ key: userId, error: String(e) }],
         };
       }
