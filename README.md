@@ -1364,6 +1364,13 @@ oldHandle, newHandle, newEpoch)`, present on every `defineStore`-created store l
   `DekRotationStorage.beginRotation`/`completeRotation`, an atomic conditional write so two
   racing callers (two tabs, two devices) can't both succeed —
   `datacloak/adapters/dekRotationCoordinator.ts`.
+- **Liveness heartbeat for resume**: `DekRotationStorage.touchRotationHeartbeat`/
+  `getRotationHeartbeat` let a passive observer distinguish "the driver is still actively
+  working" (e.g. paused on a human step with no timeout) from "the driver died" before
+  attempting to take over an abandoned rotation — this interface only carries the raw
+  timestamp; the staleness threshold and the "safe to resume" policy (recover the DEK a
+  prior attempt already wrapped, never regenerate fresh bytes) live in the consuming app
+  (`src/context/RotationContext.tsx`'s `resumeRotationAsDriver`), not here.
 
 **Not yet wired** (app-level, tracked in
 `_local/plans/20260712-0947-mobile-roadmap-consolidated.md` Fase 2.5): the actual "rotate

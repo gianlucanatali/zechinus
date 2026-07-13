@@ -27,15 +27,18 @@ function memoryRotationStorage(): DekRotationStorage & {
   rows: Map<string, DekRotationRequestRow>;
   pendingEpochByUser: Map<string, number | null>;
   currentEpochByUser: Map<string, number>;
+  heartbeatByUser: Map<string, string | null>;
 } {
   const rows = new Map<string, DekRotationRequestRow>();
   const pendingEpochByUser = new Map<string, number | null>();
   const currentEpochByUser = new Map<string, number>();
+  const heartbeatByUser = new Map<string, string | null>();
   let nextId = 1;
   return {
     rows,
     pendingEpochByUser,
     currentEpochByUser,
+    heartbeatByUser,
     async createRequest(_userId, requestedEpoch, requestPublicKey) {
       const id = `req-${nextId++}`;
       rows.set(id, {
@@ -77,6 +80,12 @@ function memoryRotationStorage(): DekRotationStorage & {
     async completeRotation(userId, newEpoch) {
       pendingEpochByUser.set(userId, null);
       currentEpochByUser.set(userId, newEpoch);
+    },
+    async touchRotationHeartbeat(userId) {
+      heartbeatByUser.set(userId, new Date().toISOString());
+    },
+    async getRotationHeartbeat(userId) {
+      return heartbeatByUser.get(userId) ?? null;
     },
   };
 }
@@ -269,4 +278,30 @@ test("beginRotation: a different user's pending rotation doesn't block this one 
 
   const result = await beginRotation(storage, USER_ID, 2);
   assert.deepEqual(result, { ok: true });
+});
+
+test("getRotationHeartbeat: null when no heartbeat has ever been written for this user", async () => {
+  const storage = memoryRotationStorage();
+  assert.equal(await storage.getRotationHeartbeat(USER_ID), null);
+});
+
+test("touchRotationHeartbeat: getRotationHeartbeat reflects the timestamp of the most recent write", async () => {
+  const storage = memoryRotationStorage();
+  await storage.touchRotationHeartbeat(USER_ID);
+  const first = await storage.getRotationHeartbeat(USER_ID);
+  assert.ok(first, "a timestamp must be recorded");
+
+  await storage.touchRotationHeartbeat(USER_ID);
+  const second = await storage.getRotationHeartbeat(USER_ID);
+  assert.ok(
+    new Date(second!).getTime() >= new Date(first!).getTime(),
+    "a later touch must never move the heartbeat backward",
+  );
+});
+
+test("touchRotationHeartbeat: per-user, never leaks into another account's heartbeat", async () => {
+  const storage = memoryRotationStorage();
+  await storage.touchRotationHeartbeat(USER_ID);
+
+  assert.equal(await storage.getRotationHeartbeat("user-other"), null);
 });

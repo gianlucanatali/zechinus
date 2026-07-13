@@ -69,6 +69,26 @@ export interface DekRotationStorage {
    * still decrypt rows stuck behind it.
    */
   completeRotation(userId: string, newEpoch: number): Promise<void>;
+  /**
+   * Liveness signal (key-custody roadmap Fase E, Task 11): written
+   * periodically by whichever device/tab is ACTIVELY driving a rotation
+   * end-to-end, for as long as `pending_dek_epoch` is set. Exists so a
+   * passive observer that later finds a rotation pending can distinguish
+   * "still being driven" (e.g. paused on a human step like reading a
+   * recovery phrase, which has no timeout by design) from "the driver died"
+   * — see `getRotationHeartbeat`. Never gates correctness by itself; only
+   * the resume decision (an app-level policy, not this interface) reads it.
+   */
+  touchRotationHeartbeat(userId: string): Promise<void>;
+  /**
+   * Timestamp (ISO 8601) of the last `touchRotationHeartbeat` write, or
+   * `null` if none has ever been written for this account's current
+   * rotation. A passive observer compares this against "now" to decide
+   * whether the currently pending rotation's driver is still alive, using a
+   * threshold far larger than any plausible heartbeat interval or human
+   * pause (the app, not this interface, owns that threshold).
+   */
+  getRotationHeartbeat(userId: string): Promise<string | null>;
 }
 
 /**
