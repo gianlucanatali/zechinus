@@ -101,7 +101,12 @@ export function defineBlobStore<T>(def: BlobStoreDef<T>): BlobStore<T> {
     userId: string,
     cryptoHandle: CryptoHandle,
   ): Promise<{ data: T; hash: string | null }> {
-    const { storage } = getSecureStoreConfig();
+    const { storage, keys } = getSecureStoreConfig();
+    // Present only during an in-progress DEK rotation (`beginRotation` on the
+    // driving device) — every other caller (no KeyProvider configured, or one
+    // without a rotation active) gets `null`, and this store behaves exactly as
+    // before this capability existed. See `rowStore.ts`'s `PreviousRowCandidate`.
+    const previousCryptoHandle = keys?.getPreviousCryptoHandle?.() ?? null;
     return loadRow(
       cryptoHandle,
       {
@@ -118,6 +123,13 @@ export function defineBlobStore<T>(def: BlobStoreDef<T>): BlobStore<T> {
         legacyAAD: def.legacyAAD?.(cryptoHandle),
       },
       (data) => save(userId, cryptoHandle, data),
+      previousCryptoHandle
+        ? {
+            cryptoHandle: previousCryptoHandle,
+            aad: canonicalAAD(previousCryptoHandle, def.name),
+            legacyAAD: def.legacyAAD?.(previousCryptoHandle),
+          }
+        : null,
     );
   }
 

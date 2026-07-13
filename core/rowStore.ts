@@ -9,13 +9,29 @@
  */
 
 import { encodeBlob } from "./blobCodec.ts";
-import { decodeWithLegacyFallback } from "./legacyFallback.ts";
+import {
+  decodeWithCandidates,
+  type DecodeCandidate,
+} from "./legacyFallback.ts";
 import type { BlobMigrator } from "./versioning.ts";
 import type { BlobRecord, CryptoHandle, FieldAAD } from "./types.ts";
 
 export interface RowReadIO {
   get(): Promise<BlobRecord | null>;
   put(record: BlobRecord): Promise<void>;
+}
+
+/**
+ * A fallback (handle, AAD) pair a caller can offer `loadRow` in addition to the
+ * primary `cryptoHandle`/`aad` — used ONLY when a DEK rotation is active in this
+ * session (`KeyProvider.getPreviousCryptoHandle()`), so a row not yet swept by the
+ * rotation's batch migration (`rotateEpoch`) still decrypts on an ambient read.
+ * Never populated outside that scenario — omit entirely for the common case.
+ */
+export interface PreviousRowCandidate {
+  cryptoHandle: CryptoHandle;
+  aad: FieldAAD;
+  legacyAAD?: FieldAAD;
 }
 
 /**
@@ -57,18 +73,27 @@ export async function loadRow<T>(
   aad: FieldAAD,
   opts: LoadRowOpts<T>,
   onUpgraded: (data: T) => void | Promise<void>,
+  previous?: PreviousRowCandidate | null,
 ): Promise<{ data: T; hash: string | null }> {
   const record = await io.get();
-  const { data, upgraded } = await decodeWithLegacyFallback<T>({
-    cryptoHandle,
+  const candidates: DecodeCandidate[] = [
+    { cryptoHandle, canonicalAAD: aad, legacyAAD: opts.legacyAAD },
+  ];
+  if (previous) {
+    candidates.push({
+      cryptoHandle: previous.cryptoHandle,
+      canonicalAAD: previous.aad,
+      legacyAAD: previous.legacyAAD,
+    });
+  }
+  const { data, upgraded } = await decodeWithCandidates<T>(
+    candidates,
     record,
-    canonicalAAD: aad,
-    legacyAAD: opts.legacyAAD,
-    version: opts.version,
-    migrators: opts.migrators,
-    empty: opts.empty,
-    persistMigrated: (migratedRecord) => io.put(migratedRecord),
-  });
+    opts.version,
+    opts.migrators,
+    opts.empty,
+    (migratedRecord) => io.put(migratedRecord),
+  );
   if (upgraded) {
     Promise.resolve(onUpgraded(data)).catch((e) =>
       console.error(

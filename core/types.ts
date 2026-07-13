@@ -245,6 +245,15 @@ export interface KeyProvider {
   getCryptoHandle(): CryptoHandle | null;
   getUserId(): string | null;
   subscribe(callback: () => void): () => void;
+  /**
+   * Present ONLY during an active DEK rotation in this session — the handle for
+   * the epoch being retired. Ambient read paths (`load`/`get`/`list`/`getRange`)
+   * fall back to it when the current handle can't decrypt a row, since some rows
+   * may not yet have been swept by the rotation batch (`rotateEpoch`). `null`
+   * (or omitted entirely) means no rotation is in progress — every store's read
+   * path behaves exactly as before this capability existed.
+   */
+  getPreviousCryptoHandle?(): CryptoHandle | null;
 }
 
 /**

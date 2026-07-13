@@ -3,7 +3,11 @@ import test from "node:test";
 import { randomBytes } from "@noble/ciphers/utils.js";
 import { createDekHandle } from "./testKeyHandle.ts";
 import { encodeBlob } from "../core/blobCodec.ts";
-import { decodeWithLegacyFallback } from "../core/legacyFallback.ts";
+import {
+  decodeWithLegacyFallback,
+  decodeWithCandidates,
+} from "../core/legacyFallback.ts";
+import type { BlobRecord } from "../core/types.ts";
 
 test("decodeWithLegacyFallback: canonical AAD succeeds → no legacy attempt, no persist", async () => {
   const cryptoHandle = createDekHandle(randomBytes(32));
@@ -222,5 +226,204 @@ test("decodeWithLegacyFallback: canonical decode fails AFTER decrypt (migrator b
       }),
     /migrator exploded/,
     "the canonical (migrator) error must surface, not the legacy decrypt failure",
+  );
+});
+
+// --- decodeWithCandidates -------------------------------------------------
+// Multi-candidate decode (Fase E, key-custody rotation): during a DEK rotation
+// window, a row may still be under the OLD DEK while the session already holds
+// the NEW one. `decodeWithCandidates` tries an ordered list of (handle, AAD)
+// candidates — the first (current) handle first, older handles as fallback.
+
+test("decodeWithCandidates: single candidate — behaves identically to decodeWithLegacyFallback", async () => {
+  const cryptoHandle = createDekHandle(randomBytes(32));
+  const canonicalAAD = {
+    userId: cryptoHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  const record = await encodeBlob(cryptoHandle, canonicalAAD, { v: "hi" }, 1);
+
+  let persisted = false;
+  const result = await decodeWithCandidates(
+    [{ cryptoHandle, canonicalAAD }],
+    record,
+    1,
+    [],
+    { v: "" },
+    async () => {
+      persisted = true;
+    },
+  );
+
+  assert.deepEqual(result.data, { v: "hi" });
+  assert.equal(result.upgraded, false);
+  assert.equal(
+    persisted,
+    false,
+    "canonical succeeded on first try — no persist",
+  );
+});
+
+test("decodeWithCandidates: empty candidate list throws explicitly", async () => {
+  await assert.rejects(
+    () => decodeWithCandidates([], null, 1, [], { v: "" }, async () => {}),
+    /empty candidate list/,
+  );
+});
+
+test("decodeWithCandidates: current handle fails, previous (second candidate) succeeds — row re-encrypted under the FIRST candidate's handle+AAD", async () => {
+  const currentHandle = createDekHandle(randomBytes(32));
+  const previousHandle = createDekHandle(randomBytes(32));
+  const currentAAD = {
+    userId: currentHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  const previousAAD = {
+    userId: previousHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+
+  // Row is still encrypted under the OLD (previous) handle — rotation hasn't
+  // reached this row yet, but the session already promoted to the new one.
+  const record = await encodeBlob(
+    previousHandle,
+    previousAAD,
+    { v: "old-key-data" },
+    1,
+  );
+
+  let persistedRecord: BlobRecord | undefined;
+  const result = await decodeWithCandidates(
+    [
+      { cryptoHandle: currentHandle, canonicalAAD: currentAAD },
+      { cryptoHandle: previousHandle, canonicalAAD: previousAAD },
+    ],
+    record,
+    1,
+    [],
+    { v: "" },
+    async (r) => {
+      persistedRecord = r;
+    },
+  );
+
+  assert.deepEqual(result.data, { v: "old-key-data" });
+  assert.equal(
+    result.upgraded,
+    true,
+    "won on a non-first candidate → upgraded",
+  );
+  assert.ok(persistedRecord, "row was re-persisted under the current handle");
+
+  // A second read using ONLY the current handle (no previous candidate at all)
+  // must now succeed — proving the persisted record is genuinely re-encrypted
+  // under currentHandle/currentAAD, not just a pass-through of the old blob.
+  const second = await decodeWithCandidates(
+    [{ cryptoHandle: currentHandle, canonicalAAD: currentAAD }],
+    persistedRecord!,
+    1,
+    [],
+    { v: "" },
+    async () => {
+      throw new Error("must not persist again — already converged");
+    },
+  );
+  assert.deepEqual(second.data, { v: "old-key-data" });
+  assert.equal(second.upgraded, false);
+});
+
+test("decodeWithCandidates: row already on the current handle — decoded on first candidate, no unnecessary re-persist", async () => {
+  const currentHandle = createDekHandle(randomBytes(32));
+  const previousHandle = createDekHandle(randomBytes(32));
+  const currentAAD = {
+    userId: currentHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  const record = await encodeBlob(
+    currentHandle,
+    currentAAD,
+    { v: "already-migrated" },
+    1,
+  );
+
+  let persisted = false;
+  const result = await decodeWithCandidates(
+    [
+      { cryptoHandle: currentHandle, canonicalAAD: currentAAD },
+      {
+        cryptoHandle: previousHandle,
+        canonicalAAD: {
+          userId: previousHandle.pid,
+          table: "t",
+          field: "data",
+          rowId: "r1",
+        },
+      },
+    ],
+    record,
+    1,
+    [],
+    { v: "" },
+    async () => {
+      persisted = true;
+    },
+  );
+
+  assert.deepEqual(result.data, { v: "already-migrated" });
+  assert.equal(result.upgraded, false);
+  assert.equal(persisted, false, "first candidate won — nothing to re-persist");
+});
+
+test("decodeWithCandidates: all candidates fail — the FIRST candidate's error propagates, not a later one's", async () => {
+  const currentHandle = createDekHandle(randomBytes(32));
+  const previousHandle = createDekHandle(randomBytes(32));
+  const canonicalAAD = {
+    userId: currentHandle.pid,
+    table: "t",
+    field: "data",
+    rowId: "r1",
+  };
+  // Row genuinely IS under currentHandle/canonicalAAD (candidate[0] decrypts
+  // fine), but a migrator bug throws afterwards. The second candidate
+  // (previousHandle, wrong key entirely) will ALSO fail, with a generic
+  // auth-tag mismatch — that must never mask the migrator's real error.
+  const record = await encodeBlob(currentHandle, canonicalAAD, { v: "old" }, 1);
+
+  await assert.rejects(
+    () =>
+      decodeWithCandidates(
+        [
+          { cryptoHandle: currentHandle, canonicalAAD },
+          {
+            cryptoHandle: previousHandle,
+            canonicalAAD: {
+              userId: previousHandle.pid,
+              table: "t",
+              field: "data",
+              rowId: "r1",
+            },
+          },
+        ],
+        record,
+        2,
+        [
+          () => {
+            throw new Error("migrator exploded: v1 payload not parsable");
+          },
+        ],
+        { v: "" },
+        async () => {
+          throw new Error("must not persist anything on failure");
+        },
+      ),
+    /migrator exploded/,
   );
 });

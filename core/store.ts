@@ -27,13 +27,16 @@ import { z } from "zod";
 import { defineBlobStore } from "./blobStore.ts";
 import { loadRow, saveRow, saveRowIfMatch, canonicalAAD } from "./rowStore.ts";
 import { encodeBlob } from "./blobCodec.ts";
-import { decodeWithLegacyFallback } from "./legacyFallback.ts";
+import {
+  decodeWithCandidates,
+  type DecodeCandidate,
+} from "./legacyFallback.ts";
 import { getSecureStoreConfig } from "./config.ts";
 import { randomId } from "./randomId.ts";
 import { toEnvelope, type BlobMigrator } from "./versioning.ts";
 import { collectEncryptedKeys } from "./encryption.ts";
 import { fingerprintSchema } from "./schemaFingerprint.ts";
-import type { CryptoHandle, FieldAAD, KeyColumn } from "./types.ts";
+import type { BlobRecord, CryptoHandle, FieldAAD, KeyColumn } from "./types.ts";
 import { LockedSessionError, OptimisticLockConflictError } from "./errors.ts";
 import {
   reencryptRowIfNeeded,
@@ -55,6 +58,8 @@ import {
  */
 function resolveAmbientIdentity(storeName: string): {
   cryptoHandle: CryptoHandle;
+  /** Present only during an in-progress DEK rotation — see `KeyProvider.getPreviousCryptoHandle`. */
+  previousCryptoHandle: CryptoHandle | null;
   userId: string;
 } {
   const { keys } = getSecureStoreConfig();
@@ -68,7 +73,11 @@ function resolveAmbientIdentity(storeName: string): {
   if (!cryptoHandle || !userId) {
     throw new LockedSessionError(storeName);
   }
-  return { cryptoHandle, userId };
+  return {
+    cryptoHandle,
+    previousCryptoHandle: keys.getPreviousCryptoHandle?.() ?? null,
+    userId,
+  };
 }
 
 /** Store cardinality: how many records per user, and how they're addressed. */
@@ -636,7 +645,15 @@ function buildKeyedStore<S extends z.ZodType>(
       userId,
       extraKeys: [{ column: keyColumn, value: key }],
       loadFull: async () => {
-        const { storage } = getSecureStoreConfig();
+        const { storage, keys } = getSecureStoreConfig();
+        // Present only during an in-progress DEK rotation — see
+        // `resolveAmbientIdentity`'s doc comment. Looked up independently here
+        // (not threaded from `resolveAmbientIdentity`) because `load()` reaches
+        // this same function with an explicit `cryptoHandle` — e.g. from
+        // `useKeyedStore.ts`, which resolves identity from this SAME ambient
+        // KeyProvider itself, outside `resolveAmbientIdentity` — and must get
+        // the same fallback.
+        const previousCryptoHandle = keys?.getPreviousCryptoHandle?.() ?? null;
         const { data, hash } = await loadRow(
           cryptoHandle,
           {
@@ -662,6 +679,13 @@ function buildKeyedStore<S extends z.ZodType>(
             legacyAAD: def.legacyAAD?.(cryptoHandle, key),
           },
           (upgradedData) => keyedSave(userId, cryptoHandle, key, upgradedData),
+          previousCryptoHandle
+            ? {
+                cryptoHandle: previousCryptoHandle,
+                aad: canonicalAADFor(previousCryptoHandle, key),
+                legacyAAD: def.legacyAAD?.(previousCryptoHandle, key),
+              }
+            : null,
         );
         return { data: validateRead(data, `load(key=${key})`), hash };
       },
@@ -787,12 +811,16 @@ function buildKeyedStore<S extends z.ZodType>(
       );
     },
     async list(userId, cryptoHandle, range) {
-      const { storage } = getSecureStoreConfig();
+      const { storage, keys } = getSecureStoreConfig();
       if (!storage.listByKeyRange) {
         throw new Error(
           `defineStore(${def.name}): the configured adapter doesn't support perKey range queries (listByKeyRange missing).`,
         );
       }
+      // See `keyedLoadInternal`'s doc comment — same independent lenient lookup,
+      // covers both the ambient `getRange()` wrapper and this method's explicit
+      // callers (e.g. `useKeyedStoreRange.ts`, aggregation sources).
+      const previousCryptoHandle = keys?.getPreviousCryptoHandle?.() ?? null;
       const rows = await storage.listByKeyRange(
         def.name,
         userId,
@@ -802,22 +830,34 @@ function buildKeyedStore<S extends z.ZodType>(
       );
       const results: Array<{ key: string; data: T }> = [];
       for (const { key, record } of rows) {
-        const { data, upgraded } = await decodeWithLegacyFallback<T>({
-          cryptoHandle,
+        const candidates: DecodeCandidate[] = [
+          {
+            cryptoHandle,
+            canonicalAAD: canonicalAADFor(cryptoHandle, key),
+            legacyAAD: def.legacyAAD?.(cryptoHandle, key),
+          },
+        ];
+        if (previousCryptoHandle) {
+          candidates.push({
+            cryptoHandle: previousCryptoHandle,
+            canonicalAAD: canonicalAADFor(previousCryptoHandle, key),
+            legacyAAD: def.legacyAAD?.(previousCryptoHandle, key),
+          });
+        }
+        const { data, upgraded } = await decodeWithCandidates<T>(
+          candidates,
           record,
-          canonicalAAD: canonicalAADFor(cryptoHandle, key),
-          legacyAAD: def.legacyAAD?.(cryptoHandle, key),
-          version: def.version,
+          def.version,
           migrators,
           empty,
-          persistMigrated: (migratedRecord) =>
+          (migratedRecord) =>
             storage.put(
               def.name,
               userId,
               [{ column: keyColumn, value: key }],
               migratedRecord,
             ),
-        });
+        );
         if (upgraded) {
           keyedSave(userId, cryptoHandle, key, data).catch((e) =>
             console.error(
@@ -984,41 +1024,58 @@ function buildCollectionStore<S extends z.ZodType>(
     name: def.name,
     version: def.version,
     async list(userId, cryptoHandle) {
-      const { storage } = getSecureStoreConfig();
+      const { storage, keys } = getSecureStoreConfig();
       if (!storage.list) {
         throw new Error(
           `defineStore(${def.name}): the configured adapter doesn't support 'many' (list missing).`,
         );
       }
+      // See `buildKeyedStore`'s `keyedLoadInternal`/`list` doc comments — same
+      // independent lenient lookup, covers both the ambient `get()` wrapper and
+      // this method's explicit callers.
+      const previousCryptoHandle = keys?.getPreviousCryptoHandle?.() ?? null;
       const rows = await storage.list(def.name, userId, plaintextKeys);
       const results: Array<{ id: string; data: T; hash: string | null }> = [];
       for (const { id, record, plain } of rows) {
-        const { data: encPart, upgraded } = await decodeWithLegacyFallback<
-          Record<string, unknown>
-        >({
-          cryptoHandle,
-          record,
-          canonicalAAD: canonicalAADFor(cryptoHandle, id),
-          legacyAAD: def.legacyAAD?.(cryptoHandle, id),
-          version: def.version,
-          migrators,
-          empty: emptyEncPart,
-          persistMigrated: (migratedRecord) => {
-            if (!storage.updateById) {
-              throw new Error(
-                `defineStore(${def.name}): legacyAAD migration for id=${id} succeeded, but the ` +
-                  `configured adapter doesn't support 'many' (updateById missing) — can't persist it.`,
-              );
-            }
-            return storage.updateById(
-              def.name,
-              userId,
-              id,
-              migratedRecord,
-              plain,
+        const persistMigrated = (migratedRecord: BlobRecord) => {
+          if (!storage.updateById) {
+            throw new Error(
+              `defineStore(${def.name}): legacyAAD/rotation migration for id=${id} succeeded, but the ` +
+                `configured adapter doesn't support 'many' (updateById missing) — can't persist it.`,
             );
+          }
+          return storage.updateById(
+            def.name,
+            userId,
+            id,
+            migratedRecord,
+            plain,
+          );
+        };
+        const candidates: DecodeCandidate[] = [
+          {
+            cryptoHandle,
+            canonicalAAD: canonicalAADFor(cryptoHandle, id),
+            legacyAAD: def.legacyAAD?.(cryptoHandle, id),
           },
-        });
+        ];
+        if (previousCryptoHandle) {
+          candidates.push({
+            cryptoHandle: previousCryptoHandle,
+            canonicalAAD: canonicalAADFor(previousCryptoHandle, id),
+            legacyAAD: def.legacyAAD?.(previousCryptoHandle, id),
+          });
+        }
+        const { data: encPart, upgraded } = await decodeWithCandidates<
+          Record<string, unknown>
+        >(
+          candidates,
+          record,
+          def.version,
+          migrators,
+          emptyEncPart,
+          persistMigrated,
+        );
         const merged = mergeRead(plain, encPart);
         if (upgraded) {
           manyUpdate(userId, cryptoHandle, id, merged as T).catch((e) =>

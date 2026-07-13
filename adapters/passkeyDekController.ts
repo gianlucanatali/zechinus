@@ -107,12 +107,18 @@ export interface PasskeyDekController {
    * persisted by this controller itself — nothing to persist, it re-derives identically
    * every time the same passkey unlocks. */
   getDevicePublicKey(): string | null;
+  /** Matches `KeyProvider.getPreviousCryptoHandle` — present ONLY between
+   * `beginRotation()` and `completeRotationSession()` (or `lock()`). See those two
+   * methods' doc comments. */
+  getPreviousCryptoHandle(): KeyHandle | null;
   subscribe(callback: () => void): () => void;
 
   /** Activates a caller-supplied raw DEK directly — dev/test injection, or after a
    * ceremony that derived the bytes some other way. */
   setDek(userId: string, rawBytes: RawDekBytes): Promise<void>;
-  /** Destroys the current handle (if any) and clears state. Idempotent. */
+  /** Destroys the current handle (if any) and clears state. Idempotent. Also
+   * destroys and clears any in-progress rotation's previous handle — a locked
+   * session must never leak a stale rotation candidate into the next unlock. */
   lock(): void;
 
   /** Refreshes `getSetupStatus()` from storage — "needed" iff zero wraps exist and
@@ -157,6 +163,35 @@ export interface PasskeyDekController {
    * recovery wrap is replaced (storage keeps exactly one recovery wrap per user).
    */
   regenerateRecoveryWords(userId: string): Promise<PendingRecoveryRegeneration>;
+
+  /**
+   * Starts a DEK rotation SESSION for the device driving it (key-custody roadmap
+   * Fase 2.3/E). Builds a `KeyHandle` for `rawNewDekBytes`, promotes it to
+   * `getCryptoHandle()` immediately (every NEW ambient write from this point uses
+   * the new epoch), and keeps the CURRENT handle as `getPreviousCryptoHandle()` —
+   * the read-side fallback every store's ambient read path (`load`/`get`/`list`/
+   * `getRange`) consults so rows the rotation batch (`rotateEpoch`) hasn't reached
+   * yet still decrypt. Requires `getCryptoHandle()` to already be non-null (unlock
+   * first); throws otherwise. Purely a local/session-state operation — the DB-level
+   * rotation guard (`profiles.pending_dek_epoch`, see `dekRotationCoordinator.ts`'s
+   * own `beginRotation`) is a SEPARATE step the orchestrator calls FIRST, before
+   * this one. A device that only RECEIVES an already-rotated DEK via the handshake
+   * (`dekRotationCoordinator.ts`, not the device driving the rotation) never calls
+   * this — it gets the new DEK already resolved and just re-wraps it.
+   */
+  beginRotation(rawNewDekBytes: RawDekBytes): Promise<void>;
+  /**
+   * Ends the rotation session: destroys and clears `getPreviousCryptoHandle()`.
+   * The CURRENT handle (`getCryptoHandle()`) is untouched. Call ONLY after the
+   * orchestrator has verified+retired the old epoch (`checkRetirementEligibility`
+   * eligible, old epoch's wraps deleted) — see this module's top-level doc comment
+   * for the full call order. Deliberately named differently from
+   * `dekRotationCoordinator.ts`'s `completeRotation` (that one is DB-level
+   * bookkeeping — `pending_dek_epoch`/`current_dek_epoch`; this one is local
+   * session state) — never confuse the two. Idempotent: safe to call with no
+   * rotation in progress.
+   */
+  completeRotationSession(): void;
 }
 
 export function createPasskeyDekController(
@@ -165,6 +200,7 @@ export function createPasskeyDekController(
   const { provider, recovery, storage, createHandle } = config;
 
   let cryptoHandle: KeyHandle | null = null;
+  let previousCryptoHandle: KeyHandle | null = null;
   let userId: string | null = null;
   let setupStatus: PasskeySetupStatus = "pending";
   let unlockMethod: UnlockMethod | null = null;
@@ -182,6 +218,10 @@ export function createPasskeyDekController(
     if (cryptoHandle) {
       cryptoHandle.destroy();
       cryptoHandle = null;
+    }
+    if (previousCryptoHandle) {
+      previousCryptoHandle.destroy();
+      previousCryptoHandle = null;
     }
     userId = null;
     unlockMethod = null;
@@ -214,6 +254,7 @@ export function createPasskeyDekController(
     getUnlockMethod: () => unlockMethod,
     getUnlockCredentialId: () => unlockCredentialId,
     getDevicePublicKey: () => devicePublicKey,
+    getPreviousCryptoHandle: () => previousCryptoHandle,
     subscribe(callback) {
       listeners.add(callback);
       return () => listeners.delete(callback);
@@ -385,6 +426,31 @@ export function createPasskeyDekController(
         };
       } finally {
         clean(kekRecovery);
+      }
+    },
+
+    async beginRotation(rawNewDekBytes) {
+      if (!cryptoHandle) {
+        throw new Error(
+          "passkeyDekController.beginRotation: no crypto handle currently unlocked — unlock before rotating.",
+        );
+      }
+      const newHandle = await createHandle(rawNewDekBytes);
+      clean(rawNewDekBytes);
+      // Destroy any handle left over from a previous, already-completed rotation
+      // session before overwriting the reference — completeRotationSession()
+      // should always have cleared this, but never leak a KeyHandle either way.
+      if (previousCryptoHandle) previousCryptoHandle.destroy();
+      previousCryptoHandle = cryptoHandle;
+      cryptoHandle = newHandle;
+      notify();
+    },
+
+    completeRotationSession() {
+      if (previousCryptoHandle) {
+        previousCryptoHandle.destroy();
+        previousCryptoHandle = null;
+        notify();
       }
     },
   };

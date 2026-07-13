@@ -32,6 +32,7 @@ function fakeController(): PasskeyDekController & {
     getUnlockMethod: () => null,
     getUnlockCredentialId: () => null,
     getDevicePublicKey: () => null,
+    getPreviousCryptoHandle: () => null,
     subscribe: () => () => {},
     setDek: async (userId, rawBytes) => {
       setDekCalls.push({ userId, bytes: new Uint8Array(rawBytes) });
@@ -52,6 +53,10 @@ function fakeController(): PasskeyDekController & {
     regenerateRecoveryWords: async () => {
       throw new Error("not used in this test");
     },
+    beginRotation: async () => {
+      throw new Error("not used in this test");
+    },
+    completeRotationSession: () => {},
   } as PasskeyDekController & {
     setDekCalls: Array<{ userId: string; bytes: Uint8Array }>;
     lockCalls: number;

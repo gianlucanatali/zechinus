@@ -619,6 +619,131 @@ test("getUnlockMethod: 'passkey' after setDek (dev/test injection path)", async 
   assert.equal(controller.getUnlockMethod(), "passkey");
 });
 
+// --- DEK rotation: beginRotation / getPreviousCryptoHandle / completeRotationSession
+
+test("beginRotation: promotes the new DEK to current, keeps the old one as getPreviousCryptoHandle()", async () => {
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+  const oldHandle = controller.getCryptoHandle();
+  assert.equal(controller.getPreviousCryptoHandle(), null);
+
+  await controller.beginRotation(
+    asRawDekBytes(bytesFromRange(32, (i) => i + 100)),
+  );
+
+  assert.notEqual(controller.getCryptoHandle(), null);
+  assert.notEqual(controller.getCryptoHandle(), oldHandle);
+  assert.equal(controller.getPreviousCryptoHandle(), oldHandle);
+});
+
+test("beginRotation: throws if no DEK is currently unlocked", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await assert.rejects(() =>
+    controller.beginRotation(asRawDekBytes(bytesFromRange(32, (i) => i))),
+  );
+});
+
+test("beginRotation: notifies subscribers", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+  let fired = 0;
+  controller.subscribe(() => fired++);
+
+  await controller.beginRotation(
+    asRawDekBytes(bytesFromRange(32, (i) => i + 100)),
+  );
+  assert.equal(fired, 1);
+});
+
+test("completeRotationSession: destroys the previous handle and clears getPreviousCryptoHandle(), keeps the current one intact", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+  await controller.beginRotation(
+    asRawDekBytes(bytesFromRange(32, (i) => i + 100)),
+  );
+  const currentHandle = controller.getCryptoHandle();
+  assert.notEqual(controller.getPreviousCryptoHandle(), null);
+
+  controller.completeRotationSession();
+
+  assert.equal(controller.getPreviousCryptoHandle(), null);
+  assert.equal(
+    controller.getCryptoHandle(),
+    currentHandle,
+    "the current (new) handle must survive completeRotationSession — only the old one is torn down",
+  );
+});
+
+test("completeRotationSession: idempotent — calling it with no rotation in progress is a no-op", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+  const currentHandle = controller.getCryptoHandle();
+
+  controller.completeRotationSession();
+
+  assert.equal(controller.getPreviousCryptoHandle(), null);
+  assert.equal(controller.getCryptoHandle(), currentHandle);
+});
+
+test("lock: also clears getPreviousCryptoHandle() — a locked session must never leak a stale rotation candidate", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  });
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
+  );
+  await controller.beginRotation(
+    asRawDekBytes(bytesFromRange(32, (i) => i + 100)),
+  );
+  assert.notEqual(controller.getPreviousCryptoHandle(), null);
+
+  controller.lock();
+
+  assert.equal(controller.getPreviousCryptoHandle(), null);
+});
+
 test("checkSetupNeeded: a different uid must never reuse a handle unlocked for someone else", async () => {
   const storage = memoryWrapStorage();
   const controller = createPasskeyDekController({
