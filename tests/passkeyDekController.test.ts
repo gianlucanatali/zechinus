@@ -858,6 +858,57 @@ test("unlockWithPasskey: two rows for the same credential (old + new epoch) reco
   );
 });
 
+test("unlockWithPasskey: a corrupted/undecodable previous-epoch row never fails the unlock — current epoch still activates, getPreviousCryptoHandle() stays null", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+
+  // Current-epoch row: wrapped under the credential's REAL kek, decodes fine.
+  const credentialId = "cred-1";
+  const prfOutput = await provider.getPRFOutput(credentialId);
+  const kek = provider.deriveKEKFromPRF(prfOutput);
+  const currentBytes = asRawDekBytes(bytesFromRange(32, (i) => i + 50));
+  await storage.savePasskeyWrap(
+    "user-1",
+    credentialId,
+    wrapKey(kek, currentBytes),
+    2,
+  );
+
+  // Previous-epoch row: wrapped under a DIFFERENT kek (a different
+  // credential's PRF-derived key) — a genuine GCM auth-tag mismatch when
+  // unlockWithPasskey later tries to unwrap it with the real credential's
+  // kek, not a mocked/forced throw.
+  const wrongPrfOutput = await provider.getPRFOutput("cred-2");
+  const wrongKek = provider.deriveKEKFromPRF(wrongPrfOutput);
+  const previousBytes = asRawDekBytes(bytesFromRange(32, (i) => i));
+  await storage.savePasskeyWrap(
+    "user-1",
+    credentialId,
+    wrapKey(wrongKek, previousBytes),
+    1,
+  );
+
+  await controller.unlockWithPasskey("user-1", credentialId);
+
+  const expectedCurrent = testCreateHandle(currentBytes);
+  assert.equal(
+    controller.getCryptoHandle()!.pid,
+    expectedCurrent.pid,
+    "current epoch must still activate despite the previous row's decode failure",
+  );
+  assert.equal(
+    controller.getPreviousCryptoHandle(),
+    null,
+    "a previous row that fails to decode must not produce a broken handle",
+  );
+});
+
 test("memoryWrapStorage double: savePasskeyWrap with different dekEpoch for the same credential coexist, never overwrite (mirrors the real 3-column unique constraint)", async () => {
   const storage = memoryWrapStorage();
   await storage.savePasskeyWrap(

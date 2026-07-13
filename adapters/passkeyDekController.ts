@@ -111,9 +111,15 @@ export interface PasskeyDekController {
    * persisted by this controller itself — nothing to persist, it re-derives identically
    * every time the same passkey unlocks. */
   getDevicePublicKey(): string | null;
-  /** Matches `KeyProvider.getPreviousCryptoHandle` — present ONLY between
-   * `beginRotation()` and `completeRotationSession()` (or `lock()`). See those two
-   * methods' doc comments. */
+  /** Matches `KeyProvider.getPreviousCryptoHandle`. Populated by whichever of two
+   * writers ran most recently: (1) `beginRotation()` — cleared by
+   * `completeRotationSession()` or `lock()`, see those two methods' doc comments;
+   * or (2) `unlockWithPasskey()` — when a second, older-epoch `passkey_key_wraps`
+   * row exists for the credential being unlocked (a rotation is mid-flight on this
+   * device), reconstructed straight from that row on disk, independent of whether
+   * THIS session ever calls `beginRotation()`. Either writer's failure to produce
+   * a previous handle leaves this `null`; `unlockWithPasskey()`'s decode failure
+   * on that second row specifically never fails the unlock itself. */
   getPreviousCryptoHandle(): KeyHandle | null;
   subscribe(callback: () => void): () => void;
 
@@ -193,7 +199,11 @@ export interface PasskeyDekController {
    * `dekRotationCoordinator.ts`'s `completeRotation` (that one is DB-level
    * bookkeeping — `pending_dek_epoch`/`current_dek_epoch`; this one is local
    * session state) — never confuse the two. Idempotent: safe to call with no
-   * rotation in progress.
+   * rotation in progress. Note this is NOT the only writer that can leave
+   * `getPreviousCryptoHandle()` non-null — `unlockWithPasskey()` can also
+   * populate it from a pre-existing second wrap row found on disk, without this
+   * session ever calling `beginRotation()`; calling `completeRotationSession()`
+   * still clears it in that case too, same as any other rotation-session teardown.
    */
   completeRotationSession(): void;
 
@@ -349,8 +359,22 @@ export function createPasskeyDekController(
             previousCryptoHandle = await createHandle(
               asRawDekBytes(previousRawBytes),
             );
-          } catch {
-            // Ignore — see comment above.
+            // beginRotation/completeRotationSession both notify() on every
+            // previousCryptoHandle mutation — mirror that here so subscribers
+            // (e.g. usePasskeyDek's useSyncExternalStore binding) re-read
+            // state now that getPreviousCryptoHandle() went non-null. This
+            // fires AFTER activate()'s own notify() above, as a second,
+            // separate state transition.
+            notify();
+          } catch (e) {
+            // Never fails the whole unlock — see comment above. Still must
+            // be observable, not silent (AGENTS.md "never swallow" rule):
+            // mirrors expoDeviceCacheStorage.ts's onPersistError and
+            // onSourceWrite.ts's logFailure, same log-but-don't-throw shape.
+            console.error(
+              `passkeyDekController.unlockWithPasskey: previous-epoch wrap decode failed for credential ${usedCredentialId} — read-side rotation fallback unavailable this session:`,
+              e,
+            );
           }
         }
       } catch {
