@@ -21,6 +21,7 @@ import {
   unwrapKey,
   createKeyHandle,
   asRawDekBytes,
+  generateRawDekBytes,
   bindKeyHandleFactory,
 } from "../core/keyDerivation.ts";
 
@@ -29,6 +30,24 @@ function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
   for (let i = 0; i < len; i++) out[i] = fn(i);
   return out;
 }
+
+test("generateRawDekBytes: returns 32 bytes, and two calls never collide", () => {
+  const a = generateRawDekBytes();
+  const b = generateRawDekBytes();
+  assert.equal(a.length, 32);
+  assert.equal(b.length, 32);
+  assert.notDeepEqual(Array.from(a), Array.from(b));
+});
+
+test("generateRawDekBytes: the bytes are directly usable to create a real KeyHandle", () => {
+  const dek = generateRawDekBytes();
+  const handle = createKeyHandle(
+    dek,
+    bytesFromRange(16, (i) => i),
+    "test-pid-info",
+  );
+  assert.equal(typeof handle.pid, "string");
+});
 
 test("deriveKey: matches the golden vector for the legacy PRF→DEK derivation (crypto-roundtrip.ts's deriveKeyFromPRF)", () => {
   const prf = bytesFromRange(32, (i) => (i * 3) % 256);

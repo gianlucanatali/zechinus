@@ -143,6 +143,16 @@ export function asRawDekBytes(bytes: Uint8Array): RawDekBytes {
   return bytes as RawDekBytes;
 }
 
+/**
+ * Generates a fresh 32-byte raw DEK — the same primitive `registerPasskey`
+ * uses internally, exposed for callers outside the controller that need a
+ * brand-new DEK of their own (e.g. the rotation orchestrator generating
+ * DEK_{N+1}).
+ */
+export function generateRawDekBytes(): RawDekBytes {
+  return asRawDekBytes(randomBytes(32));
+}
+
 export interface CreateKeyHandleOptions {
   /**
    * Overrides the default HMAC-SHA256-from-DEK `hashContent` — e.g. to delegate the
