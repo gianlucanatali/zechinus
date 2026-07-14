@@ -38,6 +38,17 @@ export interface UseDevDekInjectionOptions {
   setName?: string;
   /** window property name for clearing. Default `"__clearTestDek"`. */
   clearName?: string;
+  /**
+   * window property name for a programmatic passkey unlock — calls
+   * `controller.unlockWithPasskey(userId, credentialId)` directly, the exact
+   * production unlock path, no bytes injected. For a headless E2E flow that
+   * bypassed a WebAuthn PRF ceremony with a dev-only fixed credential id (see
+   * `src/lib/passkeyPrf.ts`'s `withDevPrfBypass`), this is how a test drives a
+   * REAL re-unlock after a reload — e.g. after a DEK rotation, when the DEK on
+   * disk is a genuinely random value no fixed test DEK could match. Default
+   * `"__testUnlockWithPasskey"`.
+   */
+  unlockName?: string;
   /** Called after `__clearTestDek` runs, e.g. to also clear an app-level cache. */
   onLock?: () => void;
 }
@@ -56,6 +67,7 @@ export function useDevDekInjection(
     enabled = false,
     setName = "__setTestDek",
     clearName = "__clearTestDek",
+    unlockName = "__testUnlockWithPasskey",
     onLock,
   }: UseDevDekInjectionOptions = {},
 ): void {
@@ -87,11 +99,17 @@ export function useDevDekInjection(
       sessionStorage.removeItem(CREDENTIAL_STORAGE_KEY);
       onLock?.();
     };
+    w[unlockName] = async (credentialId: string) => {
+      if (!userId)
+        throw new Error(`${unlockName}: no active user id to unlock for`);
+      await controller.unlockWithPasskey(userId, credentialId);
+    };
     return () => {
       delete w[setName];
       delete w[clearName];
+      delete w[unlockName];
     };
-  }, [enabled, setName, clearName, userId, controller, onLock]);
+  }, [enabled, setName, clearName, unlockName, userId, controller, onLock]);
 
   useEffect(() => {
     if (!enabled) return;
