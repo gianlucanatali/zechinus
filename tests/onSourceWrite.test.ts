@@ -242,15 +242,28 @@ test("CT1: two writes to different months inside the debounce window -> exactly 
       const sorted = [...keys].sort();
       await rebuildMonths(sorted);
     },
-    { debounceMs: 30, coalesce: true },
+    // 150ms, not 30 (CI regression, 2026-07-17): this is the only test in
+    // the file doing two REAL mutate() calls (genuine encrypt+write, not
+    // stubbed) sequentially awaited, expecting them to land inside the same
+    // debounce window — on a slower/more loaded CI runner (likely a
+    // cold-start cost for crypto, the first real use in this file) the two
+    // writes can exceed a 30ms budget, producing 2 handler calls instead of
+    // 1 (never reproduced locally). The coalescing mechanism itself is
+    // correct (onSourceWrite.ts:377-387, reset-on-each-write) — this only
+    // widens the real-time margin, the assertion stays identical (exactly 1
+    // call).
+    { debounceMs: 150, coalesce: true },
   );
 
   await txStore.mutate("2026-03", () => [{ id: "a", amount: 100 }]);
   await txStore.mutate("2026-05", () => [{ id: "b", amount: 50 }]);
 
-  await waitFor(() => handlerCalls.length > 0, 1000);
-  // Give a settle window in case a second (unwanted) call would fire.
-  await new Promise((r) => setTimeout(r, 80));
+  await waitFor(() => handlerCalls.length > 0, 2000);
+  // Force any still-pending debounced write to run now instead of guessing
+  // a settle duration: if the coalescing broke and a second write is still
+  // queued behind its own debounce timer, flush() fires it immediately and
+  // handlerCalls.length becomes 2 right here, deterministically.
+  await unsubscribe.flush();
 
   assert.equal(
     handlerCalls.length,

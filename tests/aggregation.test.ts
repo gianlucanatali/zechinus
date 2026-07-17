@@ -2394,10 +2394,13 @@ test("triggerRecompute: after MAX_BACKGROUND_RETRIES consecutive failures, the b
   // .finally) before checking whether a 5th retry got scheduled.
   await settle(200);
 
-  // Wait well past the point a 5th attempt would have fired if the cap didn't
-  // exist (the 3rd retry's own delay was 8000ms — this margin is comfortably
-  // longer), then confirm the count is STILL exactly 4.
-  await settle(4_000);
+  // Verify the REAL condition — no aggregation anywhere has a compute in
+  // flight or a backoff retry armed — instead of guessing a fixed duration
+  // "probably long enough" for a 5th attempt to have fired if the cap
+  // didn't exist. isAnyAggregationComputing() reflects both
+  // globalInFlightCount and globalPendingDebounceCount (aggregation.ts),
+  // so this only resolves once the retry loop has genuinely gone idle.
+  await waitFor(() => !isAnyAggregationComputing(), 15_000);
   assert.equal(
     attemptCount,
     4,
@@ -2424,6 +2427,38 @@ test("triggerRecompute: after MAX_BACKGROUND_RETRIES consecutive failures, the b
     finalState.error!.message,
     /persistently broken external/,
     "the surfaced error must reflect the actual last failure, not a generic/empty message",
+  );
+
+  // Regression (2026-07-17): the get() above sees envelope.data===null with
+  // nothing inFlight, so triggerRecompute() fires one more, brand-new
+  // attempt in the background (aggregation.ts:1258-1263 — correct behavior
+  // for the real app: an explicit get() must be able to retry), uncoordinated
+  // with the get() call itself (which returns immediately, same
+  // fire-and-forget contract as the very first get() on line 2385). Without
+  // also waiting for THIS attempt to settle, the test finished with a
+  // background compute still pending — which then fired during a LATER
+  // test's beforeEach (this file, or another one if `node --test` runs files
+  // concurrently), finding __resetSecureStoreConfig() already called and
+  // failing with "framework not configured", polluting unrelated tests'
+  // logs/isolation.
+  // attemptCount only reaches 5 (not a fresh 4-attempt cycle): consecutiveBackgroundFailures
+  // (aggregation.ts:1128/1175) is a lifetime counter for this aggregation
+  // instance, reset only on a SUCCESSFUL compute — never on a fresh top-level
+  // get() call. It is already pinned at MAX_BACKGROUND_RETRIES from the first
+  // cycle, so this attempt's failure evaluates `consecutiveBackgroundFailures
+  // < MAX_BACKGROUND_RETRIES` as false and schedules no further retry — by
+  // design, so that an app calling get() repeatedly against a persistently
+  // broken aggregation can't reset the counter into an effectively unbounded
+  // retry loop. Same real-condition check as above — wait for genuinely idle,
+  // not a guessed duration — so this test itself never leaves anything
+  // pending for the next test's beforeEach to collide with.
+  await waitFor(() => attemptCount === 5, 15_000);
+  await waitFor(() => !isAnyAggregationComputing(), 15_000);
+  assert.equal(
+    attemptCount,
+    5,
+    "a get()-triggered retry after the cap is already reached must fire exactly " +
+      "one attempt, never a fresh full retry cycle",
   );
 });
 
