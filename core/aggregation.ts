@@ -609,7 +609,19 @@ export function defineAggregation<
     // rerun) still surface their failure — never a silent catch — mirroring the existing
     // `secure-store(...): ... lazy upgrade failed` pattern in store.ts. The error is ALSO
     // captured in `lastError` for a subsequent `get()`/binding to see.
-    console.error(`defineAggregation(${name}): ${context}:`, e);
+    // `ColdAggregationSourceError` is a KNOWN, self-healing transient (see its own doc
+    // comment in `core/errors.ts`) — not a real failure an operator needs to act on, so it
+    // goes to `console.warn` instead of `console.error` (same severity convention the app
+    // already uses for expected-but-noteworthy conditions, e.g. `DashboardTour.tsx`'s
+    // `markTourSeen failed`), and logs only its own already-descriptive `message` — no
+    // `Error` object, so no stack trace noise for a case that isn't a bug to chase down.
+    // Anything else is a genuine failure: stays `console.error` with the full `Error`
+    // object (stack included), since that IS what a real failure needs for debugging.
+    if (e instanceof ColdAggregationSourceError) {
+      console.warn(`defineAggregation(${name}): ${context}: ${e.message}`);
+    } else {
+      console.error(`defineAggregation(${name}): ${context}:`, e);
+    }
   }
 
   function scheduleDebouncedRecompute(): void {

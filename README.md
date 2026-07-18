@@ -888,6 +888,12 @@ timeout, and make sure any UI reading such an aggregation treats `data === null`
 "unknown yet", not "confirmed empty" (`src/pages/Dashboard.tsx`'s `isCompletelyEmpty`
 is the reference fix for this exact gotcha).
 
+This cold-start throw is logged via `console.warn` (message only, no `Error` object/stack)
+rather than `console.error` — `logBackgroundFailure` (`core/aggregation.ts`) special-cases
+`ColdAggregationSourceError` specifically, since it is expected and self-healing, not a
+failure an operator needs to chase down. Every other background-recompute failure still
+goes to `console.error` with the full `Error` object (stack included).
+
 ### Declarative operator kit — `datacloak/aggregate`
 
 A second, declarative form for `compute`, alongside the plain-function form used by every

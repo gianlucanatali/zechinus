@@ -1048,13 +1048,15 @@ test(
       },
     });
 
-    // Intercept console.error (the channel `logBackgroundFailure` uses for every
-    // fire-and-forget background failure) so this test can prove the cold cascade fails
-    // AT MOST ONCE per intermediate level — never a retry storm — instead of merely
-    // trusting that it eventually converges.
+    // Intercept console.warn (the channel `logBackgroundFailure` routes
+    // `ColdAggregationSourceError` to specifically, since it's a known self-healing
+    // transient — see that error type's own doc comment in `core/errors.ts` — never
+    // `console.error`, which stays reserved for genuine failures) so this test can prove
+    // the cold cascade fails AT MOST ONCE per intermediate level — never a retry storm —
+    // instead of merely trusting that it eventually converges.
     const loggedErrors: unknown[] = [];
-    const originalConsoleError = console.error;
-    console.error = (...args: unknown[]) => {
+    const originalConsoleWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
       loggedErrors.push(args);
     };
 
@@ -1127,8 +1129,12 @@ test(
       // Exactly one failed FIRST attempt each for C (reading a still-empty A) and D
       // (reading a still-empty C) is the expected, self-healing shape — more than one
       // each would mean an uncontrolled retry storm rather than a clean one-shot cascade.
+      // `console.warn` here is called with a single already-formatted string (no
+      // trailing `Error` object — see `logBackgroundFailure`'s doc comment), so the
+      // message lives in args[0], not args[1] like a two-arg `console.error(prefix, e)`
+      // call would.
       const noPersistedValueErrors = loggedErrors.filter((args) =>
-        String((args as unknown[])[1] ?? "").includes(
+        String((args as unknown[])[0] ?? "").includes(
           "has no persisted value yet",
         ),
       );
@@ -1140,7 +1146,7 @@ test(
           "swallowed instead of surfacing)",
       );
     } finally {
-      console.error = originalConsoleError;
+      console.warn = originalConsoleWarn;
     }
   },
 );
