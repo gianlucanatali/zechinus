@@ -5,6 +5,7 @@
   "description": "End-to-end encryption as an adapter layer, for apps that already own their backend. See README.md.",
   "type": "module",
   "license": "MIT",
+  "files": ["dist", "scripts"],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
