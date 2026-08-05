@@ -6,15 +6,35 @@
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./index.ts",
-    "./react": "./react/index.ts",
-    "./node": "./node/index.ts",
-    "./aggregate": "./aggregate/index.ts",
-    "./adapters/*": "./adapters/*",
-    "./core/*": "./core/*"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "import": "./dist/react/index.js"
+    },
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "import": "./dist/node/index.js"
+    },
+    "./aggregate": {
+      "types": "./dist/aggregate/index.d.ts",
+      "import": "./dist/aggregate/index.js"
+    },
+    "./adapters/*.ts": {
+      "types": "./dist/adapters/*.d.ts",
+      "import": "./dist/adapters/*.js"
+    },
+    "./core/*.ts": {
+      "types": "./dist/core/*.d.ts",
+      "import": "./dist/core/*.js"
+    }
   },
   "sideEffects": false,
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "test": "tsx --test 'tests/**/*.test.ts'",
     "test:react": "vitest run",
     "test:all": "npm run test && npm run test:react",
