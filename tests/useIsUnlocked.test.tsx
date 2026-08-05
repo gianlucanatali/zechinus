@@ -1,6 +1,6 @@
 /**
  * Tests the React binding (`useIsUnlocked`). Needs jsdom + React rendering — runs
- * under Vitest (`npm run test:components`), unlike the rest of datacloak/'s tests
+ * under Vitest (`npm run test:components`), unlike the rest of zechinus/'s tests
  * which run under plain `node --test` (see config/vitest.config.ts).
  */
 import { describe, it, expect, afterEach } from "vitest";

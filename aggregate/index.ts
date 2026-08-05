@@ -1,15 +1,15 @@
 /**
- * `datacloak/aggregate` — public entry point for the declarative operator kit (Task 3
+ * `zechinus/aggregate` — public entry point for the declarative operator kit (Task 3
  * of the "aggregazioni dichiarative persistite" plan): a SECOND, declarative form of
  * `defineAggregation`'s `compute` field, alongside the pure-function form `core/
- * aggregation.ts` already accepted. Standalone sub-entry, same pattern as `datacloak/
- * react` and `datacloak/node` — importing `datacloak` for just `defineStore`/
+ * aggregation.ts` already accepted. Standalone sub-entry, same pattern as `zechinus/
+ * react` and `zechinus/node` — importing `zechinus` for just `defineStore`/
  * `defineAggregation` never pulls this in, and vice versa.
  *
  * Usage (see the plan's target example):
  *
  * ```ts
- * import * as agg from "datacloak/aggregate";
+ * import * as agg from "zechinus/aggregate";
  *
  * defineAggregation({
  *   // ...

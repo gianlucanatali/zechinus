@@ -1,5 +1,5 @@
 /**
- * Wire format for a `BlobRecord.blob` string — pure serialization, no crypto. DataCloak
+ * Wire format for a `BlobRecord.blob` string — pure serialization, no crypto. Zechinus
  * decides what a stored ciphertext string looks like (`enc:` prefix + JSON), so it owns
  * this format; the actual AES-GCM encryption stays entirely behind `CryptoHandle`
  * (`core/types.ts`) — the app's own concern, however it derives its DEK.

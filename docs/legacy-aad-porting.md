@@ -1,7 +1,7 @@
 # Porting an existing table (legacy AAD)
 
 Read this only when porting an existing table that already has data encrypted under a
-different AAD convention than DataCloak's canonical one — omit entirely for a brand-new
+different AAD convention than Zechinus's canonical one — omit entirely for a brand-new
 store.
 
 Declare `legacyAAD: (dek, rowKey) => ({...})` on `defineStore` — a function returning the

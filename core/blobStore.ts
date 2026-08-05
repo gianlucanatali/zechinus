@@ -56,7 +56,7 @@ export interface BlobStoreDef<T> {
    */
   legacyAAD?: (cryptoHandle: CryptoHandle) => LegacyAADCandidates;
   /**
-   * Set `true` if this table has a `content_hash` column — DataCloak computes it
+   * Set `true` if this table has a `content_hash` column — Zechinus computes it
    * internally as a keyed HMAC-SHA256 of the plaintext envelope (see
    * `keyDerivation.ts`'s `hashContent`), so the server only ever sees an opaque
    * string, never a plain fingerprint of the content.

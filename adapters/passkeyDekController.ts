@@ -20,7 +20,7 @@
  * `getCryptoHandle()`/`subscribe()` already satisfy the `KeyProvider` port, and the plain
  * subscribe-based state shape works identically from a React `useSyncExternalStore`
  * hook, a Vue `ref` + watcher, a Svelte store, or a vanilla JS event listener — see
- * `datacloak/react/usePasskeyDek.ts` for the (thin) React binding.
+ * `zechinus/react/usePasskeyDek.ts` for the (thin) React binding.
  */
 import { unwrapKey, wrapKey, type KeyHandle } from "../core/keyDerivation.ts";
 import { asRawDekBytes, type RawDekBytes } from "../core/keyDerivation.ts";

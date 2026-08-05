@@ -18,7 +18,7 @@
   "include": ["."],
   // adapters/expoDeviceCacheStorage.ts imports expo-secure-store/expo-file-system,
   // which npm workspace hoisting places only in mobile/node_modules — unresolvable
-  // from a repo-root `tsc -p datacloak/tsconfig.json` run. See that file's own doc
+  // from a repo-root `tsc -p zechinus/tsconfig.json` run. See that file's own doc
   // comment for how/when it gets real typecheck coverage instead.
   "exclude": ["node_modules", "adapters/expoDeviceCacheStorage.ts"]
 }

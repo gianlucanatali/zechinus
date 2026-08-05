@@ -1,6 +1,6 @@
 /**
- * DataCloak React binding — separate sub-entry (`datacloak/react`) so importing the
- * core (`datacloak`) never pulls React into a non-React consumer's module graph.
+ * Zechinus React binding — separate sub-entry (`zechinus/react`) so importing the
+ * core (`zechinus`) never pulls React into a non-React consumer's module graph.
  */
 export { useStore, type UseStoreResult } from "./useStore.ts";
 export { useIsUnlocked } from "./useIsUnlocked.ts";

@@ -1,6 +1,6 @@
 /**
  * QueryClient is plain JS (no DOM), so this runs under `node --test` like the rest
- * of datacloak/'s non-React tests — only the hook itself (`useStore`) needs jsdom.
+ * of zechinus/'s non-React tests — only the hook itself (`useStore`) needs jsdom.
  */
 import assert from "node:assert/strict";
 import test from "node:test";

@@ -1,5 +1,5 @@
 /**
- * Runs the examples in `datacloak/examples/basic-usage.ts` and checks the result.
+ * Runs the examples in `zechinus/examples/basic-usage.ts` and checks the result.
  * This test is what makes the examples "living documentation": if the API's
  * behavior changes without the examples/README being updated, this test breaks.
  */

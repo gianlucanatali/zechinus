@@ -1,5 +1,5 @@
 /**
- * defineStore — public API of the DataCloak secure-store framework.
+ * defineStore — public API of the Zechinus secure-store framework.
  *
  * The author declares the data *shape* with Zod, the *cardinality*, and *what to
  * encrypt*; the framework owns all the mechanics (crypto, AAD, envelope,
@@ -56,7 +56,7 @@ import {
  * session identity `getCryptoHandle()` already comes from — `passkeyDekController`
  * sets/clears both together, synchronously, never one without the other). A caller
  * needing a DIFFERENT identity (dev/test tooling, scripts) still has `load`/`save`,
- * which keep taking both explicitly — or `withIdentity()` from `datacloak/node`.
+ * which keep taking both explicitly — or `withIdentity()` from `zechinus/node`.
  *
  * NOT exported from the public barrel: if a service needs this directly, that's
  * a sign `defineStore` is missing an ambient wrapper for whatever it's doing
@@ -118,7 +118,7 @@ export interface StoreDef<S extends z.ZodType> {
   /**
    * For PORTING an existing table only — omit entirely for a brand-new store (the
    * vast majority of stores never set this). A function reconstructing the OLD
-   * (pre-DataCloak) AAD shape for a given row — `rowKey` is `cryptoHandle.pid` for `perUser`,
+   * (pre-Zechinus) AAD shape for a given row — `rowKey` is `cryptoHandle.pid` for `perUser`,
    * the domain key for `perKey`, the row id for `many`. Returns either ONE `FieldAAD`
    * (the common case) or an ORDERED `FieldAAD[]` when the table has been through MORE
    * THAN ONE historical AAD convention (e.g. a table rename on top of an even older
@@ -139,7 +139,7 @@ export interface StoreDef<S extends z.ZodType> {
   ) => LegacyAADCandidates;
   migrators?: BlobMigrator[];
   /**
-   * Set `true` if this table has a `content_hash` column — DataCloak computes it
+   * Set `true` if this table has a `content_hash` column — Zechinus computes it
    * internally as a keyed HMAC-SHA256 of the plaintext envelope (the DEK-derived MAC
    * key lives in the `CryptoHandle`, see `keyDerivation.ts`'s `hashContent`), so the
    * server only ever sees an opaque, non-fingerprintable string, never a plain hash
@@ -156,7 +156,7 @@ export interface StoreDef<S extends z.ZodType> {
   /**
    * Only relevant for `identity: "many"`. Overrides the default row id generator
    * (`core/randomId.ts`, RFC4122 UUIDv4). A consumer wanting sortable ids (ULID,
-   * a timestamp-prefixed scheme, ...) supplies its own `() => string` — DataCloak
+   * a timestamp-prefixed scheme, ...) supplies its own `() => string` — Zechinus
    * only needs the result to be unique per (userId, collection), it never inspects
    * the id's shape.
    */
@@ -211,7 +211,7 @@ export interface Store<T> {
    * exactly one active (cryptoHandle, userId) pair per session, set/cleared together —
    * a caller needing a DIFFERENT one — dev/test tooling, scripts — still has
    * `load`/`save`, which keep taking both explicitly, or `withIdentity()` from
-   * `datacloak/node`). Business logic that
+   * `zechinus/node`). Business logic that
    * only needs to transform data never has to know the framework has a cryptoHandle or
    * an identity at all. Throws if no `KeyProvider` is configured, or if the
    * session is locked (no active cryptoHandle/userId).
@@ -490,7 +490,7 @@ export function defineStore<
   // change the schema, not months later staring at production data.
   // Covers only "bumped version but forgot the migrator" — does NOT cover "changed
   // the shape without bumping version at all" (only Zod catches that, on read, on
-  // old data that no longer validates — see datacloak/README.md).
+  // old data that no longer validates — see zechinus/README.md).
   const requiredMigrators = def.version - 1;
   if (migrators.length !== requiredMigrators) {
     throw new Error(
@@ -627,7 +627,7 @@ interface BuildContext<S extends z.ZodType> {
 /**
  * Cache key for a keyed store's per-`(store,user)` write counter — bumped by
  * `buildKeyedStore`'s ambient `set()`/`mutate()` on every write, regardless of
- * which key changed. `useKeyedStoreRange` (`datacloak/react`) subscribes to this
+ * which key changed. `useKeyedStoreRange` (`zechinus/react`) subscribes to this
  * key to know when an already-fetched range might be stale; exported so the
  * React binding computes the exact same string, never duplicated by hand.
  */
@@ -642,7 +642,7 @@ export function keyedRangeEpochCacheKey(
  * Cache key holding the domain key(s) touched by the MOST RECENT ambient keyed
  * write (`set()`/`mutate()`/`createMany()`) — overwritten (not appended) on every
  * write, unlike `keyedRangeEpochCacheKey`'s plain counter. `onSourceWrite`
- * (`datacloak/core/onSourceWrite.ts`) is the one consumer: the epoch counter alone
+ * (`zechinus/core/onSourceWrite.ts`) is the one consumer: the epoch counter alone
  * tells a listener "something in this store changed", never WHICH key, and
  * `onSourceWrite`'s whole contract (`{ keys: string[] }`) needs the latter. Safe to
  * read as "last write's keys, not yet lost" because `CacheAdapter.subscribe`'s

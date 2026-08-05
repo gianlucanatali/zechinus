@@ -1,5 +1,5 @@
 /**
- * `datacloak/aggregate` — descriptor factories for the SECOND, declarative form of
+ * `zechinus/aggregate` — descriptor factories for the SECOND, declarative form of
  * `defineAggregation`'s `compute` field (see `core/aggregation.ts`'s `ComputeFn` doc
  * comment). Calling `sum(...)`/`sumWith(...)`/`expr(...)`/`lastDelta(...)`/`custom(...)`
  * does NOT compute anything — each just returns a plain descriptor object; `compile.ts`'s

@@ -4,7 +4,7 @@
  * `node --test` — that's covered by the consuming app's own E2E suite. What's tested
  * here is the part that doesn't touch the browser: config is threaded correctly into
  * the underlying `deriveKey` call, verified against the same fixed-input regression
- * vector used for `datacloak/tests/keyDerivation.test.ts`.
+ * vector used for `zechinus/tests/keyDerivation.test.ts`.
  */
 import assert from "node:assert/strict";
 import test from "node:test";

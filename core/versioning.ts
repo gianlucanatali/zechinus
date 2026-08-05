@@ -1,5 +1,5 @@
 /**
- * Versioning + lazy upgrade of encrypted blobs (part of the DataCloak framework).
+ * Versioning + lazy upgrade of encrypted blobs (part of the Zechinus framework).
  *
  * The version is embedded INSIDE the encrypted payload (toEnvelope/fromEnvelope):
  * AES-GCM guarantees its integrity, so it's authenticated. The DB column

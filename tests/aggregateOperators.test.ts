@@ -1,5 +1,5 @@
 /**
- * `datacloak/aggregate` — the declarative operator kit (Task 3 of the "aggregazioni
+ * `zechinus/aggregate` — the declarative operator kit (Task 3 of the "aggregazioni
  * dichiarative persistite" plan): `sum`, `sumWith`, `expr`, `lastDelta`, `custom`.
  *
  * Each operator is a plain descriptor (no computation happens when you call `agg.sum(...)`

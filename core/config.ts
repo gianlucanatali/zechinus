@@ -1,5 +1,5 @@
 /**
- * DataCloak config singleton (IoC model, Spring-style).
+ * Zechinus config singleton (IoC model, Spring-style).
  *
  * The app calls `configureSecureStore(...)` ONCE at bootstrap, wiring the concrete
  * adapters (storage, and later cache/keys). Stores fetch the config lazily at

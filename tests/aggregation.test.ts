@@ -1072,7 +1072,7 @@ test(
           "never throw synchronously to the caller",
       );
 
-      // Bounded poll: the engine mechanics (read `datacloak/core/aggregation.ts`)
+      // Bounded poll: the engine mechanics (read `zechinus/core/aggregation.ts`)
       // predict convergence in exactly 3 rounds — A's own first compute (no aggregation
       // sources of its own, so it can never throw on this path) succeeds immediately;
       // A's persist-and-publish (`computeAndPersist`'s `cache?.set` at the end) wakes
@@ -2034,7 +2034,7 @@ test('keyColumn: omitted -> defaults to the literal column "key" (Task 1-4 backw
 
 // ─── invalidateOn / invalidateChannel — externals sourced from non-Store data ──
 //
-// An `external` can depend on data DataCloak has no write-interception hook for
+// An `external` can depend on data Zechinus has no write-interception hook for
 // at all (a plaintext table read via a plain REST call, e.g. "which account ids
 // currently exist") — no source ever changes when that data changes, so nothing
 // naturally marks the aggregation stale before its TTL expires. `invalidateOn`

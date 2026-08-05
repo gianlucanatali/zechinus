@@ -13,7 +13,7 @@ headings), this is just "when do I reach for which":
   duplicating the reaction's own logic at the call site. Never build a second "rebuild"
   call site in app code for this — that's exactly what `flush()` replaces.
 - **`ExternalInput.invalidateOn` / `invalidateChannel(name)`** (`core/aggregation.ts`) —
-  an `external` whose data lives OUTSIDE any DataCloak `Store` (a plaintext table read
+  an `external` whose data lives OUTSIDE any Zechinus `Store` (a plaintext table read
   via plain REST, e.g. "which account ids exist") has no write-interception hook at all;
   nothing marks the aggregation stale until the external's own `ttlMs` expires. Declare
   the channel(s) the external depends on, then call `invalidateChannel(name)` ONCE, at
@@ -58,7 +58,7 @@ and never mounts a real `useQuery` observer — every entry it creates has zero 
 for its whole life. TanStack schedules that entry's garbage collection unconditionally at
 creation time (a separate axis from `staleTime`) and evicts it once `gcTime` elapses, no
 matter how many times it was refreshed in between. With the default 5-minute `gcTime`,
-cached decrypted data silently disappears from every DataCloak-backed hook after that long
+cached decrypted data silently disappears from every Zechinus-backed hook after that long
 of the consuming app sitting idle — no error, since `CacheAdapter` has no "refetch" concept
 for a caller to notice or recover from. This is a real bug that shipped once (the host app's
 Dashboard going blank after ~5 minutes idle, filling again only on remount).

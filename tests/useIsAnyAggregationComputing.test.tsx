@@ -1,7 +1,7 @@
 /**
  * Tests the React binding (`useIsAnyAggregationComputing`). Needs jsdom + React
  * rendering — runs under Vitest (`npm run test:components`), unlike the rest of
- * datacloak/'s tests which run under plain `node --test` (see config/vitest.config.ts).
+ * zechinus/'s tests which run under plain `node --test` (see config/vitest.config.ts).
  *
  * The underlying signal (`isAnyAggregationComputing`/`subscribeGlobalAggregationActivity`,
  * `core/aggregation.ts`) has no test-only setter — it's only ever driven by a real

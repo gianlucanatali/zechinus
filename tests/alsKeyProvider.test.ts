@@ -1,8 +1,8 @@
 /**
- * `alsKeyProvider`/`withIdentity` (`datacloak/node`) — the AsyncLocalStorage-backed
+ * `alsKeyProvider`/`withIdentity` (`zechinus/node`) — the AsyncLocalStorage-backed
  * `KeyProvider` for Node scripts that must handle multiple users concurrently
  * (unlike `configureSecureStore`'s single module-level identity, safe only for a
- * browser tab with exactly one active user). See `datacloak/node/index.ts` for the
+ * browser tab with exactly one active user). See `zechinus/node/index.ts` for the
  * full rationale.
  */
 import assert from "node:assert/strict";

@@ -9,7 +9,7 @@
  * from whatever was persisted in a previous session, so a cold app launch can paint
  * from last-known data before any network round trip completes.
  *
- * IMPORTANT — this is a DEVICE-LOCAL encryption layer, orthogonal to DataCloak's own
+ * IMPORTANT — this is a DEVICE-LOCAL encryption layer, orthogonal to Zechinus's own
  * E2E encryption (the per-user DEK / AAD machinery in `core/crypto.ts`). The cache
  * already holds DECRYPTED (plaintext) values by the time `store.ts` calls
  * `cache.set()` (see `core/store.ts`'s `loadRevalidated`) — persisting that to disk
@@ -48,7 +48,7 @@ export interface DeviceKeyStore {
  * `expo-file-system` (SecureStore alone has a per-item size limit unsuited to
  * arbitrary decrypted payloads — see `expoDeviceCacheStorage.ts`). Ciphertext is
  * opaque to this port: it never sees the plaintext cache key's semantics, only the
- * opaque string DataCloak's core already constructs (`<storeName>:<userId>`).
+ * opaque string Zechinus's core already constructs (`<storeName>:<userId>`).
  * `readAll()` returning `{}` is a legitimate "nothing persisted yet" state, never
  * an error.
  */

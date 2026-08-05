@@ -1,7 +1,7 @@
 # Capability reference — existing hooks & `KeyProvider` implementations
 
 Read this when you need to know what already exists before wiring a new component/service
-to DataCloak — not a "don't build this" list (see `AGENTS.md` § "Known v1 boundaries" for
+to Zechinus — not a "don't build this" list (see `AGENTS.md` § "Known v1 boundaries" for
 that), just what's already shipped.
 
 - React binding exists for all 3 cardinalities (`useStore`/`useKeyedStore`/
@@ -17,7 +17,7 @@ that), just what's already shipped.
   - its React binding `usePasskeyDek` (the full passkey+BIP39-recovery ceremony —
     register/unlock/add-passkey/regenerate-recovery-words — the host app's actual production
     `KeyProvider`, bridged into `PasskeyContext`/`UserContext`; see README's own section for
-    the pointer), and `alsKeyProvider` (`datacloak/node`, `AsyncLocalStorage`-backed, for Node
+    the pointer), and `alsKeyProvider` (`zechinus/node`, `AsyncLocalStorage`-backed, for Node
     scripts/services — see `docs/node-multi-user.md`). Whatever a _future_ implementation
     looks like must not assume a browser: React Native needs a different
     `getCryptoHandle`/`getUserId`/`subscribe` behind native passkey/biometrics, but the port

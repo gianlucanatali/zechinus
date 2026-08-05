@@ -7,7 +7,7 @@ import { migrateLegacyAAD } from "../core/legacyMigration.ts";
 import type { BlobRecord, FieldAAD } from "../core/types.ts";
 
 function oldAAD(userId: string, yearMonth: string): FieldAAD {
-  // Historical convention this table used before it was ported to DataCloak.
+  // Historical convention this table used before it was ported to Zechinus.
   return {
     userId,
     table: "transaction_blobs",
@@ -16,7 +16,7 @@ function oldAAD(userId: string, yearMonth: string): FieldAAD {
   };
 }
 function newAAD(userId: string, yearMonth: string): FieldAAD {
-  // DataCloak's canonical perKey convention (field is always "data").
+  // Zechinus's canonical perKey convention (field is always "data").
   return {
     userId,
     table: "transaction_blobs",

@@ -1,23 +1,23 @@
-# DataCloak — secure-store framework
+# Zechinus — secure-store framework
 
-**Read this before writing, reading, or extending code inside `datacloak/`, when a
+**Read this before writing, reading, or extending code inside `zechinus/`, when a
 consuming app needs to persist encrypted user data via `defineStore`/`defineLabelDict`,
 OR before writing/editing any AAD, envelope, encrypt/decrypt, or storage-upsert logic in
-the consuming app — that logic almost always belongs in DataCloak, not inline.**
+the consuming app — that logic almost always belongs in Zechinus, not inline.**
 
 This file is the tool-agnostic guide: any AI coding agent (Claude Code, Codex, Cursor,
 etc.) or human contributor can read it directly, with no dependency on any one tool's
-folder conventions. It ships inside `datacloak/` on purpose, so it travels with the
+folder conventions. It ships inside `zechinus/` on purpose, so it travels with the
 package if/when it's extracted as a standalone repo.
 
-DataCloak is an E2E encryption layer: the app declares data **shape** (Zod schema) +
-**cardinality** (`perUser` / `perKey` / `many`) + **what stays plaintext**; DataCloak owns
+Zechinus is an E2E encryption layer: the app declares data **shape** (Zod schema) +
+**cardinality** (`perUser` / `perKey` / `many`) + **what stays plaintext**; Zechinus owns
 all the mechanics (AAD, envelope, versioning, validation, I/O). It is NOT an auth system —
-the host app's existing auth handles login; DataCloak only encrypts data at rest after
+the host app's existing auth handles login; Zechinus only encrypts data at rest after
 authentication.
 
 **Read `README.md` first.** It is the source of truth for the current public API and v1
-scope boundaries. This guide is a checklist for using/extending DataCloak correctly — it
+scope boundaries. This guide is a checklist for using/extending Zechinus correctly — it
 does not replace the README, and it can go stale faster than the code (see "Keeping this
 guide honest" below), so when in doubt, re-derive from the README and the code, not from
 memory of a past session.
@@ -28,8 +28,8 @@ names.** No exceptions, even for a quick one-liner comment.
 ## Package boundary — `docs/package-boundary.md`
 
 Read that file before adding an export, touching `index.ts`/`react/index.ts`, or adding a
-new adapter file. Gist: never import `datacloak`/`datacloak/*` (own package name) from
-inside `datacloak/` — always relative paths; `npm run datacloak:typecheck` catches a
+new adapter file. Gist: never import `zechinus`/`zechinus/*` (own package name) from
+inside `zechinus/` — always relative paths; `npm run zechinus:typecheck` catches a
 violation. The bare barrel (`index.ts`) exports only `core/` — never an adapter.
 
 ## Reflection checkpoint
@@ -38,19 +38,19 @@ Before writing AAD, envelope, versioning, or storage-upsert logic **anywhere in 
 consuming app** — not just inside this package — stop and classify it:
 
 - **Generic** (any store could need this: a new cardinality, a new way to address rows) →
-  it belongs **inside DataCloak itself** (`core/`), as a new capability with a TDD test in
+  it belongs **inside Zechinus itself** (`core/`), as a new capability with a TDD test in
   `tests/`. Do not build it as a one-off in the calling service.
 - **App-specific but still storage/crypto mechanics** (not domain logic) → it belongs as an
   **adapter or extension behind an existing port** (`StorageAdapter`, `CacheAdapter`, or
   `KeyProvider`) — still not inline in the service.
 - **Actual domain logic** (validation rules, business decisions, what a field means) → that
-  one genuinely belongs in the calling service, outside DataCloak.
+  one genuinely belongs in the calling service, outside Zechinus.
 
 The tell that you're about to violate this: you're about to write `{userId, table, field,
 rowId}` AAD, manual field-level encrypt/decrypt serialization, or a manual
 `upsert(..., { onConflict })` in a service file, for a table this package doesn't manage
 yet. That's exactly what `defineStore` replaces — if you're about to retype it, add
-support for that table/pattern in DataCloak instead of copying the pattern one more time.
+support for that table/pattern in Zechinus instead of copying the pattern one more time.
 
 ## Before writing any code
 
@@ -94,7 +94,7 @@ script needed.
 
 ## `content_hash` — `contentHash: true`, not an injected function
 
-If a table has a `content_hash` column, set `contentHash: true` — DataCloak computes it as
+If a table has a `content_hash` column, set `contentHash: true` — Zechinus computes it as
 a keyed HMAC-SHA256 (anti-fingerprinting), self-heals legacy unkeyed rows on first write.
 Full mechanics: README § "content_hash" + `SECURITY.md`.
 
@@ -119,7 +119,7 @@ API, `expectedHash: null` semantics, per-adapter conditional-write implementatio
 
 **The React hooks (`useStore`/`useKeyedStore`/`useCollectionStore`) thread the hash
 automatically** — `save`/`update` call `saveIfMatch`/`updateIfMatch` transparently, and a
-conflict throws `OptimisticLockConflictError` (from `datacloak/react`) instead of
+conflict throws `OptimisticLockConflictError` (from `zechinus/react`) instead of
 `{ok:false}` — app code using the hooks never sees `expectedHash` at all. Only code calling
 `Store`/`KeyedStore`/`CollectionStore` directly (outside React) uses the raw
 `saveIfMatch`/`updateIfMatch` pattern from the README.
@@ -146,7 +146,7 @@ a tautology that can never fail regardless of future drift. Always a frozen stri
 committed to git. Fix a fingerprint error with:
 
 ```
-npm run datacloak:sync-fingerprints -- path/to/yourBlobService.ts
+npm run zechinus:sync-fingerprints -- path/to/yourBlobService.ts
 ```
 
 **Deliberately not wired into pre-commit** — auto-fixing on every commit would remove the
@@ -165,16 +165,16 @@ plaintext-by-omission.
 DB columns, filterable — next to one encrypted blob per row): mark the encrypted fields
 with `enc()`, leave the rest of the object plain, omit `encrypt` entirely. `encrypt: "none"`
 (fully plaintext row) and mixed `enc()` on `perUser`/`perKey` still throw an explicit
-`FIXME` error — no real consumer needs them yet. Check `README.md` § "What DataCloak
+`FIXME` error — no real consumer needs them yet. Check `README.md` § "What Zechinus
 doesn't do yet" before assuming a capability exists; if you need it, that's a framework
 extension task, not a workaround in the calling service.
 
 **Plaintext field names must literally equal the DB column names** — the storage adapters
 pass them through with no camelCase↔snake_case mapping. If your table is snake_case, name
 the schema fields snake_case too and translate to your app's own domain type in the
-service (that translation is domain-shaping, not DataCloak's job).
+service (that translation is domain-shaping, not Zechinus's job).
 
-## DataCloak does not own your schema/DDL
+## Zechinus does not own your schema/DDL
 
 The table/collection must already exist, with a shape matching the store's Zod fields,
 before `defineStore` touches it — `defineStore` never runs `CREATE TABLE` and never
@@ -203,10 +203,10 @@ work): `flush()`, `invalidateOn`/`invalidateChannel`, the cold-session hash chec
 ## Node scripts & multi-user concurrency — `docs/node-multi-user.md`
 
 Read that file when writing a Node script/service (not browser code) that touches
-DataCloak stores. Gist: `configureSecureStore`'s ambient identity is one module-level
+Zechinus stores. Gist: `configureSecureStore`'s ambient identity is one module-level
 variable, unsafe for concurrent multi-user Node code — use `alsKeyProvider` +
-`withIdentity()` from `datacloak/node` for that case. Never import `datacloak/node` from
-`datacloak/index.ts` or `datacloak/react/index.ts`.
+`withIdentity()` from `zechinus/node` for that case. Never import `zechinus/node` from
+`zechinus/index.ts` or `zechinus/react/index.ts`.
 
 ## The one invariant you must never break
 
@@ -222,7 +222,7 @@ Follow `README.md` § "How these docs stay in sync":
 1. Update `examples/basic-usage.ts` until it compiles (typecheck) and
    `tests/examples.test.ts` passes.
 2. Mirror the change into `README.md` (Quickstart snippets, "Cardinality" or "What
-   DataCloak doesn't do yet" tables) — manual, but a broken example in step 1 is the
+   Zechinus doesn't do yet" tables) — manual, but a broken example in step 1 is the
    signal you can't skip.
 
 ## Before declaring work done

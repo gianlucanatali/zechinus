@@ -1,10 +1,10 @@
 /**
- * DataCloak — verified usage examples.
+ * Zechinus — verified usage examples.
  *
  * This file is compiled by `tsc` (part of `npm run typecheck`) and called from
- * `datacloak/tests/examples.test.ts` (part of `npm test`): if DataCloak's API
+ * `zechinus/tests/examples.test.ts` (part of `npm test`): if Zechinus's API
  * changes, these examples stop compiling or the test fails. It's the source of
- * truth for the snippets shown in `datacloak/README.md` — if you change the API,
+ * truth for the snippets shown in `zechinus/README.md` — if you change the API,
  * update this file FIRST, get it passing, THEN mirror the README.
  *
  * This file is real code you'd write in an app. The `memoryAdapter`/`memoryCache`/
@@ -174,7 +174,7 @@ export async function aggregationExample() {
   });
 
   // The source is an array store on purpose — `agg.sum` (the declarative operator
-  // kit, `datacloak/aggregate`) only reduces over array/collection sources. See
+  // kit, `zechinus/aggregate`) only reduces over array/collection sources. See
   // README's "Aggregations" section for the hand-written-function alternative form.
   const InvoiceList = z.array(z.object({ amount: z.number() }));
   const invoiceStore = defineStore({

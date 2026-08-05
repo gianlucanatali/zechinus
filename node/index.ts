@@ -15,8 +15,8 @@
  * instead of silently picking up a stale or foreign identity.
  *
  * CRITICAL packaging constraint: `node:async_hooks` must never reach the browser
- * bundle. This is a standalone entry point (`datacloak/node`) — never import it from
- * `datacloak/index.ts` or `datacloak/react/index.ts`.
+ * bundle. This is a standalone entry point (`zechinus/node`) — never import it from
+ * `zechinus/index.ts` or `zechinus/react/index.ts`.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { CryptoHandle, KeyProvider } from "../core/types.ts";

@@ -453,7 +453,7 @@ describe("useAggregation", () => {
 
   it("bugfix regression: a source write landing WHILE an invalidateChannel-triggered recompute is still awaiting its external must still reach the RENDERED hook value, not just the persisted envelope", async () => {
     // Same production bug as `aggregation.test.ts`'s core-level regression test, but
-    // exercised through the actual React binding: `datacloak/core/aggregation.ts`'s
+    // exercised through the actual React binding: `zechinus/core/aggregation.ts`'s
     // `computeAndPersist()` was already proven correct at the pure-framework level —
     // this isolates whether the gap is instead in how `useAggregation` republishes
     // (or fails to republish) the converged value to a mounted component.

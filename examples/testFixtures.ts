@@ -87,7 +87,7 @@ export function memoryAdapter(): StorageAdapter {
 
 /** Real subscribable in-memory CacheAdapter — required by `defineAggregation` (it
  * detects a source write through this port, not by re-fetching every source on every
- * read). See `datacloak/tests/aggregation.test.ts`'s identical fixture. */
+ * read). See `zechinus/tests/aggregation.test.ts`'s identical fixture. */
 export function memoryCache(): CacheAdapter {
   const data = new Map<string, unknown>();
   const subs = new Map<string, Set<() => void>>();

@@ -1,6 +1,6 @@
 /**
  * Wire format for a `BlobRecord.blob` string: `enc:` prefix + JSON `EncryptedField`.
- * Pure serialization, no crypto — DataCloak owns this format (it decides what a stored
+ * Pure serialization, no crypto — Zechinus owns this format (it decides what a stored
  * ciphertext string looks like), so it lives in `core/`, not in the app's crypto engine.
  */
 import assert from "node:assert/strict";

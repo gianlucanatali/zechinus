@@ -6,16 +6,16 @@
  *
  * RN-ONLY FILE — imports `expo-secure-store`/`expo-file-system`, packages that only
  * exist in the `mobile/` workspace's own `node_modules` (npm workspace hoisting
- * placed them there, not at the repo root — `datacloak/`'s own module resolution
+ * placed them there, not at the repo root — `zechinus/`'s own module resolution
  * can't see them). This is why `mobilePersistentCacheAdapter.ts` itself has ZERO
  * RN dependencies and is fully Node-testable: this file is the thin, untested-by-
  * `node --test` glue on top of it, the same "ports tested with fakes, real adapter
  * wired separately" split `webauthnKeyProvider.ts` uses for `navigator.credentials`
  * (see that file's test doc comment for the same reasoning).
  *
- * Deliberately excluded from `datacloak/tsconfig.json` (see that file's `exclude`)
- * for the same reason it can't be imported from `datacloak/tests/`: `tsc -p
- * datacloak/tsconfig.json` runs from the repo root, which can't resolve
+ * Deliberately excluded from `zechinus/tsconfig.json` (see that file's `exclude`)
+ * for the same reason it can't be imported from `zechinus/tests/`: `tsc -p
+ * zechinus/tsconfig.json` runs from the repo root, which can't resolve
  * `expo-secure-store`/`expo-file-system` either. Real typecheck coverage for this
  * file happens once `mobile/`'s own bootstrap imports it (a later milestone task —
  * see the mobile plan's F0.5 entry) and `cd mobile && npx tsc --noEmit` picks it up
@@ -29,7 +29,7 @@
  * the app's document directory. Neither SecureStore nor these files are readable
  * without this specific device's Keychain/Keystore — see
  * `mobilePersistentCacheAdapter.ts`'s file-level doc comment for why this
- * device-local encryption exists on top of DataCloak's own E2E encryption.
+ * device-local encryption exists on top of Zechinus's own E2E encryption.
  */
 import * as SecureStore from "expo-secure-store";
 import { Directory, File, Paths } from "expo-file-system";
@@ -41,17 +41,17 @@ import {
 } from "./mobilePersistentCacheAdapter.ts";
 
 /** SecureStore key name for the device-local symmetric cache-encryption key. */
-const SECURE_STORE_KEY_NAME = "datacloak_mobile_cache_dek_v1";
+const SECURE_STORE_KEY_NAME = "zechinus_mobile_cache_dek_v1";
 
 /** Directory (under the app's document directory) holding one file per cache entry. */
-const CACHE_DIR_NAME = "datacloak-persistent-cache";
+const CACHE_DIR_NAME = "zechinus-persistent-cache";
 
 function cacheDirectory(): Directory {
   return new Directory(Paths.document, CACHE_DIR_NAME);
 }
 
 /**
- * Cache keys are opaque strings DataCloak's core constructs (`<storeName>:<userId>`)
+ * Cache keys are opaque strings Zechinus's core constructs (`<storeName>:<userId>`)
  * — hex-encode them into filesystem-safe filenames rather than assuming `:`/other
  * characters are safe on every platform/filesystem.
  */

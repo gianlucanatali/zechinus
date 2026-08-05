@@ -3,10 +3,10 @@
  * it under the CURRENT (canonical) AAD, byte-for-byte identical plaintext.
  *
  * The old AAD shape is ALWAYS app-specific: it's whatever historical convention a
- * table used before being ported onto DataCloak (a different `field` name, sometimes
+ * table used before being ported onto Zechinus (a different `field` name, sometimes
  * a different `rowId` derivation). This module owns only the generic decrypt →
  * re-encrypt mechanics; it never guesses at legacy conventions — the caller supplies
- * `oldAAD`/`newAAD` explicitly. That's the extension point: DataCloak provides the
+ * `oldAAD`/`newAAD` explicitly. That's the extension point: Zechinus provides the
  * mechanism, the consuming app provides the historical knowledge.
  *
  * No silent failure: a missing record is a legitimate "nothing to migrate" (a user/key

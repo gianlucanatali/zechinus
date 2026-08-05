@@ -11,7 +11,7 @@
  * `keyColumn` is the one real extension point here: which DB column identifies WHICH
  * dictionary a row belongs to (EW's convention is `table_name`; another app might call
  * it something else) — injectable, not hardcoded, because it's a naming decision that
- * belongs to the consuming app's schema, not to DataCloak.
+ * belongs to the consuming app's schema, not to Zechinus.
  */
 import { z } from "zod";
 import { defineStore } from "./store.ts";

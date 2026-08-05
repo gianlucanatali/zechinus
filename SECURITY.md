@@ -1,6 +1,6 @@
-# DataCloak — threat model
+# Zechinus — threat model
 
-DataCloak is a client-side E2E encryption layer: the DEK never leaves the client, and the
+Zechinus is a client-side E2E encryption layer: the DEK never leaves the client, and the
 server (storage backend) only ever holds ciphertext plus a small amount of structural
 metadata (table/row/user identifiers, timestamps, row size). This document states plainly
 what that buys you and what it doesn't — read it before assuming a capability the design
@@ -30,7 +30,7 @@ doesn't actually provide.
 
 ## What a compromised or curious server CAN still do
 
-- **Serve a stale-but-authentic old version of a row (rollback).** DataCloak has no
+- **Serve a stale-but-authentic old version of a row (rollback).** Zechinus has no
   monotonic version counter enforced server-side — if the server returns an older,
   legitimately-encrypted blob instead of the current one, the client has no way to detect
   that it's stale purely from the ciphertext. Not built; see "Non-goals" below.
@@ -41,16 +41,16 @@ doesn't actually provide.
   encryption can protect against — that's an infrastructure/backup concern, out of scope
   for this package entirely.
 - **Observe the structural metadata itself** (which table, which row id, which user —
-  DataCloak's AAD is deliberately NOT confidential, only integrity-bound). If the row id
+  Zechinus's AAD is deliberately NOT confidential, only integrity-bound). If the row id
   or table name is itself sensitive, that's a modeling decision to make before choosing
-  DataCloak, not something the crypto layer hides.
+  Zechinus, not something the crypto layer hides.
 
 ## Operational precondition: don't remove `legacyAAD` too early
 
 `legacyAAD` (porting-only, `StoreDef.legacyAAD` in `store.ts`) is what lets a store still
 decrypt rows written under an older AAD convention: canonical AAD is tried first, and only
 on failure does the store fall back to `legacyAAD`, migrate the row, and persist it under
-the canonical AAD (`datacloak/core/legacyFallback.ts`). **If `legacyAAD` is removed from a
+the canonical AAD (`zechinus/core/legacyFallback.ts`). **If `legacyAAD` is removed from a
 store definition while any row for that store still exists under the old convention (e.g. a
 dormant account that hasn't triggered a read/write since the porting), that row becomes
 permanently undecryptable** — `decodeWithLegacyFallback` has no other fallback path once

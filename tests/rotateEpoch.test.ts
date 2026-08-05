@@ -308,7 +308,7 @@ test("many rotateEpoch: idempotent — a re-run reports the row as alreadyMigrat
 
 // ── verifyRotatedRows (key-custody roadmap Fase E): paranoid post-rotation
 // re-check, deliberately redundant with rotateEpoch's own `failed` — see
-// datacloak/core/store.ts's doc comment and
+// zechinus/core/store.ts's doc comment and
 // docs/decisions/2026-07-13-dek-rotation-ambient-read-fallback.md. ──────────
 
 test("perUser verifyRotatedRows: after a clean rotateEpoch, the row reports atNewEpoch", async () => {

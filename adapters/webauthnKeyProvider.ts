@@ -8,7 +8,7 @@
  * bytes (tied to that app's already-encrypted data — changing them breaks decryption
  * for every existing user) and the relying-party id/name. A future native-biometrics
  * adapter (React Native) would mirror this file's shape, swapping `navigator.credentials`
- * for a native API, while reusing the same `datacloak/core/keyDerivation.ts` engine.
+ * for a native API, while reusing the same `zechinus/core/keyDerivation.ts` engine.
  */
 
 import { deriveKey } from "../core/keyDerivation.ts";

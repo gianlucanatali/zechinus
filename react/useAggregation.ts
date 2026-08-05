@@ -1,5 +1,5 @@
 /**
- * React binding for `Aggregation<T>` (`defineAggregation`, `datacloak/core/aggregation.ts`)
+ * React binding for `Aggregation<T>` (`defineAggregation`, `zechinus/core/aggregation.ts`)
  * — paints the last PERSISTED value immediately (`data`), while a stale or never-computed
  * aggregate recomputes in the background (`computing`/`stale`), the exact non-blocking
  * contract `Aggregation.get()` already has.

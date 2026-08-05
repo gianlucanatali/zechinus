@@ -4,7 +4,7 @@
  * SELF-CONTAINED toy domain (a "transactions" KeyedStore + a "snapshot" KeyedStore
  * at one sentinel key) that mirrors the real app's `transaction_blobs` /
  * `account_snapshot_blobs` shape closely enough for the scenarios below to be
- * meaningful, without this package depending on `src/` (DataCloak's own tests never
+ * meaningful, without this package depending on `src/` (Zechinus's own tests never
  * import app code — see `testKeyHandle.ts`).
  *
  * Scenarios (CT1-CT4 from the task brief; CT5 — completeness across the app's real

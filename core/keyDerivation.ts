@@ -27,8 +27,8 @@ import type { CryptoHandle, FieldAAD, EncryptedField } from "./types.ts";
  * MAC key from a given DEK, which is exactly what's needed: skip-write/optimistic-lock
  * compare hashes computed by potentially different handle instances for the same user.
  */
-const DATACLOAK_MAC_SALT = new TextEncoder().encode(
-  "datacloak-content-hash-mac-salt-v1",
+const ZECHINUS_MAC_SALT = new TextEncoder().encode(
+  "zechinus-content-hash-mac-salt-v1",
 );
 
 /** Generic HKDF-SHA256 derivation. `salt`/`info` are the caller's — this has no defaults. */
@@ -203,7 +203,7 @@ export function createKeyHandle(
   const pid = derivePID(key, pidSalt, pidInfo);
   const macKey = options?.hashContent
     ? null
-    : deriveKey(key, DATACLOAK_MAC_SALT, "datacloak/content-hash-v1", 32);
+    : deriveKey(key, ZECHINUS_MAC_SALT, "zechinus/content-hash-v1", 32);
   const hashContent =
     options?.hashContent ??
     (async (payload: unknown) =>

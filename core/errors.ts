@@ -31,7 +31,7 @@ export class LockedSessionError extends Error {
  * can recognize and SKIP scheduling a retry for it: this case already
  * self-heals reactively, near-instantly, once the upstream's own
  * side-effect-triggered background compute publishes (see
- * `datacloak/AGENTS.md`'s "Aggregate-as-source cold start throws once, then
+ * `zechinus/AGENTS.md`'s "Aggregate-as-source cold start throws once, then
  * self-heals — this is expected, not a bug to fix with a retry loop"). Retrying
  * it on the SAME timer-based backoff built for transient I/O failures would be
  * redundant at best, and at worst produces the exact "retry storm" (multiple

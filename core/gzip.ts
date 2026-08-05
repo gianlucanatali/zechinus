@@ -20,7 +20,7 @@ export function setGzipImpl(impl: GzipImpl | null): void {
 function requireNativeStreams(): void {
   if (typeof CompressionStream === "undefined") {
     throw new Error(
-      "datacloak: no gzip implementation available — this runtime has no " +
+      "zechinus: no gzip implementation available — this runtime has no " +
         "CompressionStream (React Native/Hermes?). Call setGzipImpl({ compress, " +
         "decompress }) at bootstrap, e.g. backed by fflate.",
     );

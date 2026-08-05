@@ -1,5 +1,5 @@
 /**
- * defineAggregation — persisted, declarative aggregates over DataCloak stores.
+ * defineAggregation — persisted, declarative aggregates over Zechinus stores.
  *
  * The app declares WHAT to compute (a pure `compute()` over `sources`/`externals`) and
  * WHERE it persists (`storage: { table, key }`); the framework owns WHEN to recompute
@@ -72,7 +72,7 @@ export interface ExternalInput<T = unknown> {
   ttlMs: number;
   /**
    * Named invalidation channel(s) this external depends on, beyond its own TTL — for data
-   * that lives entirely OUTSIDE any DataCloak `Store` (e.g. a plaintext table read via a
+   * that lives entirely OUTSIDE any Zechinus `Store` (e.g. a plaintext table read via a
    * plain REST call), which this module has no write-interception hook for at all: no
    * `source` ever changes when that data changes, so nothing naturally marks the
    * aggregation stale before the TTL expires. Declare the channel(s) here; the app then
@@ -147,7 +147,7 @@ let globalInFlightCount = 0;
  * only fires via this debounce timer, never immediately — is still pending. Confirmed live
  * both via the video-tutorial recording (a fresh page's first dashboard render showed the
  * zero placeholder well after an E2E `waitForAggregationsIdle` had already resolved) and a
- * dedicated regression test (`datacloak/tests/aggregation.test.ts`, "COLD start of a
+ * dedicated regression test (`zechinus/tests/aggregation.test.ts`, "COLD start of a
  * 2-level aggregation-as-source chain").
  */
 let globalPendingDebounceCount = 0;
@@ -475,7 +475,7 @@ function aggregationSourceFingerprint(data: unknown): string {
 
 /**
  * Cache key convention for the React binding's read-side state port
- * (`datacloak/react/useAggregation.ts`) — same `${name}:${userId}` shape every other
+ * (`zechinus/react/useAggregation.ts`) — same `${name}:${userId}` shape every other
  * binding's CacheAdapter key already uses (see `react/useStore.ts`'s
  * `${store.name}:${userId}`), with a `:react` segment so it never collides with THIS
  * aggregation's own source-fingerprint publish key (`${name}:${userId}`, used when this
@@ -872,7 +872,7 @@ export function defineAggregation<
   /**
    * Publishes the current snapshot to the CacheAdapter, at the exact key
    * `aggregationStateCacheKey(name, userId)` computes — the "port" the React binding
-   * (`datacloak/react/useAggregation.ts`) reads via plain `cache.get`/`cache.subscribe`,
+   * (`zechinus/react/useAggregation.ts`) reads via plain `cache.get`/`cache.subscribe`,
    * same as every other binding here (see `react/useStore.ts`). Ambient-identity-based
    * (reads `keys.getUserId()`/`getCryptoHandle()` fresh, not a captured closure value) so
    * it naturally no-ops while locked — never publishes on behalf of a session that isn't

@@ -1,6 +1,6 @@
 /**
  * `CacheAdapter` backed by a real TanStack Query `QueryClient` — the reference
- * implementation for `useStore` (React binding). DataCloak owns key construction
+ * implementation for `useStore` (React binding). Zechinus owns key construction
  * (plain strings, `<storeName>:<userId>`); this adapter maps each to a single-element
  * TanStack query key (`[key]`) and subscribes via `QueryCache` events rather than
  * the `useQuery` hook, since the port itself must stay hook-free (see `core/types.ts`).
@@ -26,7 +26,7 @@ export function tanstackAdapter(queryClient: QueryClient): CacheAdapter {
         `defaultOptions.queries.gcTime: Infinity (got ${String(gcTime)}). ` +
         `Without it, TanStack garbage-collects every entry this adapter writes ` +
         `after the default 5 minutes, since it never has a real useQuery observer ` +
-        `keeping it alive — data silently disappears from any DataCloak-backed hook ` +
+        `keeping it alive — data silently disappears from any Zechinus-backed hook ` +
         `(useStore/useKeyedStore/useAggregation/...) after that long, with no error.`,
     );
   }

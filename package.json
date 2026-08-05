@@ -1,5 +1,5 @@
 {
-  "name": "datacloak",
+  "name": "zechinus",
   "version": "0.1.0",
   "private": true,
   "description": "End-to-end encryption as an adapter layer, for apps that already own their backend. See README.md.",

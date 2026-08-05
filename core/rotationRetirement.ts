@@ -27,7 +27,7 @@ export interface RetirementVerificationIO {
    * never changes its epoch, so an implementation that ignores `afterKey` — or
    * orders inconsistently between calls — would re-return the SAME first `limit`
    * rows forever, silently never verifying the rest. See
-   * `datacloak/tests/rotationRetirement.test.ts`'s pagination test for a worked
+   * `zechinus/tests/rotationRetirement.test.ts`'s pagination test for a worked
    * example, and the real bug this exact class of mistake caused live (unordered
    * `LIMIT` in a migration script,
    * `docs/decisions/2026-07-12-dek-rotation-compat-test-2.2b.md`).
