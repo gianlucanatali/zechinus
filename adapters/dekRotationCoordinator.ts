@@ -137,10 +137,9 @@ export async function pollRotationRequest(
  * Called by an ALREADY-unlocked device (one that already holds the current
  * DEK) to fulfill every pending request from its OWN account's other devices —
  * meant to piggyback on an existing periodic check (e.g. device-link
- * revalidation), never a dedicated poll loop of its own (see
- * `docs/decisions/2026-07-12-dek-rotation-ephemeral-handshake-key.md` for why:
- * no event system, so discovery rides on a poll that already exists for an
- * unrelated reason instead of adding a new one).
+ * revalidation), never a dedicated poll loop of its own — there's no event
+ * system here, so discovery rides on a poll that already exists for an
+ * unrelated reason instead of adding a new one.
  */
 export async function fulfillPendingRotationRequests(
   storage: DekRotationStorage,

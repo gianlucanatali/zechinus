@@ -85,15 +85,14 @@ export function deriveDevicePublicKey(kek: Uint8Array): string {
 
 /**
  * Generates a fresh, genuinely random X25519 keypair for a ONE-SHOT key-delivery
- * handshake (key-custody roadmap Fase 2.3: a device that's fallen behind an epoch
- * publishes this public key instead of relying on a persisted/derivable identity —
- * any device already on the current epoch wraps the DEK for it, the requester
- * unwraps with `seed` then discards it immediately). Deliberately NOT derived from
- * the KEK: this key's only job is to exist for the few seconds/minutes of one
- * handshake — persisting or re-deriving it would just recreate the exact standing-
- * secret problem `deriveDevicePublicKey` exists to avoid (see
- * `docs/decisions/2026-07-12-device-key-kek-derivation.md`), for no benefit, since
- * nothing needs to address this key again after the handshake completes.
+ * handshake: a device that's fallen behind an epoch publishes this public key
+ * instead of relying on a persisted/derivable identity — any device already on
+ * the current epoch wraps the DEK for it, the requester unwraps with `seed` then
+ * discards it immediately. Deliberately NOT derived from the KEK: this key's only
+ * job is to exist for the few seconds/minutes of one handshake — persisting or
+ * re-deriving it would just recreate the exact standing-secret problem
+ * `deriveDevicePublicKey` exists to avoid, for no benefit, since nothing needs to
+ * address this key again after the handshake completes.
  *
  * Returns `seed` to the caller (not cleaned here) — it's needed once more, to
  * `unwrapWithEphemeralKey` the reply when it arrives. The caller must `clean()` it

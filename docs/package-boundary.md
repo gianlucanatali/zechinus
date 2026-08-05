@@ -10,7 +10,7 @@ own standalone `tsconfig.json` (no `paths` at all, no reliance on a consumer's c
 Any file under `zechinus/` — including tests — must import the rest
 of the package via **relative paths** (`../core/types.ts`, `./testKeyHandle.ts`), never
 its own package name (`zechinus`/`zechinus/*`) — that specifier is only meaningful for
-code OUTSIDE the package. Run `npm run zechinus:typecheck` before declaring work done on
+code OUTSIDE the package. Run `npm run typecheck` before declaring work done on
 anything inside `zechinus/` — it type-checks the package standalone and fails
 immediately if a file crossed this boundary by accident (this caught 4 real violations
 the first time it was written).

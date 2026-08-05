@@ -134,7 +134,7 @@ test("verifyRowsDecryptAtEpoch: empty result → processedThisBatch 0, lastKey u
   });
 });
 
-test("verifyRowsDecryptAtEpoch: keyset pagination across multiple calls covers every row exactly once, no gaps or duplicates — the fake IO here actually implements the ordering/afterKey contract (unlike a naive 'return everything' double), catching the same class of bug a real unordered-LIMIT implementation hit live (docs/decisions/2026-07-12-dek-rotation-compat-test-2.2b.md)", async () => {
+test("verifyRowsDecryptAtEpoch: keyset pagination across multiple calls covers every row exactly once, no gaps or duplicates — the fake IO here actually implements the ordering/afterKey contract (unlike a naive 'return everything' double), catching the same class of bug a real unordered-LIMIT implementation hit once", async () => {
   const handle = createDekHandle(randomBytes(32));
   // 25 rows — enough to force multiple calls at batchSize 10, never a
   // coincidental full cover in one shot.

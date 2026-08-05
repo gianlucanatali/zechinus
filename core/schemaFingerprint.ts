@@ -17,7 +17,7 @@
  *
  * Known limitation (bounded depth, not a full diffing engine): the shape is
  * inspected up to `MAX_DEPTH` nesting levels (object/array); beyond that depth a
- * change goes undetected. Sufficient for EW's real schemas (few levels); if deeper
+ * change goes undetected. Sufficient for the host app's real schemas (few levels); if deeper
  * inspection is ever needed, raising `MAX_DEPTH` is the first thing to try.
  */
 

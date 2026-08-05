@@ -1,10 +1,10 @@
 /**
  * `Store/KeyedStore/CollectionStore.rotateEpoch()` — the generic, framework-level
- * DEK rotation wiring (key-custody roadmap Fase 2.3). Every `defineStore`-created
- * store gets this for free, regardless of cardinality — no app-level rotation code
- * per store. Tests use two REAL `KeyHandle`s (old/new DEK, via `testKeyHandle.ts`)
- * so the epoch-tagging from Fase 2.1 and the pid-changes-with-the-DEK fact
- * (`docs/decisions/2026-07-12-dek-epoch-per-row-aad.md`) are exercised for real.
+ * DEK rotation wiring. Every `defineStore`-created store gets this for free,
+ * regardless of cardinality — no app-level rotation code per store. Tests use
+ * two REAL `KeyHandle`s (old/new DEK, via `testKeyHandle.ts`) so the epoch-tagging
+ * and the pid-changes-with-the-DEK fact (see `docs/DECISIONS.md` § "DEK rotation
+ * is a synchronous, session-invalidating ceremony") are exercised for real.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -306,10 +306,8 @@ test("many rotateEpoch: idempotent — a re-run reports the row as alreadyMigrat
   assert.deepEqual(second, { migrated: 0, alreadyMigrated: 1, failed: [] });
 });
 
-// ── verifyRotatedRows (key-custody roadmap Fase E): paranoid post-rotation
-// re-check, deliberately redundant with rotateEpoch's own `failed` — see
-// zechinus/core/store.ts's doc comment and
-// docs/decisions/2026-07-13-dek-rotation-ambient-read-fallback.md. ──────────
+// ── verifyRotatedRows: paranoid post-rotation re-check, deliberately redundant
+// with rotateEpoch's own `failed` — see zechinus/core/store.ts's doc comment. ──
 
 test("perUser verifyRotatedRows: after a clean rotateEpoch, the row reports atNewEpoch", async () => {
   __resetSecureStoreConfig();

@@ -383,11 +383,10 @@ test("decodeWithCandidates: row already on the current handle — decoded on fir
 });
 
 // --- decodeWithLegacyFallback: legacyAAD as a list of candidate formats ----
-// A store can have MORE THAN ONE historical AAD shape to fall back to (e.g.
-// accountMetaService: a canonical-under-old-table-name format, plus an even
-// older pre-typed-store format) — see
-// docs/decisions/2026-07-13-account-meta-dedicated-table.md. `legacyAAD`
-// accepts either a single `FieldAAD` (unchanged) or an ordered `FieldAAD[]`,
+// A store can have MORE THAN ONE historical AAD shape to fall back to (e.g. a
+// canonical-under-old-table-name format, plus an even older pre-typed-store
+// format, from a real store that was ported through two AAD conventions).
+// `legacyAAD` accepts either a single `FieldAAD` (unchanged) or an ordered `FieldAAD[]`,
 // tried in sequence, stopping at the first one that decrypts.
 
 test("decodeWithLegacyFallback: legacyAAD as a single (non-array) FieldAAD — unchanged regression, still migrates + persists", async () => {

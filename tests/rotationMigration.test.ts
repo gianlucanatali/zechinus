@@ -1,9 +1,9 @@
 /**
- * `rotationMigration.ts` — key-custody rotation's re-encrypt engine (Fase 2.2).
+ * `rotationMigration.ts` — DEK rotation's re-encrypt engine.
  * Tests use two REAL `KeyHandle`s (old/new DEK, via `testKeyHandle.ts`) so the
- * epoch-tagging from Fase 2.1 and the pid-changes-with-the-DEK fact (documented in
- * `docs/decisions/2026-07-12-dek-epoch-per-row-aad.md`) are exercised for real, not
- * mocked away — and a realistic in-memory `RotationBatchIO` double that actually
+ * epoch-tagging and the pid-changes-with-the-DEK fact (see `docs/DECISIONS.md` §
+ * "DEK rotation is a synchronous, session-invalidating ceremony") are exercised
+ * for real, not mocked away — and a realistic in-memory `RotationBatchIO` double that actually
  * tracks epoch per row, so "interrupt mid-migration, resume" is a genuine scenario,
  * not just an assertion about call counts.
  */

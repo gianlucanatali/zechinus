@@ -133,7 +133,7 @@ Full runnable examples (in-memory adapter, no Supabase required):
 
 ## Cardinality — which one to pick
 
-| Identity               | When                                                      | EW example                                                               |
+| Identity               | When                                                      | Example                                                               |
 | ---------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `"perUser"` (default)  | a single secret object per user                           | portfolio, asset, snapshot                                               |
 | `{ perKey: "column" }` | one object per user **per domain key**                    | transactions per month (`year_month`), label dictionaries (`table_name`) |
@@ -189,7 +189,7 @@ const all = await accountLabels.getAll(userId, cryptoHandle, "accounts");
 
 Zero new mechanics — it's `defineStore({ identity: { perKey }, schema: z.record(...) })`
 plus load-mutate-save helpers, so callers never touch the raw dict shape. `keyColumn` is
-the one injectable bit (defaults to `"table_name"`, EW's convention) — whatever DB column
+the one injectable bit (defaults to `"table_name"`, the host app's convention) — whatever DB column
 identifies _which_ dictionary a row belongs to is a naming decision that belongs to the
 consuming app's schema, not to Zechinus.
 
@@ -531,7 +531,7 @@ const store = defineStore({
   schema: PortfolioDataSchema,
   version: 1,
   // Frozen literal — NOT fingerprintSchema(PortfolioDataSchema, ...) inline (see above).
-  // Regenerate with `npm run zechinus:sync-fingerprints -- path/to/this/file.ts`.
+  // Regenerate with `npm run sync-fingerprints -- path/to/this/file.ts`.
   schemaFingerprint: "da2584b4",
 });
 ```
@@ -542,7 +542,7 @@ Once you've decided (per the message above) whether the change needs a `version`
 bump + migrator or is safe as-is, run:
 
 ```
-npm run zechinus:sync-fingerprints -- path/to/yourBlobService.ts
+npm run sync-fingerprints -- path/to/yourBlobService.ts
 ```
 
 It re-imports the file, catches the guardrail's own thrown error, extracts the correct
@@ -1294,7 +1294,7 @@ Rules that make it portable:
 
 Explicit error at definition (never a silent stub), with a `FIXME` in the source:
 
-- **`encrypt: "none"`** (fully plaintext row, zero blob) — no real EW consumer.
+- **`encrypt: "none"`** (fully plaintext row, zero blob) — no real consumer yet.
 - **Mixed `enc()` fields with an `identity` other than `"many"`** (perUser/perKey) — no
   real consumer needs them today.
 - **Hub-and-spoke storage** (plaintext columns + ref on one backend, blob on another,
@@ -1322,18 +1322,16 @@ Explicit error at definition (never a silent stub), with a `FIXME` in the source
 
 ## DEK rotation
 
-**Built** (key-custody roadmap Fase 2.1–2.3) — exactly the "synchronous, session-
-invalidating ceremony" this section used to say rotation would need IF ever built (never
-a lazy per-row mechanism — a lazy "legacy DEK" convergence symmetric to `migrateLegacyAAD`
-was considered and rejected early on: it breaks multi-device consistency, and no
-production zero-knowledge system rotates that way — full rationale, the 1Password/
-Bitwarden/Proton and Matrix/Olm comparison: `_local/plans/done/20260626-1111000-secure-store-framework.md`
-§ "Decisioni aperte"):
+**Built** — a synchronous, session-invalidating ceremony, never a lazy per-row
+mechanism (a lazy "legacy DEK" convergence symmetric to `migrateLegacyAAD` was
+considered and rejected early on: it breaks multi-device consistency, and no
+production zero-knowledge system rotates that way). Full rationale: `docs/DECISIONS.md`
+§ "DEK rotation is a synchronous, session-invalidating ceremony — never lazy".
 
 - **Epoch-tagged AAD** (`FieldAAD.epoch`, wire format `v:5/6` — "Wire format" above): every
   row records which rotation cycle encrypted it, cryptographically bound into the AAD
   (tamper-evident — an attacker can't relabel a row's epoch to trick a client into
-  decrypting with a compromised key). `docs/decisions/2026-07-12-dek-epoch-per-row-aad.md`.
+  decrypting with a compromised key).
 - **Generic per-store migration** — `Store`/`KeyedStore`/`CollectionStore.rotateEpoch(userId,
 oldHandle, newHandle, newEpoch)`, present on EVERY `defineStore`-created store
   automatically, no app-level wiring per store. Fetches the user's full row set for that
@@ -1342,8 +1340,7 @@ oldHandle, newHandle, newEpoch)`, present on EVERY `defineStore`-created store
   re-encrypts whatever's still on the old key, and reports
   `{migrated, alreadyMigrated, failed}` — a corrupted row is collected, never aborts the
   rest. Idempotent: safe to call again after an interruption. The cardinality-blind engine
-  lives in `zechinus/core/rotationMigration.ts`;
-  `docs/decisions/2026-07-12-dek-rotation-migration-engine.md`.
+  lives in `zechinus/core/rotationMigration.ts`.
 - **Per-store paranoid re-check** — `Store`/`KeyedStore`/`CollectionStore.verifyRotatedRows(userId,
 oldHandle, newHandle, newEpoch)`, present on every `defineStore`-created store like
   `rotateEpoch` itself. Deliberately redundant with `rotateEpoch`'s own `failed` count: it
@@ -1359,16 +1356,14 @@ oldHandle, newHandle, newEpoch)`, present on every `defineStore`-created store l
   `many` already had an unconditional "everything for this user" read.
 - **Multi-device handshake**: a device that already has the new DEK can hand it to one
   that doesn't via a one-shot ephemeral X25519 key (never persisted, never the device's
-  stable identity) — `zechinus/adapters/dekRotationCoordinator.ts`;
-  `docs/decisions/2026-07-12-dek-rotation-ephemeral-handshake-key.md`.
+  stable identity) — `zechinus/adapters/dekRotationCoordinator.ts`.
 - **Verify-before-retire**: the old epoch's key material is discarded the instant every row
   verifiably decrypts under the new one — no per-device confirmation gate. A straggler
   device's old wrap is useless to it either way (the old DEK can't decrypt any row once
   migration is done), so it always needs the multi-device handshake above to get the
   current DEK, whether its stale wrap still exists or was already deleted — waiting for it
   buys nothing. Rotation is therefore a single fast phase (data migration + verification +
-  retirement, minutes), not a multi-day one — `zechinus/core/rotationRetirement.ts`;
-  `docs/decisions/2026-07-12-dek-rotation-retirement-policy.md`.
+  retirement, minutes), not a multi-day one — `zechinus/core/rotationRetirement.ts`.
 - **Anti-overlap guard**: a new rotation can't start before the previous one's old epoch is
   retired (starting one early risks destroying the only key that can still decrypt rows
   stuck behind — rotations are strictly sequential, never overlapping) —
@@ -1383,9 +1378,9 @@ oldHandle, newHandle, newEpoch)`, present on every `defineStore`-created store l
   prior attempt already wrapped, never regenerate fresh bytes) live in the consuming app
   (`src/context/RotationContext.tsx`'s `resumeRotationAsDriver`), not here.
 
-**Not yet wired** (app-level, tracked in
-`_local/plans/20260712-0947-mobile-roadmap-consolidated.md` Fase 2.5): the actual "rotate
-my key" trigger in Impostazioni, and calling `rotateEpoch` across EW's real stores.
+**Not yet wired** (app-level, tracked in the consuming app's own roadmap, not this
+package's): the actual "rotate my key" trigger in a settings UI, and calling
+`rotateEpoch` across the app's real stores.
 
 ## Extending `StorageAdapter`
 
@@ -1533,7 +1528,7 @@ import { tanstackAdapter } from "zechinus/react"; // React binding only, not the
 all — no reliance on the host app's `tsconfig.json`. It's the actual self-containment
 check: if `zechinus/`'s own code (including its tests) only imports itself via relative
 paths (`../core/...`, `./testKeyHandle.ts`, ...) — never its own package name — this
-passes. Run it with `npm run zechinus:typecheck`. Any file inside `zechinus/` that
+passes. Run it with `npm run typecheck`. Any file inside `zechinus/` that
 imports `zechinus`/`zechinus/*` (its own external-facing package name, only meaningful
 from OUTSIDE the package) instead of a relative path breaks this check — that's the
 signal a boundary was crossed by accident.
@@ -1557,7 +1552,13 @@ signature of `defineStore`/`Store`/`KeyedStore`/`CollectionStore`
    implemented, instead of leaving it in both places.
 
 There is no automatic API-reference generator yet (TypeDoc or similar) — deliberately
-deferred: Zechinus has no external consumers yet, generating one now would be
-documentation for no reader. When Zechinus is extracted as an OSS package (plan goal
-(a)), it's the first thing to add: the signatures are already documented with TSDoc in
-`zechinus/core/*.ts`, ready to be extracted.
+deferred until there's a real reader for one. The signatures are already documented with
+TSDoc in `core/*.ts`, ready to be extracted whenever that changes.
+
+## Development
+
+See `CONTRIBUTING.md` for local setup, the test/typecheck commands, and where to read
+before making a change (`AGENTS.md` is the detailed guide). This project was built with
+AI pair-programming (Claude) under close human review — the test suite (550 tests
+across `node --test` and Vitest), `SECURITY.md`'s threat model, and the commit history
+are the actual evidence of that, not a badge.

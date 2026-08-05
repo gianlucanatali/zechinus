@@ -15,8 +15,11 @@
   },
   "sideEffects": false,
   "scripts": {
-    "test": "tsx --test 'tests/**/*.test.ts' 'tests/**/*.test.tsx'",
-    "typecheck": "tsc --noEmit"
+    "test": "tsx --test 'tests/**/*.test.ts'",
+    "test:react": "vitest run",
+    "test:all": "npm run test && npm run test:react",
+    "typecheck": "tsc --noEmit",
+    "sync-fingerprints": "node scripts/sync-fingerprints.mjs"
   },
   "dependencies": {
     "@noble/ciphers": "^2.2.0",

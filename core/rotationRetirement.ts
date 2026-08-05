@@ -28,9 +28,8 @@ export interface RetirementVerificationIO {
    * orders inconsistently between calls — would re-return the SAME first `limit`
    * rows forever, silently never verifying the rest. See
    * `zechinus/tests/rotationRetirement.test.ts`'s pagination test for a worked
-   * example, and the real bug this exact class of mistake caused live (unordered
-   * `LIMIT` in a migration script,
-   * `docs/decisions/2026-07-12-dek-rotation-compat-test-2.2b.md`).
+   * example — this exact class of mistake (unordered `LIMIT` in a migration
+   * script) caused a real bug once.
    */
   listRowsAtEpoch(
     epoch: number,
@@ -123,8 +122,9 @@ export interface RetirementEligibility {
  * get the CURRENT DEK regardless of whether its stale wrap still exists or was
  * already deleted — so retirement can run the instant data is migrated+verified,
  * no grace period needed (an earlier design gated this on device confirmation with
- * a 30-day grace deadline; reconsidered as solving a problem that doesn't exist,
- * see `docs/decisions/2026-07-12-dek-rotation-retirement-policy.md` "Deviazioni").
+ * a 30-day grace deadline; reconsidered as solving a problem that doesn't exist —
+ * see `docs/DECISIONS.md` § "DEK rotation is a synchronous, session-invalidating
+ * ceremony").
  * `remainingRowsAtOldEpoch` and `verificationFailureCount` are the caller's
  * responsibility to have already computed (via `migrateRotationBatch`/
  * `verifyRowsDecryptAtEpoch` above, looped to completion) — this function is pure

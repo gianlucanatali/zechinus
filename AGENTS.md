@@ -29,7 +29,7 @@ names.** No exceptions, even for a quick one-liner comment.
 
 Read that file before adding an export, touching `index.ts`/`react/index.ts`, or adding a
 new adapter file. Gist: never import `zechinus`/`zechinus/*` (own package name) from
-inside `zechinus/` — always relative paths; `npm run zechinus:typecheck` catches a
+inside `zechinus/` — always relative paths; `npm run typecheck` catches a
 violation. The bare barrel (`index.ts`) exports only `core/` — never an adapter.
 
 ## Reflection checkpoint
@@ -146,7 +146,7 @@ a tautology that can never fail regardless of future drift. Always a frozen stri
 committed to git. Fix a fingerprint error with:
 
 ```
-npm run zechinus:sync-fingerprints -- path/to/yourBlobService.ts
+npm run sync-fingerprints -- path/to/yourBlobService.ts
 ```
 
 **Deliberately not wired into pre-commit** — auto-fixing on every commit would remove the

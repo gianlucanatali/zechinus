@@ -516,7 +516,7 @@ export function defineStore<
     );
   }
   if (def.encrypt === "none") {
-    // FIXME: encrypt:"none" (fully plaintext row, zero blob) has no real EW consumer yet —
+    // FIXME: encrypt:"none" (fully plaintext row, zero blob) has no real consumer yet —
     //   no adapter supports a row without an encrypted blob. Implement when actually needed.
     throw new Error(
       `defineStore(${def.name}): encrypt:"none" not implemented yet (no real consumer). See plan Fase 2b.`,

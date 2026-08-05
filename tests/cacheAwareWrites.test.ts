@@ -4,7 +4,7 @@
  * just the React binding's `save()`. Before this fix, only `useStore`/`useKeyedStore`
  * wrote to cache, so a service calling `.mutate()` ambient (e.g.
  * `patchPortfolioTransaction`) left every mounted `useStore` consumer stale until its
- * own next full reload. See `_local/plans/done/20260702-1715-centralizza-cache-writethrough-portfolio-asset.md`.
+ * own next full reload.
  */
 import assert from "node:assert/strict";
 import test from "node:test";

@@ -9,7 +9,7 @@
  * this recipe computes it internally; the caller never sees it.
  *
  * `keyColumn` is the one real extension point here: which DB column identifies WHICH
- * dictionary a row belongs to (EW's convention is `table_name`; another app might call
+ * dictionary a row belongs to (the host app's convention is `table_name`; another app might call
  * it something else) — injectable, not hardcoded, because it's a naming decision that
  * belongs to the consuming app's schema, not to Zechinus.
  */
@@ -25,7 +25,7 @@ const DICT_FINGERPRINT = fingerprintSchema(DictSchema, "all");
 export interface LabelDictDef {
   /** Table/collection name = the `table` value in the AAD. */
   name: string;
-  /** DB column identifying which dictionary a row is (default: `"table_name"`, EW's convention). */
+  /** DB column identifying which dictionary a row is (default: `"table_name"`, the host app's convention). */
   keyColumn?: string;
   version?: number;
   migrators?: BlobMigrator[];
