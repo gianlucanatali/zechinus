@@ -7,17 +7,11 @@ you. Anyone can write a CRUD store; DataCloak owns the hard 20% that gets skippe
 gotten wrong — per-row AAD, versioned envelopes, runtime validation, always-explicit
 encryption — so the domain only declares **the shape of its data**, never the mechanics.
 
-> Status: v1 in development, inside the the host app repo (`datacloak/`). Extraction into a
-> standalone OSS MIT package is planned but not done yet — see
-> `_local/plans/done/20260626-1111000-secure-store-framework.md` for the full design-decision
-> history (that file is for people working _on_ DataCloak; this README is for people who
-> _use_ it).
+> Status: v1, extracted as a standalone package. It grew inside a production app's
+> monorepo (as `datacloak/`) before being pulled out — some file paths/comments in this
+> README still describe that original host-app integration as illustrative context.
 >
-> **Language:** `datacloak/` is English-only — code, comments, docs, tests, error
-> messages. This is deliberate: it's the one part of the repo meant to become a
-> standalone OSS package, and OSS ships in English. The rest of the host app follows its own
-> Italian/English convention (see `AGENTS.md`) — that convention does NOT apply inside
-> `datacloak/`.
+> **Language:** English-only — code, comments, docs, tests, error messages.
 >
 > **Threat model:** see `SECURITY.md` for what a compromised/curious server can and
 > cannot do, and what's a declared non-goal (rollback protection). True DEK rotation

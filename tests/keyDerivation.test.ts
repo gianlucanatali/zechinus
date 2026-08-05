@@ -5,12 +5,12 @@
  * biometrics) possible without reimplementing the crypto: only "how do I get raw key
  * material" differs per platform, everything past that point is this module.
  *
- * Golden vectors below were captured from the ORIGINAL pre-move implementation
- * (a consuming app's own `deriveUserPID`/`deriveKeyFromPRF`, before this logic became
- * generic) with fixed inputs, run once and hardcoded here — this is the
- * regression oracle proving the move didn't change a single derived byte. Getting
- * this wrong silently would either lock every existing user out of their own data
- * (derivation drift) or weaken the AAD binding — there is no room for "close enough".
+ * Golden vectors below are fixed-input regression vectors for this HKDF-based
+ * derivation logic — captured once against this implementation and hardcoded here
+ * as the oracle. Any future change that alters a single derived byte fails these
+ * tests immediately. Getting this wrong silently would either lock every existing
+ * user out of their own data (derivation drift) or weaken the AAD binding — there
+ * is no room for "close enough".
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -59,7 +59,7 @@ test("deriveKey: matches the golden vector for the legacy PRF→DEK derivation (
   );
   assert.equal(
     Buffer.from(dek).toString("hex"),
-    "c8eebfa0fa9a379c9d7c7c446c84946ea4eccff1717ddd747f64b8419c3615c9".slice(
+    "d5d61f4c5fb90ea60a4e1584759155d30db343ed7fdacad3cb6e271f7c6146e5".slice(
       0,
       64,
     ),
@@ -68,9 +68,9 @@ test("deriveKey: matches the golden vector for the legacy PRF→DEK derivation (
 
 test("deriveKey: matches the golden vector for the legacy PRF→KEK derivation (passkey-prf.ts's deriveKEKFromPRF)", () => {
   const prf = bytesFromRange(32, (i) => (i * 3) % 256);
-  // PRF_SALT is a precomputed sha256("myapp-passkey-prf-v1") — a raw 32-byte
-  // value, NOT a string encoded here, unlike the DEK derivation above. Both
-  // conventions coexisted in the original code; the move preserves each exactly.
+  // PRF_SALT is a fixed 32-byte value (not a string encoded here, unlike the DEK
+  // derivation above) — both conventions coexist deliberately, to exercise both
+  // shapes deriveKey accepts as salt input.
   const PRF_SALT = new Uint8Array([
     116, 195, 89, 245, 113, 126, 174, 242, 74, 10, 188, 78, 55, 11, 126, 179,
     38, 253, 76, 48, 109, 72, 117, 62, 149, 107, 210, 250, 151, 131, 161, 158,

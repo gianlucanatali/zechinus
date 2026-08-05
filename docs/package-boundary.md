@@ -3,11 +3,11 @@
 Read this before adding an export, touching `index.ts`/`react/index.ts`, or adding a new
 adapter file.
 
-`datacloak/` is a real npm package (`"name": "datacloak"`), linked into the the host app
-host app as an **npm workspace** (`"workspaces": ["datacloak"]` in the root
-`package.json`) — `node_modules/datacloak` is a real symlink, not a bundler path alias.
-It also has its own standalone `tsconfig.json` (no `paths` at all, no reliance on the
-host app's config). Any file under `datacloak/` — including tests — must import the rest
+`datacloak/` is a real npm package (`"name": "datacloak"`). When consumed via an npm
+workspace (`"workspaces": ["datacloak"]` in the root `package.json`),
+`node_modules/datacloak` is a real symlink, not a bundler path alias. It also has its
+own standalone `tsconfig.json` (no `paths` at all, no reliance on a consumer's config).
+Any file under `datacloak/` — including tests — must import the rest
 of the package via **relative paths** (`../core/types.ts`, `./testKeyHandle.ts`), never
 its own package name (`datacloak`/`datacloak/*`) — that specifier is only meaningful for
 code OUTSIDE the package. Run `npm run datacloak:typecheck` before declaring work done on

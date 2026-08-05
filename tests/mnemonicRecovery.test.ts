@@ -7,8 +7,8 @@
  * shape as `webauthnKeyProvider(config)` — the app constructs it once with its own
  * config, consumers call the bound methods with no config repeated at every call site.
  *
- * Golden vector captured from the pre-move `crypto/recovery-key.ts` (fixed 24-word
- * Italian phrase, generated once, KEK derived and hardcoded here as the oracle).
+ * Golden vector: a fixed 24-word Italian phrase, KEK derived once and hardcoded
+ * here as the regression oracle.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -56,7 +56,7 @@ test("validateWords: accepts multiple configured wordlists (backward-compat with
   assert.equal(recovery.validateWords(englishTestVector), true);
 });
 
-test("deriveKEK: matches the golden vector from the pre-move implementation", () => {
+test("deriveKEK: matches the golden vector", () => {
   const recovery = testRecovery();
   const kek = recovery.deriveKEK(FIXED_WORDS);
   assert.equal(

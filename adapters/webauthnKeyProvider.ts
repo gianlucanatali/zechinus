@@ -3,8 +3,8 @@
  * WebAuthn PRF key provider — the web-platform adapter for deriving an E2E-encryption
  * key from a passkey. Any app doing zero-knowledge E2E encryption with WebAuthn PRF
  * needs this exact ceremony (register/authenticate, extract the PRF extension output,
- * HKDF-derive a DEK/KEK from it) — it's not the host app-specific, so it lives here, not
- * in the consuming app. What IS app-specific is the config: the actual salt/info
+ * HKDF-derive a DEK/KEK from it) — it isn't specific to any one host app, so it lives
+ * here, not in the consuming app. What IS app-specific is the config: the actual salt/info
  * bytes (tied to that app's already-encrypted data — changing them breaks decryption
  * for every existing user) and the relying-party id/name. A future native-biometrics
  * adapter (React Native) would mirror this file's shape, swapping `navigator.credentials`

@@ -45,7 +45,7 @@ it like any other source) reacts and recomputes successfully, usually well under
 yet", never as "confirmed empty" — a component that derives an empty/onboarding state from
 zero-valued fields without checking `data !== null` first will flash that empty state on
 every cold session, even when real data exists (`src/pages/Dashboard.tsx`'s
-`isCompletelyEmpty` in the the host app app is the reference fix). **Consequence for tests
+`isCompletelyEmpty` is the reference fix). **Consequence for tests
 (E2E, tutorial recordings, anything driving a real browser):** after a write that could
 mark an aggregation stale, wait for `isAnyAggregationComputing()` to go false (or the app's
 hidden DOM indicator built on it) before asserting/screenshotting — never a fixed `sleep()`,
