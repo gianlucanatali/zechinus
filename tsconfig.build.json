@@ -10,5 +10,5 @@
     "outDir": "dist"
   },
   "include": ["index.ts", "core", "adapters", "react", "aggregate", "node"],
-  "exclude": ["node_modules", "tests", "examples", "scripts", "adapters/expoDeviceCacheStorage.ts"]
+  "exclude": ["node_modules", "tests", "examples", "scripts"]
 }
