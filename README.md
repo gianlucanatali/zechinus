@@ -2,10 +2,11 @@
 
 **End-to-end encryption as an adapter layer, for apps that already own their backend.**
 
-Zechinus isn't "an encrypted store" — it's the correct cryptographic decisions made for
-you. Anyone can write a CRUD store; Zechinus owns the hard 20% that gets skipped or
-gotten wrong — per-row AAD, versioned envelopes, runtime validation, always-explicit
-encryption — so the domain only declares **the shape of its data**, never the mechanics.
+Zechinus isn't "an encrypted store" — it makes the cryptographic decisions an app
+building on it would otherwise have to make itself. Anyone can write a CRUD store;
+Zechinus owns the hard 20% that gets skipped or gotten wrong — per-row AAD, versioned
+envelopes, runtime validation, always-explicit encryption — so the domain only declares
+**the shape of its data**, never the mechanics.
 
 > Status: v1, extracted as a standalone package. It grew inside a production app's
 > monorepo before being pulled out and renamed — some file paths/comments in this
