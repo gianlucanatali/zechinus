@@ -209,6 +209,13 @@ variable, unsafe for concurrent multi-user Node code — use `alsKeyProvider` +
 `withIdentity()` from `zechinus/node` for that case. Never import `zechinus/node` from
 `zechinus/index.ts` or `zechinus/react/index.ts`.
 
+## Releasing a new package version — `CONTRIBUTING.md` § "Releasing a new version"
+
+Read that section before running `npm version` and pushing a tag. Gist: an agent may
+bump the patch digit on its own; a minor or major bump needs an explicit conversation
+and confirmation with the maintainer first, even when the change technically adds new
+optional public surface.
+
 ## The one invariant you must never break
 
 **Store `name` = DB table name = the `table` value baked into the AAD.** Changing it for

@@ -53,6 +53,25 @@ npm run typecheck   # standalone tsc --noEmit — catches package-boundary viola
   declared explicitly. If you hit that error while adding a feature, declare it — don't
   build a path around it.
 
+## Releasing a new version
+
+`npm version <bump>` + `git push origin main --tags` publishes the git tag consumers pin
+to (`github:gianlucanatali/zechinus#vX.Y.Z`) — this is a real release, not a local
+bookkeeping step.
+
+**An AI agent may run this on its own only for a patch bump (`x.y.Z`)** — a genuinely
+minor change: a bug fix, restoring a feature that existed before and was lost, a
+refactor with no intentional new public surface. **A minor or major bump (`x.Y.z` /
+`X.y.z`) always needs an explicit conversation with the maintainer first** — why that
+level is justified — and explicit confirmation before running `npm version`, even when
+the change technically adds a new optional field/method and would qualify as a "feature"
+under strict semver. Real case: three lost features (`IsolatedKeyCache`,
+`PasskeyWrapCache`, silent passkey unlock) were restored back-to-back in one session as
+three consecutive minor bumps (0.3.0 → 0.4.0 → 0.5.0) — each was actually a small fix
+that should have been a patch (0.2.1 → 0.2.2 → 0.2.3). Fixing a tag published in error:
+propose the fix (delete the tag, re-tag as a patch) and get confirmation before doing it
+— don't just redo it unilaterally, even to correct your own earlier mistake.
+
 ## Before opening a PR
 
 1. `npm run test:all` clean.
