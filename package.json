@@ -7,37 +7,47 @@
   "license": "MIT",
   "files": [
     "dist",
+    "dist-cjs",
     "scripts"
   ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist-cjs/index.cjs"
     },
     "./react": {
       "types": "./dist/react/index.d.ts",
-      "import": "./dist/react/index.js"
+      "import": "./dist/react/index.js",
+      "require": "./dist-cjs/react/index.cjs"
     },
     "./node": {
       "types": "./dist/node/index.d.ts",
-      "import": "./dist/node/index.js"
+      "import": "./dist/node/index.js",
+      "require": "./dist-cjs/node/index.cjs"
     },
     "./aggregate": {
       "types": "./dist/aggregate/index.d.ts",
-      "import": "./dist/aggregate/index.js"
+      "import": "./dist/aggregate/index.js",
+      "require": "./dist-cjs/aggregate/index.cjs"
     },
     "./adapters/*.ts": {
       "types": "./dist/adapters/*.d.ts",
-      "import": "./dist/adapters/*.js"
+      "import": "./dist/adapters/*.js",
+      "require": "./dist-cjs/adapters/*.cjs"
     },
     "./core/*.ts": {
       "types": "./dist/core/*.d.ts",
-      "import": "./dist/core/*.js"
-    }
+      "import": "./dist/core/*.js",
+      "require": "./dist-cjs/core/*.cjs"
+    },
+    "./package.json": "./package.json"
   },
   "sideEffects": false,
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "npm run build:esm && npm run build:cjs",
+    "build:esm": "tsc -p tsconfig.build.json",
+    "build:cjs": "tsc -p tsconfig.build.cjs.json && node scripts/rename-cjs-extensions.mjs",
     "prepare": "npm run build",
     "test": "tsx --test 'tests/**/*.test.ts'",
     "test:react": "vitest run",
