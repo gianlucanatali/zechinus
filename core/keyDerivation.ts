@@ -174,7 +174,7 @@ export interface CreateKeyHandleOptions {
    * later), so a second device can receive a rotated DEK without the raw bytes ever
    * leaving whichever context holds them (this closure, or the Worker it runs in).
    * Deliberately NOT baked into core: the actual crypto is adapter-specific
-   * (`wrapForDevicePublicKey` in `adapters/deviceKeyProvider.ts` on web) — core only
+   * (`wrapForDevicePublicKey` in `adapters/crypto/deviceKeyProvider.ts` on web) — core only
    * plumbs the raw `key` through to whatever the caller injects, exactly like
    * `hashContent` above. Omit if this handle never needs to deliver its key to another
    * device (e.g. a Node-side handle).

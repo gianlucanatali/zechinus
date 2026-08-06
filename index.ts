@@ -7,18 +7,18 @@
  * module graph. `KeyProvider`/`CacheAdapter` are plain interfaces (no React types),
  * so they stay exported here.
  *
- * See README.md for current status and scope (the "What Zechinus doesn't do yet"
- * section is the single source of truth for gaps — this file header used to
- * duplicate it and drifted out of sync, so it no longer tries to).
+ * See `docs/limitations.md` for current status and scope — the single source of truth
+ * for gaps; this file header used to duplicate it and drifted out of sync, so it no
+ * longer tries to.
  *
  * This barrel exports ONLY `core/` — zero adapters. Every adapter (`supabaseStorageAdapter`,
  * `pgStorageAdapter`, `webauthnKeyProvider`, `mnemonicRecovery`, `workerKeyHandle`,
  * `tanstackAdapter`) is optional and pulls in its own dependency (Supabase, a Postgres
  * driver, the WebAuthn browser API, TanStack Query) — importing `zechinus` for just
  * `defineStore` must never drag those into the module graph. Import an adapter from its
- * own file: `zechinus/adapters/supabaseStorageAdapter.ts`,
- * `zechinus/adapters/pgStorageAdapter.ts`, etc. See README's "Architecture: the ports"
- * section.
+ * own file: `zechinus/adapters/storage/supabaseStorageAdapter.ts`,
+ * `zechinus/adapters/storage/pgStorageAdapter.ts`, etc. See
+ * `docs/key-management.md` § "Architecture: the ports".
  */
 
 export {

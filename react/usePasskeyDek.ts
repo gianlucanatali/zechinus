@@ -1,6 +1,6 @@
 /**
  * React binding for `passkeyDekController` — a free function, not a class method, so
- * `adapters/passkeyDekController.ts` stays React-free (usable from Vue/Svelte/vanilla
+ * `adapters/controllers/passkeyDekController.ts` stays React-free (usable from Vue/Svelte/vanilla
  * JS via the same `subscribe`-based state shape). All the actual ceremony logic
  * (unlock, register, recovery, add-passkey) lives in the controller; this hook only
  * re-renders the calling component when the controller's state changes.
