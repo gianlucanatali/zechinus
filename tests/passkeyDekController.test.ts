@@ -16,6 +16,7 @@ import {
   createPasskeyDekController,
   type PasskeyWrapStorage,
   type WrappedKeyRow,
+  type PasskeyWrapCache,
 } from "../adapters/controllers/passkeyDekController.ts";
 import {
   createKeyHandle,
@@ -1415,6 +1416,163 @@ test("consumePendingDeviceWrap: savePasskeyWrap persist failure leaves cryptoHan
     controller.getPreviousCryptoHandle()!.pid,
     handleBefore!.pid,
     "retry after the failed attempt must demote the ORIGINAL handle to previous — not a duplicate of the new one",
+  );
+});
+
+// --- PasskeyWrapCache (offline unlock cache) ---
+//
+// Ported verbatim from datacloak/adapters/passkeyDekController.ts (commit 4b1a018b,
+// "passkeyDekController supports an optional offline wrap cache") — lost during the
+// datacloak -> zechinus extraction, restored here rather than redesigned: caching the
+// WRAP (opaque ciphertext) changes nothing about the security model, a live WebAuthn
+// PRF ceremony is still required on every unlock. Do not confuse this with
+// IsolatedKeyCache above, which caches an already-built KeyHandle specifically to skip
+// that ceremony — a fundamentally different trade-off.
+
+test("unlockWithPasskey: with a wrapCache configured, a successful online fetch refreshes the cache with the freshest wrap", async () => {
+  const storage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+  const cacheWrites: Array<{
+    userId: string;
+    credentialId: string;
+    wrap: WrappedKeyRow & { dekEpoch: number };
+  }> = [];
+  const wrapCache: PasskeyWrapCache = {
+    async get() {
+      return null;
+    },
+    async set(userId, credentialId, wrap) {
+      cacheWrites.push({ userId, credentialId, wrap });
+    },
+  };
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+    wrapCache,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const credentialId = controller.getUnlockCredentialId()!;
+  controller.lock();
+  cacheWrites.length = 0; // registerPasskey's own confirm() doesn't call unlockWithPasskey — clear any incidental writes before the assertion below
+
+  await controller.unlockWithPasskey("user-1", credentialId);
+
+  assert.equal(cacheWrites.length, 1);
+  assert.equal(cacheWrites[0].userId, "user-1");
+  assert.equal(cacheWrites[0].credentialId, credentialId);
+  assert.equal(typeof cacheWrites[0].wrap.ciphertext, "string");
+  assert.equal(typeof cacheWrites[0].wrap.nonce, "string");
+  assert.equal(cacheWrites[0].wrap.dekEpoch, 1);
+});
+
+test("unlockWithPasskey: when storage.loadPasskeyWraps fails (offline) and a valid wrap is cached, unlock still succeeds using the cached wrap", async () => {
+  const baseStorage = memoryWrapStorage();
+  const provider = fakeWebauthnProvider();
+
+  // Real passkey_key_wraps setup done through a WORKING controller first, so we get a
+  // real wrap + credentialId to seed the cache with — this must be an ACTUAL valid
+  // wrap for the crypto round-trip below to succeed, not a fake placeholder.
+  const setupController = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: baseStorage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await setupController.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const credentialId = setupController.getUnlockCredentialId()!;
+  const realWraps = await baseStorage.loadPasskeyWraps("user-1", credentialId);
+  assert.equal(realWraps.length, 1);
+  const cachedWrap = realWraps[0];
+
+  // Now the REAL test: a controller whose storage always fails (simulating
+  // offline/network-down), with the cache pre-seeded with the real wrap.
+  const alwaysFailingStorage: PasskeyWrapStorage = {
+    ...baseStorage,
+    async loadPasskeyWraps() {
+      throw new Error(
+        "alwaysFailingStorage: simulated network failure (offline)",
+      );
+    },
+  };
+  const wrapCache: PasskeyWrapCache = {
+    async get(userId, credId) {
+      if (userId === "user-1" && credId === credentialId) return cachedWrap;
+      return null;
+    },
+    async set() {
+      // not exercised by this test
+    },
+  };
+  const offlineController = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: alwaysFailingStorage,
+    createHandle: testCreateHandle,
+    wrapCache,
+  });
+
+  await offlineController.unlockWithPasskey("user-1", credentialId);
+
+  assert.notEqual(offlineController.getCryptoHandle(), null);
+});
+
+test("unlockWithPasskey: when storage.loadPasskeyWraps fails and NOTHING is cached, the original error still propagates — no silent lockout-avoidance that hides a real bug", async () => {
+  const provider = fakeWebauthnProvider();
+  const alwaysFailingStorage: PasskeyWrapStorage = {
+    ...memoryWrapStorage(),
+    async loadPasskeyWraps() {
+      throw new Error("alwaysFailingStorage: simulated network failure");
+    },
+  };
+  const wrapCache: PasskeyWrapCache = {
+    async get() {
+      return null; // nothing cached for this user/credential yet
+    },
+    async set() {},
+  };
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: alwaysFailingStorage,
+    createHandle: testCreateHandle,
+    wrapCache,
+  });
+
+  await assert.rejects(
+    () => controller.unlockWithPasskey("user-1", "cred-1"),
+    /simulated network failure/,
+  );
+});
+
+test("unlockWithPasskey: with NO wrapCache configured (web's exact setup), a storage failure throws immediately — zero behavior change from before this feature existed", async () => {
+  const provider = fakeWebauthnProvider();
+  const alwaysFailingStorage: PasskeyWrapStorage = {
+    ...memoryWrapStorage(),
+    async loadPasskeyWraps() {
+      throw new Error("alwaysFailingStorage: simulated network failure");
+    },
+  };
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage: alwaysFailingStorage,
+    createHandle: testCreateHandle,
+    // no wrapCache — matches src/lib/passkeyDekController.ts (web)
+  });
+
+  await assert.rejects(
+    () => controller.unlockWithPasskey("user-1", "cred-1"),
+    /simulated network failure/,
   );
 });
 

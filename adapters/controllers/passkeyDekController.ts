@@ -36,6 +36,36 @@ import {
 export type WrappedKeyRow = { ciphertext: string; nonce: string };
 
 /**
+ * Optional local cache for the wrapped DEK, keyed by (userId, credentialId).
+ * When configured, `unlockWithPasskey` falls back to this cache if the live
+ * `storage.loadPasskeyWraps` call fails for any reason (offline, transient
+ * network error, RLS hiccup — no need to distinguish which, same permissive
+ * philosophy as any other "fail open to cache" read in this codebase) — and
+ * refreshes the cache with the freshest wrap on every successful online
+ * fetch, so a later offline unlock always uses whatever was freshest last
+ * time the device was online.
+ *
+ * Caching the wrap changes nothing about the security model: it's opaque
+ * ciphertext, useless without a KEK that can only ever be derived from a
+ * LIVE WebAuthn PRF ceremony (a biometric touch on THIS device's Secure
+ * Enclave) — a live touch is still required on every single unlock, cached
+ * wrap or not. Left unconfigured (e.g. the web app, always-online), the
+ * controller behaves exactly as it did before this type existed — a storage
+ * failure throws immediately, same as any other unhandled I/O error.
+ */
+export interface PasskeyWrapCache {
+  get(
+    userId: string,
+    credentialId: string,
+  ): Promise<(WrappedKeyRow & { dekEpoch: number }) | null>;
+  set(
+    userId: string,
+    credentialId: string,
+    wrap: WrappedKeyRow & { dekEpoch: number },
+  ): Promise<void>;
+}
+
+/**
  * Where wrapped keys are persisted. `many` passkeys per user (one row per
  * credential), exactly one recovery wrap per user — mirrors the real shape of any
  * app doing this (a user has N devices, one recovery phrase).
@@ -109,6 +139,10 @@ export interface PasskeyDekControllerConfig {
   storage: PasskeyWrapStorage;
   /** Builds the real `KeyHandle` from freshly-unwrapped raw bytes — plain or Worker-isolated. */
   createHandle: (rawBytes: RawDekBytes) => Promise<KeyHandle> | KeyHandle;
+  /** See `PasskeyWrapCache`'s own doc comment. Optional — omit for an
+   * always-online app (e.g. the web client); required for offline unlock
+   * support (e.g. the mobile client). */
+  wrapCache?: PasskeyWrapCache;
   /** See `IsolatedKeyCache`. Optional — mobile-only today; web stays always-online. */
   isolatedKeyCache?: IsolatedKeyCache;
   /**
@@ -346,7 +380,7 @@ export interface PasskeyDekController {
 export function createPasskeyDekController(
   config: PasskeyDekControllerConfig,
 ): PasskeyDekController {
-  const { provider, recovery, storage, createHandle } = config;
+  const { provider, recovery, storage, createHandle, wrapCache } = config;
 
   let cryptoHandle: KeyHandle | null = null;
   let previousCryptoHandle: KeyHandle | null = null;
@@ -454,7 +488,19 @@ export function createPasskeyDekController(
       const { prfOutput, credentialId: usedCredentialId } =
         await provider.getPRFOutputWithCredentialId(credentialId);
 
-      const wraps = await storage.loadPasskeyWraps(uid, usedCredentialId);
+      let wraps: Array<WrappedKeyRow & { dekEpoch: number }>;
+      try {
+        wraps = await storage.loadPasskeyWraps(uid, usedCredentialId);
+        if (wrapCache && wraps.length > 0) {
+          const [freshest] = [...wraps].sort((a, b) => b.dekEpoch - a.dekEpoch);
+          await wrapCache.set(uid, usedCredentialId, freshest);
+        }
+      } catch (e) {
+        if (!wrapCache) throw e;
+        const cached = await wrapCache.get(uid, usedCredentialId);
+        if (!cached) throw e;
+        wraps = [cached];
+      }
       if (wraps.length === 0) {
         throw new Error(
           "passkeyDekController.unlockWithPasskey: no wrap found for this credential — complete setup first.",
