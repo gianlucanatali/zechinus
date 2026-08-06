@@ -21,7 +21,9 @@ import {
   createKeyHandle,
   asRawDekBytes,
   wrapKey,
+  type KeyHandle,
 } from "../core/keyDerivation.ts";
+import { randomBytes } from "@noble/ciphers/utils.js";
 import type { WebauthnKeyProvider } from "../adapters/keyproviders/webauthnKeyProvider.ts";
 import type { MnemonicRecovery } from "../adapters/keyproviders/mnemonicRecovery.ts";
 import { deriveKey } from "../core/keyDerivation.ts";
@@ -1414,4 +1416,191 @@ test("consumePendingDeviceWrap: savePasskeyWrap persist failure leaves cryptoHan
     handleBefore!.pid,
     "retry after the failed attempt must demote the ORIGINAL handle to previous — not a duplicate of the new one",
   );
+});
+
+// --- IsolatedKeyCache / persistForZeroTap / tryZeroTapRestore ---
+//
+// A handle isolated behind a native module/Worker boundary never exposes raw bytes —
+// this cache moves an already-built KeyHandle, restored INSIDE the boundary, never a
+// byte of key material. See docs/DECISIONS.md § "Native-module DEK isolation".
+
+function makeIsolatedHandle(): KeyHandle {
+  return {
+    pid: "fake-isolated-pid",
+    encryptField: async (s) => ({ ct: s, n: "n", v: 3 }) as never,
+    decryptField: async (e) => (e as { ct: string }).ct,
+    encryptJson: async () => ({ ct: "{}", n: "n", v: 4 }) as never,
+    decryptJson: async () => ({}) as never,
+    wrapWithKek: async () => ({ ciphertext: "ct", nonce: "n" }),
+    destroy() {},
+  };
+}
+
+function makeFakeIsolatedKeyCache() {
+  const store = new Map<
+    string,
+    { handle: KeyHandle; dekEpoch: number; credentialId: string }
+  >();
+  let lastPersisted: { dekEpoch: number; credentialId: string } | null = null;
+  return {
+    persist: async (
+      _userId: string,
+      meta: { dekEpoch: number; credentialId: string },
+    ) => {
+      lastPersisted = meta;
+    },
+    restore: async (userId: string) => store.get(userId) ?? null,
+    clear: async (userId: string) => {
+      store.delete(userId);
+    },
+    _seed: (
+      userId: string,
+      entry: { handle: KeyHandle; dekEpoch: number; credentialId: string },
+    ) => store.set(userId, entry),
+    _lastPersisted: () => lastPersisted,
+  };
+}
+
+function baseConfigForIsolatedCacheTests() {
+  return {
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
+  };
+}
+
+test("persistForZeroTap: no-op when no cache is configured (default, matches web)", async () => {
+  const controller = createPasskeyDekController(baseConfigForIsolatedCacheTests());
+  await controller.setDek("user-1", asRawDekBytes(randomBytes(32)), "cred-1");
+  await controller.persistForZeroTap("user-1"); // must not throw
+});
+
+test("persistForZeroTap: hands the port epoch+credentialId only — never key material", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => 4,
+  });
+  await controller.setDek("user-1", asRawDekBytes(randomBytes(32)), "cred-1");
+
+  await controller.persistForZeroTap("user-1");
+
+  assert.deepEqual(isolatedKeyCache._lastPersisted(), {
+    dekEpoch: 4,
+    credentialId: "cred-1",
+  });
+});
+
+test("persistForZeroTap: getCurrentEpoch throws (offline) — writes nothing rather than a possibly-stale entry", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => {
+      throw new Error("offline");
+    },
+  });
+  await controller.setDek("user-1", asRawDekBytes(randomBytes(32)), "cred-1");
+
+  await controller.persistForZeroTap("user-1");
+
+  assert.equal(isolatedKeyCache._lastPersisted(), null);
+});
+
+test("persistForZeroTap: no-op when locked (no active handle)", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => 1,
+  });
+  await controller.persistForZeroTap("user-1"); // never unlocked
+  assert.equal(isolatedKeyCache._lastPersisted(), null);
+});
+
+test("tryZeroTapRestore: false when nothing cached", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => 1,
+  });
+  assert.equal(await controller.tryZeroTapRestore("user-1"), false);
+  assert.equal(controller.getCryptoHandle(), null);
+});
+
+test("tryZeroTapRestore: no cache configured — false, matches web default", async () => {
+  const controller = createPasskeyDekController(baseConfigForIsolatedCacheTests());
+  assert.equal(await controller.tryZeroTapRestore("user-1"), false);
+});
+
+test("tryZeroTapRestore: epoch matches — adopts the restored handle, no ceremony", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  const restored = makeIsolatedHandle();
+  isolatedKeyCache._seed("user-1", {
+    handle: restored,
+    dekEpoch: 2,
+    credentialId: "cred-1",
+  });
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => 2,
+  });
+
+  assert.equal(await controller.tryZeroTapRestore("user-1"), true);
+  assert.equal(controller.getCryptoHandle(), restored);
+  assert.equal(controller.getUnlockCredentialId(), "cred-1");
+});
+
+test("tryZeroTapRestore: OS gate refused (restore -> null) — false, nothing promoted", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  isolatedKeyCache.restore = async () => null; // biometrics failed or cancelled
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => 2,
+  });
+
+  assert.equal(await controller.tryZeroTapRestore("user-1"), false);
+  assert.equal(controller.getCryptoHandle(), null);
+});
+
+test("tryZeroTapRestore: epoch STALE (rotated elsewhere) — destroys the handle, clears the entry, returns false", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  let destroyed = false;
+  const handle = { ...makeIsolatedHandle(), destroy() { destroyed = true; } };
+  isolatedKeyCache._seed("user-1", { handle, dekEpoch: 2, credentialId: "cred-1" });
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => 3,
+  });
+
+  assert.equal(await controller.tryZeroTapRestore("user-1"), false);
+  assert.equal(controller.getCryptoHandle(), null);
+  assert.equal(destroyed, true, "no orphaned handle with a live key");
+  assert.equal(await isolatedKeyCache.restore("user-1"), null);
+});
+
+test("tryZeroTapRestore: getCurrentEpoch throws (offline) — fails open, adopts the cached handle", async () => {
+  const isolatedKeyCache = makeFakeIsolatedKeyCache();
+  const restored = makeIsolatedHandle();
+  isolatedKeyCache._seed("user-1", {
+    handle: restored,
+    dekEpoch: 2,
+    credentialId: "cred-1",
+  });
+  const controller = createPasskeyDekController({
+    ...baseConfigForIsolatedCacheTests(),
+    isolatedKeyCache,
+    getCurrentEpoch: async () => {
+      throw new Error("offline");
+    },
+  });
+
+  assert.equal(await controller.tryZeroTapRestore("user-1"), true);
+  assert.equal(controller.getCryptoHandle(), restored);
 });

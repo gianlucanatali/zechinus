@@ -78,6 +78,12 @@ function fakeController(): PasskeyDekController & {
     consumePendingDeviceWrap: async () => {
       throw new Error("not used in this test");
     },
+    persistForZeroTap: async () => {
+      throw new Error("not used in this test");
+    },
+    tryZeroTapRestore: async () => {
+      throw new Error("not used in this test");
+    },
   } as PasskeyDekController & {
     setDekCalls: Array<{
       userId: string;

@@ -71,12 +71,54 @@ export type PasskeySetupStatus = "pending" | "needed" | "done";
  * like invalidating a recovery phrase). `null` when locked. */
 export type UnlockMethod = "passkey" | "recovery";
 
+/**
+ * Zero-tap cache for handles whose key never leaves an isolation boundary — a native
+ * module on mobile, a Worker with persistent storage anywhere else. The port never sees
+ * a byte of key material: it hands back an already-built `KeyHandle`, because the key is
+ * restored INSIDE the boundary and only an opaque reference comes out.
+ *
+ * The implementor owns the OS-level gate (Keychain `biometryCurrentSet` on iOS, Keystore
+ * `setUserAuthenticationRequired` + BiometricPrompt on Android). Having the OS enforce it
+ * rather than app code is the whole point: an app-level check is one refactor away from
+ * being forgotten — which is exactly what shipped in TestFlight build 20 — and cannot
+ * survive a biometric re-enrollment the way the OS flag does.
+ *
+ * Deliberately NOT a "give me the raw bytes" port. There is no such port in zechinus, on
+ * purpose: see `docs/DECISIONS.md` § "Native-module DEK isolation".
+ */
+export interface IsolatedKeyCache {
+  /** Persists the currently-active key inside the boundary, with the metadata needed to validate it later. */
+  persist(
+    userId: string,
+    meta: { dekEpoch: number; credentialId: string },
+  ): Promise<void>;
+  /**
+   * OS-gated restore. Resolves `null` — never throws — when there's nothing cached, the
+   * gate is unavailable, or the user failed/cancelled authentication: all expected
+   * outcomes, and the caller falls through to a real ceremony.
+   */
+  restore(
+    userId: string,
+  ): Promise<{ handle: KeyHandle; dekEpoch: number; credentialId: string } | null>;
+  clear(userId: string): Promise<void>;
+}
+
 export interface PasskeyDekControllerConfig {
   provider: WebauthnKeyProvider;
   recovery: MnemonicRecovery;
   storage: PasskeyWrapStorage;
   /** Builds the real `KeyHandle` from freshly-unwrapped raw bytes — plain or Worker-isolated. */
   createHandle: (rawBytes: RawDekBytes) => Promise<KeyHandle> | KeyHandle;
+  /** See `IsolatedKeyCache`. Optional — mobile-only today; web stays always-online. */
+  isolatedKeyCache?: IsolatedKeyCache;
+  /**
+   * Reads the account's CURRENT dek_epoch from the server — used exclusively by
+   * `tryZeroTapRestore()` to detect a rotation that happened elsewhere (this
+   * controller never initiates one). Optional; when omitted, or when it throws
+   * (offline), fails OPEN on the cached entry, same permissive philosophy as
+   * the rotation-handshake paths elsewhere in this file.
+   */
+  getCurrentEpoch?: (userId: string) => Promise<number>;
 }
 
 /** Returned by `registerPasskey` — nothing is persisted until `confirm()` runs, so the
@@ -284,6 +326,21 @@ export interface PasskeyDekController {
     wrapped: DeviceWrappedKey,
     newEpoch: number,
   ): Promise<void>;
+
+  /**
+   * Persists the CURRENTLY-ACTIVE key through `isolatedKeyCache`, so a later
+   * `tryZeroTapRestore()` can skip a whole ceremony. No-op (never throws) when no cache
+   * is configured, when locked, or when the current epoch can't be read (offline —
+   * writing an entry we can't validate later is worse than writing none).
+   */
+  persistForZeroTap(userId: string): Promise<void>;
+  /**
+   * Attempts a zero-ceremony unlock from `isolatedKeyCache`. Returns `false` — never
+   * throws — whenever the path isn't usable: no cache configured, nothing stored, the OS
+   * gate refused, or a detected epoch mismatch (stale entry destroyed and cleared, caller
+   * falls through to a real ceremony).
+   */
+  tryZeroTapRestore(userId: string): Promise<boolean>;
 }
 
 export function createPasskeyDekController(
@@ -321,6 +378,24 @@ export function createPasskeyDekController(
     devicePublicKey = null;
   }
 
+  // Extracted from activate() so the zero-tap restore path (which already has a built
+  // KeyHandle, never raw bytes) can share the exact same promotion logic.
+  function adoptHandle(
+    uid: string,
+    handle: KeyHandle,
+    method: UnlockMethod,
+    credentialId: string | null,
+    devicePublicKeyB64: string | null = null,
+  ): void {
+    cryptoHandle = handle;
+    userId = uid;
+    setupStatus = "done";
+    unlockMethod = method;
+    unlockCredentialId = credentialId;
+    devicePublicKey = devicePublicKeyB64;
+    notify();
+  }
+
   async function activate(
     uid: string,
     rawBytes: RawDekBytes,
@@ -330,13 +405,7 @@ export function createPasskeyDekController(
   ): Promise<void> {
     const handle = await createHandle(rawBytes);
     clean(rawBytes);
-    cryptoHandle = handle;
-    userId = uid;
-    setupStatus = "done";
-    unlockMethod = method;
-    unlockCredentialId = credentialId;
-    devicePublicKey = devicePublicKeyB64;
-    notify();
+    adoptHandle(uid, handle, method, credentialId, devicePublicKeyB64);
   }
 
   return {
@@ -672,6 +741,46 @@ export function createPasskeyDekController(
       } finally {
         clean(kek);
       }
+    },
+
+    async persistForZeroTap(uid) {
+      const cache = config.isolatedKeyCache;
+      if (!cache || !cryptoHandle || !unlockCredentialId) return;
+      let epoch: number;
+      try {
+        epoch = config.getCurrentEpoch ? await config.getCurrentEpoch(uid) : 1;
+      } catch {
+        // Offline: an entry with an epoch we couldn't read isn't validatable
+        // on the next launch. No cache beats a blind one.
+        return;
+      }
+      await cache.persist(uid, {
+        dekEpoch: epoch,
+        credentialId: unlockCredentialId,
+      });
+    },
+
+    async tryZeroTapRestore(uid) {
+      const cache = config.isolatedKeyCache;
+      if (!cache) return false;
+      const cached = await cache.restore(uid);
+      if (!cached) return false;
+
+      if (config.getCurrentEpoch) {
+        try {
+          if ((await config.getCurrentEpoch(uid)) !== cached.dekEpoch) {
+            cached.handle.destroy();
+            await cache.clear(uid);
+            return false;
+          }
+        } catch {
+          // Offline — fail open, same permissive philosophy as the rotation
+          // handshake paths elsewhere in this file.
+        }
+      }
+
+      adoptHandle(uid, cached.handle, "passkey", cached.credentialId);
+      return true;
     },
   };
 }
