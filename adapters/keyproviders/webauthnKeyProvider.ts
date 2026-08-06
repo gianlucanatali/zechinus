@@ -60,6 +60,22 @@ export interface WebauthnKeyProvider {
   getPRFOutputWithCredentialId(
     credentialId?: string,
   ): Promise<{ prfOutput: ArrayBuffer; credentialId: string }>;
+  /**
+   * Silent/opportunistic variant of `getPRFOutputWithCredentialId` — MUST resolve or
+   * reject WITHOUT presenting any authenticator UI when a credential isn't immediately
+   * available locally (the browser Credential Management API's `mediation: "silent"`;
+   * iOS's `ASAuthorizationController.preferImmediatelyAvailableCredentials`; Android's
+   * `preferImmediatelyAvailableCredentials` on `GetCredentialRequest`). A regular
+   * ceremony with a specific `credentialId` that no longer exists locally can still let
+   * the platform offer its own "use a passkey from a nearby device" cross-device/QR
+   * system UI — `allowCredentials` narrows WHICH credential can satisfy the request, it
+   * does not by itself suppress that fallback UI. Optional: providers that can't offer a
+   * genuinely no-UI ceremony simply omit this — `unlockWithPasskey`'s `silent` option
+   * then falls back to the regular ceremony.
+   */
+  getPRFOutputWithCredentialIdSilent?(
+    credentialId?: string,
+  ): Promise<{ prfOutput: ArrayBuffer; credentialId: string }>;
   /** Derives a KEK from a passkey's PRF output — different `info` than the DEK, not blob-compatible with it. */
   deriveKEKFromPRF(prfOutput: ArrayBuffer): Uint8Array;
 }

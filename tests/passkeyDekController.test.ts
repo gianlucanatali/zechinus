@@ -1762,3 +1762,110 @@ test("tryZeroTapRestore: getCurrentEpoch throws (offline) — fails open, adopts
   assert.equal(await controller.tryZeroTapRestore("user-1"), true);
   assert.equal(controller.getCryptoHandle(), restored);
 });
+
+test("unlockWithPasskey({silent:true}): uses the provider's silent ceremony variant when available, never the regular one", async () => {
+  const base = fakeWebauthnProvider();
+  let regularCalls = 0;
+  let silentCalls = 0;
+  const provider: WebauthnKeyProvider = {
+    ...base,
+    async getPRFOutputWithCredentialId(credentialId) {
+      regularCalls++;
+      return base.getPRFOutputWithCredentialId(credentialId);
+    },
+    async getPRFOutputWithCredentialIdSilent(credentialId) {
+      silentCalls++;
+      return base.getPRFOutputWithCredentialId(credentialId);
+    },
+  };
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const pidAfterSetup = controller.getCryptoHandle()!.pid;
+  controller.lock();
+  regularCalls = 0; // ignore the registration ceremony's own call
+
+  await controller.unlockWithPasskey("user-1", undefined, { silent: true });
+
+  assert.equal(controller.getCryptoHandle()!.pid, pidAfterSetup);
+  assert.equal(silentCalls, 1);
+  assert.equal(regularCalls, 0);
+});
+
+test("unlockWithPasskey({silent:true}): falls back to the regular ceremony when the provider has no silent variant", async () => {
+  const base = fakeWebauthnProvider();
+  let regularCalls = 0;
+  const provider: WebauthnKeyProvider = {
+    ...base,
+    async getPRFOutputWithCredentialId(credentialId) {
+      regularCalls++;
+      return base.getPRFOutputWithCredentialId(credentialId);
+    },
+    // no getPRFOutputWithCredentialIdSilent — provider can't offer a no-UI ceremony
+  };
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  const pidAfterSetup = controller.getCryptoHandle()!.pid;
+  controller.lock();
+  regularCalls = 0;
+
+  await controller.unlockWithPasskey("user-1", undefined, { silent: true });
+
+  assert.equal(controller.getCryptoHandle()!.pid, pidAfterSetup);
+  assert.equal(regularCalls, 1);
+});
+
+test("unlockWithPasskey without opts.silent never calls the provider's silent variant, even if defined", async () => {
+  const base = fakeWebauthnProvider();
+  let regularCalls = 0;
+  let silentCalls = 0;
+  const provider: WebauthnKeyProvider = {
+    ...base,
+    async getPRFOutputWithCredentialId(credentialId) {
+      regularCalls++;
+      return base.getPRFOutputWithCredentialId(credentialId);
+    },
+    async getPRFOutputWithCredentialIdSilent(credentialId) {
+      silentCalls++;
+      return base.getPRFOutputWithCredentialId(credentialId);
+    },
+  };
+  const storage = memoryWrapStorage();
+  const controller = createPasskeyDekController({
+    provider,
+    recovery: fakeMnemonicRecovery(),
+    storage,
+    createHandle: testCreateHandle,
+  });
+  const { confirm } = await controller.registerPasskey(
+    "user-1",
+    "u@test.example",
+  );
+  await confirm();
+  controller.lock();
+  regularCalls = 0;
+
+  await controller.unlockWithPasskey("user-1");
+
+  assert.equal(regularCalls, 1);
+  assert.equal(silentCalls, 0);
+});

@@ -229,8 +229,17 @@ export interface PasskeyDekController {
   markSetupDone(): void;
 
   /** Authenticates with an existing passkey and unlocks the DEK from its wrap.
-   * `credentialId` omitted lets the platform show every available passkey. */
-  unlockWithPasskey(userId: string, credentialId?: string): Promise<void>;
+   * `credentialId` omitted lets the platform show every available passkey.
+   * `opts.silent`: use the provider's no-UI ceremony variant if it has one
+   * (`getPRFOutputWithCredentialIdSilent`) — for an automatic/background
+   * unlock attempt that must never surface unrequested platform UI (see
+   * that method's own doc comment). Falls back to the regular ceremony if
+   * the provider doesn't support a silent variant. */
+  unlockWithPasskey(
+    userId: string,
+    credentialId?: string,
+    opts?: { silent?: boolean },
+  ): Promise<void>;
   /** Unlocks the DEK using a BIP39 recovery phrase. */
   unlockWithRecovery(userId: string, words: string): Promise<void>;
 
@@ -484,9 +493,13 @@ export function createPasskeyDekController(
       notify();
     },
 
-    async unlockWithPasskey(uid, credentialId) {
+    async unlockWithPasskey(uid, credentialId, opts) {
+      const ceremony =
+        opts?.silent && provider.getPRFOutputWithCredentialIdSilent
+          ? provider.getPRFOutputWithCredentialIdSilent
+          : provider.getPRFOutputWithCredentialId;
       const { prfOutput, credentialId: usedCredentialId } =
-        await provider.getPRFOutputWithCredentialId(credentialId);
+        await ceremony(credentialId);
 
       let wraps: Array<WrappedKeyRow & { dekEpoch: number }>;
       try {

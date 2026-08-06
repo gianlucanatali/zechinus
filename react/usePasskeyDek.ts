@@ -26,7 +26,11 @@ export interface UsePasskeyDekResult {
   markSetupDone: () => void;
   setDek: (userId: string, rawBytes: RawDekBytes) => Promise<void>;
   lock: () => void;
-  unlockWithPasskey: (userId: string, credentialId?: string) => Promise<void>;
+  unlockWithPasskey: (
+    userId: string,
+    credentialId?: string,
+    opts?: { silent?: boolean },
+  ) => Promise<void>;
   unlockWithRecovery: (userId: string, words: string) => Promise<void>;
   registerPasskey: (
     userId: string,
