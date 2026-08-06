@@ -4,6 +4,7 @@ Why Zechinus is shaped the way it is — the choices that aren't obvious from re
 code, and what was rejected instead. `SECURITY.md` documents the threat model (what a
 compromised server can/can't do); this document is about the design trade-offs that
 produced that threat model. `AGENTS.md` is the operative "how to use/extend it" guide.
+Back to [README.md](../README.md).
 
 ## AAD binds `{userId, table, field, rowId}`, not just `userId`
 
