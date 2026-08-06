@@ -871,9 +871,9 @@ function buildKeyedStore<S extends z.ZodType>(
           record,
         })),
       );
-      // Stesso schema di set()/mutate(): ogni chiave creata aggiorna il proprio
-      // slot cache, un solo epoch bump per l'intero batch (un range montato che
-      // osserva questo store deve rifare list() una volta sola, non N).
+      // Same pattern as set()/mutate(): each created key updates its own cache
+      // slot, one epoch bump for the whole batch (a mounted range observing
+      // this store needs to re-run list() once, not N times).
       for (const { key, valid, record } of prepared) {
         writeThroughCache(
           cacheKeyFor(userId, key),

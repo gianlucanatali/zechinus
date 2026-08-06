@@ -10,7 +10,7 @@
  * remove that moment. Run it yourself, after deciding, not before.
  *
  * Usage:
- *   npx tsx datacloak/scripts/sync-fingerprints.mjs <file1.ts> [file2.ts ...]
+ *   npx tsx node_modules/zechinus/scripts/sync-fingerprints.mjs <file1.ts> [file2.ts ...]
  *
  * Exit code 0 if every file is OK (already correct, or successfully patched).
  * Exit code 1 if a file has a real error unrelated to schemaFingerprint, or a

@@ -54,10 +54,10 @@ test("pgStorageAdapter.get: maps a found row", async () => {
   });
 });
 
-// REGRESSIONE: get() non selezionava content_hash — mutate()/saveIfMatch usava
-// sempre hash:null anche su una riga con un hash reale, facendo fallire ogni
-// scrittura successiva con OptimisticLockConflictError anche senza un vero
-// secondo scrittore (riprodotto empiricamente contro Supabase locale).
+// REGRESSION: get() wasn't selecting content_hash — mutate()/saveIfMatch always
+// saw hash:null even on a row with a real hash, failing every subsequent write
+// with OptimisticLockConflictError even without a real second writer
+// (reproduced empirically against local Supabase).
 test("pgStorageAdapter.get: maps content_hash when present", async () => {
   const { client } = fakeClient([
     { schema_version: 2, blob: "enc:x", content_hash: "h1" },
