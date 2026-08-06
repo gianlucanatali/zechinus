@@ -95,4 +95,16 @@ class CryptoKeyRef(rawBytes: ByteArray) : SharedObject() {
     key = null
     macKey = null
   }
+
+  /**
+   * The only place in this module that turns key material back into plain bytes —
+   * `internal` (not exposed via the `Class("CryptoKey", ...)` binding), so it exists for
+   * `ZeroTapKeystoreStore` in this same module to call, and is unreachable from JS: it is
+   * never listed inside the `Class` definition, so the Expo Modules bridge has no way to
+   * invoke it. The returned hex string goes straight into an AndroidKeyStore-encrypted
+   * blob gated by `BiometricPrompt` (`ZeroTapKeystoreStore.cache`) — it is never logged,
+   * returned across the JS bridge, or persisted anywhere else.
+   */
+  internal fun exportForKeychainOnly(): String =
+    requireKey().joinToString("") { "%02x".format(it) }
 }

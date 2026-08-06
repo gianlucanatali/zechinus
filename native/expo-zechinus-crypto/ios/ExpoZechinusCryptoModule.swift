@@ -25,5 +25,26 @@ public class ExpoZechinusCryptoModule: Module {
       AsyncFunction("wrapSelf") { (ref: CryptoKeyRef, kek: Data) -> [String: String] in try ref.wrapSelf(kek) }
       Function("destroy") { (ref: CryptoKeyRef) in ref.destroy() }
     }
+
+    // Module-level (not on the Class): these operate on the Keychain, not on an
+    // in-memory key. `cacheKeyForZeroTap`/`tryRestoreFromNativeCache`/`clearNativeCache`
+    // are the native counterpart of the `IsolatedKeyCache` port
+    // (`adapters/controllers/passkeyDekController.ts`) — the key never leaves this
+    // boundary: `tryRestoreFromNativeCache` hands back an already-built `CryptoKey`
+    // instance, never raw bytes. Logic lives in `ZeroTapKeychainStore` (plain type,
+    // same reason `CryptoKeyRef` is a plain type — see that file's own doc comment);
+    // these are thin bindings.
+    AsyncFunction("cacheKeyForZeroTap") { (ref: CryptoKeyRef, userId: String, dekEpoch: Int, credentialId: String) in
+      try ZeroTapKeychainStore.cache(key: ref, userId: userId, dekEpoch: dekEpoch, credentialId: credentialId)
+    }
+
+    AsyncFunction("tryRestoreFromNativeCache") { (userId: String) -> [String: Any]? in
+      guard let restored = ZeroTapKeychainStore.tryRestore(userId: userId) else { return nil }
+      return ["key": restored.key, "dekEpoch": restored.dekEpoch, "credentialId": restored.credentialId]
+    }
+
+    AsyncFunction("clearNativeCache") { (userId: String) in
+      ZeroTapKeychainStore.clear(userId: userId)
+    }
   }
 }

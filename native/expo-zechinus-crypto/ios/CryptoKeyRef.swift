@@ -9,6 +9,8 @@ enum ZechinusCryptoError: Error, LocalizedError {
   case invalidNonceLength(Int)
   case ciphertextTooShort(Int)
   case invalidHkdfLength(Int)
+  case accessControlUnavailable
+  case keychainWrite(OSStatus)
 
   var errorDescription: String? {
     switch self {
@@ -18,7 +20,42 @@ enum ZechinusCryptoError: Error, LocalizedError {
     case .invalidNonceLength(let n): return "CryptoKey: nonce must be 12 bytes, got \(n)"
     case .ciphertextTooShort(let n): return "CryptoKey: ciphertext must include the 16-byte GCM tag, got \(n) bytes"
     case .invalidHkdfLength(let n): return "CryptoKey: HKDF length must be 1...8160, got \(n)"
+    case .accessControlUnavailable: return "CryptoKey: could not create a biometric-gated Keychain access control (no biometry enrolled on this device?)"
+    case .keychainWrite(let status): return "CryptoKey: Keychain write failed with status \(status)"
     }
+  }
+}
+
+/// What `cacheKeyForZeroTap` persists to the Keychain, opaque to anything reading it
+/// outside this module — the biometric ACL on the Keychain item is what actually
+/// protects it, this struct only describes the shape of the plaintext-once-inside-
+/// Secure-Enclave-access payload.
+struct CachedEntry: Codable {
+  let keyHex: String
+  let dekEpoch: Int
+  let credentialId: String
+}
+
+extension Data {
+  /// Lowercase-or-uppercase hex string -> bytes. `nil` on malformed input (odd length,
+  /// non-hex characters) rather than trapping — a corrupted/tampered Keychain entry
+  /// must fail closed (`tryRestoreFromNativeCache` returns `nil`), never crash.
+  init?(hexString: String) {
+    guard hexString.count % 2 == 0 else { return nil }
+    var bytes = [UInt8]()
+    bytes.reserveCapacity(hexString.count / 2)
+    var index = hexString.startIndex
+    while index < hexString.endIndex {
+      let next = hexString.index(index, offsetBy: 2)
+      guard let byte = UInt8(hexString[index..<next], radix: 16) else { return nil }
+      bytes.append(byte)
+      index = next
+    }
+    self = Data(bytes)
+  }
+
+  var hexString: String {
+    map { String(format: "%02x", $0) }.joined()
   }
 }
 
@@ -104,5 +141,16 @@ public final class CryptoKeyRef: SharedObject {
   public func destroy() {
     key = nil
     macKey = nil
+  }
+
+  /// The only place in this module that turns key material back into plain bytes —
+  /// `internal` (not `public`), so it exists for `ExpoZechinusCryptoModule`'s Keychain
+  /// functions in this same target to call, and is unreachable from JS: it is never
+  /// listed inside `Class(CryptoKey.self) { ... }`, so the Expo Modules bridge has no
+  /// way to invoke it. The exported hex string goes straight into a Keychain item
+  /// gated by `.biometryCurrentSet` (`cacheKeyForZeroTap`) — it is never logged,
+  /// returned across the JS bridge, or persisted anywhere else.
+  func exportForKeychainOnly() throws -> String {
+    try requireKey().withUnsafeBytes { Data($0) }.hexString
   }
 }
