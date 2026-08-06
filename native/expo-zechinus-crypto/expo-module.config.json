@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ExpoZechinusCryptoModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.zechinuscrypto.ExpoZechinusCryptoModule"]
+  }
+}

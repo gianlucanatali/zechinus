@@ -20,5 +20,14 @@
   // which npm workspace hoisting places only in mobile/node_modules — unresolvable
   // from a repo-root `tsc -p zechinus/tsconfig.json` run. See that file's own doc
   // comment for how/when it gets real typecheck coverage instead.
-  "exclude": ["node_modules", "adapters/cache/expoDeviceCacheStorage.ts"]
+  //
+  // native/expo-zechinus-crypto/src — same reason: `expo`'s TS types are a peerDependency
+  // of the native module itself, only resolvable inside a real consuming Expo app (see
+  // that package's own package.json). Real typecheck coverage happens when a consumer
+  // (mobile/) builds against it, not from this repo-root run.
+  "exclude": [
+    "node_modules",
+    "adapters/cache/expoDeviceCacheStorage.ts",
+    "native/expo-zechinus-crypto/src"
+  ]
 }

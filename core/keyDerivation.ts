@@ -27,7 +27,7 @@ import type { CryptoHandle, FieldAAD, EncryptedField } from "./types.ts";
  * MAC key from a given DEK, which is exactly what's needed: skip-write/optimistic-lock
  * compare hashes computed by potentially different handle instances for the same user.
  */
-const ZECHINUS_MAC_SALT = new TextEncoder().encode(
+export const ZECHINUS_MAC_SALT = new TextEncoder().encode(
   "zechinus-content-hash-mac-salt-v1",
 );
 

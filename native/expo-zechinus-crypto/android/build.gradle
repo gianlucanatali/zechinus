@@ -1,0 +1,33 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.zechinuscrypto'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.zechinuscrypto"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+  lintOptions {
+    abortOnError false
+  }
+  testOptions {
+    unitTests {
+      // Robolectric provides a real, correct shadow of android.util.Base64 (used by
+      // wrapSelf()) under plain `./gradlew test` — `returnDefaultValues = true` alone
+      // would just make it return null instead of throwing, which isn't a real result.
+      includeAndroidResources = true
+    }
+  }
+}
+
+dependencies {
+  implementation "com.google.crypto.tink:tink-android:1.13.0"
+
+  testImplementation "junit:junit:4.13.2"
+  testImplementation "org.robolectric:robolectric:4.13"
+}

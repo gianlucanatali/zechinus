@@ -52,14 +52,14 @@ function buildAADBytesV1(aad: FieldAAD): Uint8Array {
 }
 
 /** AAD-v2 (canonical, epoch-unaware): JSON-stringified 4-tuple — unambiguous regardless of content. */
-function buildAADBytesV2(aad: FieldAAD): Uint8Array {
+export function buildAADBytesV2(aad: FieldAAD): Uint8Array {
   return ENCODER.encode(
     JSON.stringify([aad.userId, aad.table, aad.field, aad.rowId]),
   );
 }
 
 /** AAD-v3 (epoch-aware, Fase 2.1): JSON-stringified 5-tuple, epoch included. */
-function buildAADBytesV3(aad: FieldAAD, epoch: number): Uint8Array {
+export function buildAADBytesV3(aad: FieldAAD, epoch: number): Uint8Array {
   return ENCODER.encode(
     JSON.stringify([aad.userId, aad.table, aad.field, aad.rowId, epoch]),
   );
@@ -70,7 +70,7 @@ function buildAADBytesV3(aad: FieldAAD, epoch: number): Uint8Array {
  * `5`/`6` = AAD-v3 (epoch-aware — `epoch` required, throws if missing/undefined, since
  * a v5/v6 blob is only ever produced WITH an epoch).
  */
-function buildAADBytes(
+export function buildAADBytes(
   aad: FieldAAD,
   v: 1 | 2 | 3 | 4 | 5 | 6,
   epoch?: number,
@@ -185,4 +185,101 @@ export async function decryptJson<T>(
 ): Promise<T> {
   const str = await decryptField(dek, enc, aad);
   return JSON.parse(str) as T;
+}
+
+/**
+ * The AEAD operation, injected instead of performed with a raw key — same wire
+ * format as `encryptField`/`decryptField`, but the actual seal/open happens wherever
+ * the delegate implements it (e.g. inside a native module's isolated key instance,
+ * `adapters/keyhandles/nativeModuleKeyHandle.ts`). This is what lets a `KeyHandle`
+ * built around an opaque native reference produce byte-identical envelopes to one
+ * built around a raw key.
+ */
+export interface AeadDelegate {
+  seal(nonce: Uint8Array, aad: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array>;
+  open(nonce: Uint8Array, aad: Uint8Array, ciphertext: Uint8Array): Promise<Uint8Array>;
+}
+
+/** Same pipeline as `encryptField`, with the AEAD operation delegated. */
+export async function encryptFieldWithDelegate(
+  delegate: AeadDelegate,
+  plaintext: string,
+  aad: FieldAAD,
+): Promise<EncryptedField> {
+  const raw = ENCODER.encode(plaintext);
+  const shouldCompress = raw.length > COMPRESS_THRESHOLD;
+  const payload = shouldCompress ? await gzipCompress(raw) : raw;
+  const epochAware = aad.epoch !== undefined;
+
+  const nonce = randomBytes(12);
+  try {
+    const aadBytes = epochAware ? buildAADBytesV3(aad, aad.epoch!) : buildAADBytesV2(aad);
+    return {
+      ct: toBase64(await delegate.seal(nonce, aadBytes, payload)),
+      n: toBase64(nonce),
+      v: epochAware ? (shouldCompress ? 6 : 5) : shouldCompress ? 4 : 3,
+      ...(epochAware ? { epoch: aad.epoch } : {}),
+    };
+  } finally {
+    clean(nonce);
+  }
+}
+
+/** Same pipeline as `decryptField`, with the AEAD operation delegated. */
+export async function decryptFieldWithDelegate(
+  delegate: AeadDelegate,
+  enc: EncryptedField,
+  aad: FieldAAD,
+): Promise<string> {
+  if (enc.v < 1 || enc.v > 6) {
+    throw new Error(`decryptFieldWithDelegate: unknown envelope version ${enc.v}`);
+  }
+  const payload = await delegate.open(
+    fromBase64(enc.n),
+    buildAADBytes(aad, enc.v, enc.epoch),
+    fromBase64(enc.ct),
+  );
+  const raw =
+    enc.v === 2 || enc.v === 4 || enc.v === 6
+      ? await gzipDecompress(payload)
+      : payload;
+  return DECODER.decode(raw);
+}
+
+/**
+ * Mirrors `encryptJson` exactly, including the fact that it ALWAYS gzips (`v: 4|6`)
+ * regardless of `COMPRESS_THRESHOLD`. Delegating to `encryptFieldWithDelegate` would emit
+ * `v: 3|5` for small payloads — a silent divergence between what web writes and what
+ * mobile writes for the same value. Both stay readable (the version is self-describing),
+ * but "the same store has two shapes depending on which client saved it" is how a later
+ * bug becomes unreproducible.
+ */
+export async function encryptJsonWithDelegate<T>(
+  delegate: AeadDelegate,
+  value: T,
+  aad: FieldAAD,
+): Promise<EncryptedField> {
+  const compressed = await gzipCompress(ENCODER.encode(JSON.stringify(value)));
+  const epochAware = aad.epoch !== undefined;
+  const nonce = randomBytes(12);
+  try {
+    const aadBytes = epochAware ? buildAADBytesV3(aad, aad.epoch!) : buildAADBytesV2(aad);
+    return {
+      ct: toBase64(await delegate.seal(nonce, aadBytes, compressed)),
+      n: toBase64(nonce),
+      v: epochAware ? 6 : 4,
+      ...(epochAware ? { epoch: aad.epoch } : {}),
+    };
+  } finally {
+    clean(nonce);
+  }
+}
+
+/** Decrypts a value encrypted with `encryptJsonWithDelegate`. */
+export async function decryptJsonWithDelegate<T>(
+  delegate: AeadDelegate,
+  enc: EncryptedField,
+  aad: FieldAAD,
+): Promise<T> {
+  return JSON.parse(await decryptFieldWithDelegate(delegate, enc, aad)) as T;
 }

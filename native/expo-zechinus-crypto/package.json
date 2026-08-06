@@ -1,0 +1,23 @@
+{
+  "name": "expo-zechinus-crypto",
+  "version": "1.0.0",
+  "description": "Native AEAD/HKDF/HMAC primitives with in-native-memory key isolation for zechinus",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "source": "src/index.ts",
+  "license": "MIT",
+  "homepage": "https://github.com/gianlucanatali/zechinus",
+  "files": [
+    "src",
+    "ios",
+    "android",
+    "expo-module.config.json",
+    "!ios/build",
+    "!android/build",
+    "!**/*Tests.swift",
+    "!android/src/test"
+  ],
+  "peerDependencies": {
+    "expo": "*"
+  }
+}
