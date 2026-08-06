@@ -77,7 +77,7 @@ labels" shape on top of `perKey`, use `defineLabelDict` instead of hand-rolling
 load-mutate-save — see README.
 
 `identity: "many"`'s row id generator is pluggable (`idGenerator?: () => string` on
-`StoreDef`, defaults to UUIDv4) — see README's Cardinality section.
+`StoreDef`, defaults to UUIDv4) — see `docs/stores.md` § Cardinality.
 
 Each cardinality is its own standalone builder (`buildKeyedStore`/`buildCollectionStore`/
 `buildPerUserStore` in `core/store.ts`), taking a shared `BuildContext` (def, migrators,
@@ -85,7 +85,7 @@ validateRead/Write) rather than closing over `defineStore`'s whole body. Adding 
 cardinality means writing one more `buildXyzStore` function + one dispatch branch in
 `defineStore` — never growing the existing branches.
 
-## Porting an existing table (legacy AAD) — `docs/legacy-aad-porting.md`
+## Porting an existing table (legacy AAD) — `docs/wire-format.md#legacy-aad`
 
 Read that file only when porting an existing table already encrypted under a different
 AAD convention — omit entirely for a brand-new store. Gist: `legacyAAD` on `defineStore`,
@@ -186,21 +186,22 @@ methods move opaque records around, nothing assumes SQL — so a non-relational 
 (MongoDB, say) is a new adapter implementing the same interface, no core changes; but that
 adapter still needs its own collection/table set up correctly first.
 
-## Extending `StorageAdapter` — `docs/extending-storage-adapter.md`
+## Extending `StorageAdapter` — `docs/adapters.md`
 
 Read that file when a new access pattern needs a capability the shipped adapters don't
 have. Gist: optional method on `StorageAdapter`, implement in the adapter(s), explicit
 throw if unsupported (never silent fallback), TDD test first. `getHashesByKeys` is the
 reference example of this recipe.
 
-## Aggregation extras — `docs/aggregation-extras.md`
+## Aggregation extras — `docs/aggregations.md` (+ `docs/adapters.md` for `tanstackAdapter`)
 
-Read that file when working with `defineAggregation` (not needed for plain `defineStore`
-work): `flush()`, `invalidateOn`/`invalidateChannel`, the cold-session hash check,
-`isAnyAggregationComputing()`, the aggregate-as-source cold-start gotcha, and why
-`tanstackAdapter` throws at construction unless `gcTime: Infinity`.
+Read `docs/aggregations.md` when working with `defineAggregation` (not needed for plain
+`defineStore` work): `flush()`, `invalidateOn`/`invalidateChannel`, the cold-session hash
+check, `isAnyAggregationComputing()`, the aggregate-as-source cold-start gotcha. Why
+`tanstackAdapter` throws at construction unless `gcTime: Infinity` moved to
+`docs/adapters.md` instead — it's adapter-implementation guidance, not aggregation-specific.
 
-## Node scripts & multi-user concurrency — `docs/node-multi-user.md`
+## Node scripts & multi-user concurrency — `docs/node.md`
 
 Read that file when writing a Node script/service (not browser code) that touches
 Zechinus stores. Gist: `configureSecureStore`'s ambient identity is one module-level
@@ -241,11 +242,11 @@ tests, component tests, build) — not just this package's own test suite.
   consumer yet. Optimistic locking AND in-session skip-fetch revalidation (the other two
   `content_hash` capabilities) ARE built — see the section above, don't confuse the three.
   **Mobile already has a persistent `CacheAdapter`** — `mobilePersistentCacheAdapter`/
-  `expoPersistentCacheAdapter()` (`adapters/`), device-encrypted, hydrates on cold launch
-  — not yet wired into `mobile/`'s own bootstrap.
+  `expoPersistentCacheAdapter()` (`adapters/cache/`), device-encrypted, hydrates on cold
+  launch — not yet wired into `mobile/`'s own bootstrap.
 - Existing hooks and `KeyProvider` implementations (React binding per cardinality,
   `useIsUnlocked`, `passkeyDekController`/`usePasskeyDek`, `alsKeyProvider`,
-  `useDevDekInjection`, `useIsAnyKeyedStoreLoading`, `setGzipImpl`): `docs/capability-reference.md`.
+  `useDevDekInjection`, `useIsAnyKeyedStoreLoading`, `setGzipImpl`): `docs/adapters.md`.
 
 ## Keeping this guide honest
 
