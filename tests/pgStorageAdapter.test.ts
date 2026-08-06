@@ -10,7 +10,7 @@ import test from "node:test";
 import {
   pgStorageAdapter,
   type PgClient,
-} from "../adapters/pgStorageAdapter.ts";
+} from "../adapters/storage/pgStorageAdapter.ts";
 import type { BlobRecord } from "../core/types.ts";
 
 function fakeClient(rows: Record<string, unknown>[] = []) {

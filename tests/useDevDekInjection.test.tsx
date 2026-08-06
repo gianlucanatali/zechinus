@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { cleanup, render, act, waitFor } from "@testing-library/react";
-import type { PasskeyDekController } from "../adapters/passkeyDekController.ts";
+import type { PasskeyDekController } from "../adapters/controllers/passkeyDekController.ts";
 import { useDevDekInjection } from "../react/useDevDekInjection.ts";
 
 afterEach(() => {

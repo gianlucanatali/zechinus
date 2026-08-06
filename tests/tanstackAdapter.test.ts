@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryClient } from "@tanstack/react-query";
-import { tanstackAdapter } from "../adapters/tanstackAdapter.ts";
+import { tanstackAdapter } from "../adapters/cache/tanstackAdapter.ts";
 
 // gcTime: Infinity is required (see the constructor guard tested below) — this
 // mirrors the config every real consumer must use, so these tests exercise the

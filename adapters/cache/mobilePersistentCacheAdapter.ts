@@ -29,7 +29,7 @@
  */
 import { gcm } from "@noble/ciphers/aes.js";
 import { randomBytes, clean } from "@noble/ciphers/utils.js";
-import type { CacheAdapter } from "../core/types.ts";
+import type { CacheAdapter } from "../../core/types.ts";
 
 /**
  * Where the device-local symmetric key (base64, 32 raw bytes) lives. The real

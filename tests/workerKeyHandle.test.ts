@@ -16,7 +16,7 @@ import test from "node:test";
 import {
   createWorkerKeyHandle,
   handleKeyHandleMessages,
-} from "../adapters/workerKeyHandle.ts";
+} from "../adapters/keyhandles/workerKeyHandle.ts";
 import { createKeyHandle, asRawDekBytes } from "../core/keyDerivation.ts";
 
 /** Wires a fake main-thread `Worker` directly to a fake worker-side `WorkerContext` — no real Worker. */

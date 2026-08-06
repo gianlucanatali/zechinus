@@ -13,8 +13,8 @@ import {
   unwrapWithDeviceKey,
   generateEphemeralDeviceKey,
   unwrapWithEphemeralKey,
-} from "../adapters/deviceKeyProvider.ts";
-import { mobileDeviceKeyProvider } from "../adapters/mobileDeviceKeyProvider.ts";
+} from "../adapters/crypto/deviceKeyProvider.ts";
+import { mobileDeviceKeyProvider } from "../adapters/crypto/mobileDeviceKeyProvider.ts";
 import { createKeyHandle, asRawDekBytes } from "../core/keyDerivation.ts";
 
 function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {

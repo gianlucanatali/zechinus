@@ -6,7 +6,7 @@
  *
  * Pure port-based design (`DeviceKeyStore`/`DeviceBlobStore`), so this whole file
  * runs under plain `node --test` with in-memory fakes — the real Expo-backed ports
- * (`expo-secure-store`/`expo-file-system`) live in `../adapters/expoDeviceCacheStorage.ts`,
+ * (`expo-secure-store`/`expo-file-system`) live in `../adapters/cache/expoDeviceCacheStorage.ts`,
  * a separate RN-only file never imported here (mirrors how `webauthnKeyProvider`'s
  * ceremony itself isn't unit-tested — see that file's own test for the same reasoning).
  */
@@ -17,7 +17,7 @@ import {
   mobilePersistentCacheAdapter,
   type DeviceKeyStore,
   type DeviceBlobStore,
-} from "../adapters/mobilePersistentCacheAdapter.ts";
+} from "../adapters/cache/mobilePersistentCacheAdapter.ts";
 
 /** In-memory fake standing in for expo-secure-store (the device-local symmetric key). */
 function fakeKeyStore(): DeviceKeyStore & { rawStorage: Map<string, string> } {

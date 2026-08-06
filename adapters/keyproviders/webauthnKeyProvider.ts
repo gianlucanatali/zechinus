@@ -11,7 +11,7 @@
  * for a native API, while reusing the same `zechinus/core/keyDerivation.ts` engine.
  */
 
-import { deriveKey } from "../core/keyDerivation.ts";
+import { deriveKey } from "../../core/keyDerivation.ts";
 
 // WebAuthn Level 3 PRF extension — not yet in @types/webidl.
 type PRFExtInput = AuthenticationExtensionsClientInputs & {

@@ -12,7 +12,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mnemonicRecovery } from "../adapters/mnemonicRecovery.ts";
+import { mnemonicRecovery } from "../adapters/keyproviders/mnemonicRecovery.ts";
 import { wordlist as italian } from "@scure/bip39/wordlists/italian.js";
 import { wordlist as english } from "@scure/bip39/wordlists/english.js";
 

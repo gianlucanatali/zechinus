@@ -13,7 +13,7 @@ import {
   unwrapWithEphemeralKey,
   wrapForDevicePublicKey,
   type DeviceWrappedKey,
-} from "./deviceKeyProvider.ts";
+} from "../crypto/deviceKeyProvider.ts";
 import { clean } from "@noble/ciphers/utils.js";
 
 export interface DekRotationRequestRow {

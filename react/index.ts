@@ -21,7 +21,7 @@ export {
 export { useAggregation, type UseAggregationResult } from "./useAggregation.ts";
 export { useIsAnyAggregationComputing } from "./useIsAnyAggregationComputing.ts";
 export { useIsAnyKeyedStoreLoading } from "./useIsAnyKeyedStoreLoading.ts";
-export { tanstackAdapter } from "../adapters/tanstackAdapter.ts";
+export { tanstackAdapter } from "../adapters/cache/tanstackAdapter.ts";
 export { OptimisticLockConflictError } from "./errors.ts";
 export { usePasskeyDek, type UsePasskeyDekResult } from "./usePasskeyDek.ts";
 export { useAutoLock } from "./useAutoLock.ts";

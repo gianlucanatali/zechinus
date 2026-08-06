@@ -16,19 +16,19 @@ import {
   createPasskeyDekController,
   type PasskeyWrapStorage,
   type WrappedKeyRow,
-} from "../adapters/passkeyDekController.ts";
+} from "../adapters/controllers/passkeyDekController.ts";
 import {
   createKeyHandle,
   asRawDekBytes,
   wrapKey,
 } from "../core/keyDerivation.ts";
-import type { WebauthnKeyProvider } from "../adapters/webauthnKeyProvider.ts";
-import type { MnemonicRecovery } from "../adapters/mnemonicRecovery.ts";
+import type { WebauthnKeyProvider } from "../adapters/keyproviders/webauthnKeyProvider.ts";
+import type { MnemonicRecovery } from "../adapters/keyproviders/mnemonicRecovery.ts";
 import { deriveKey } from "../core/keyDerivation.ts";
 import {
   deriveDevicePublicKey,
   wrapForDevicePublicKey,
-} from "../adapters/deviceKeyProvider.ts";
+} from "../adapters/crypto/deviceKeyProvider.ts";
 
 function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
   const out = new Uint8Array(len);

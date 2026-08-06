@@ -13,8 +13,8 @@ import {
   completeRotation,
   type DekRotationStorage,
   type DekRotationRequestRow,
-} from "../adapters/dekRotationCoordinator.ts";
-import { deriveDevicePublicKey } from "../adapters/deviceKeyProvider.ts";
+} from "../adapters/controllers/dekRotationCoordinator.ts";
+import { deriveDevicePublicKey } from "../adapters/crypto/deviceKeyProvider.ts";
 
 function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
   const out = new Uint8Array(len);
@@ -184,7 +184,7 @@ test("end-to-end: a THIRD device's unrelated request is untouched by another dev
   // sees only one row (e.g. between two fulfillPendingRotationRequests calls).
   const publicKeyForMine = storage.rows.get(mine)!.requestPublicKey;
   const { wrapForDevicePublicKey } =
-    await import("../adapters/deviceKeyProvider.ts");
+    await import("../adapters/crypto/deviceKeyProvider.ts");
   const wrapped = wrapForDevicePublicKey(publicKeyForMine, newDek);
   await storage.fulfillRequest(USER_ID, mine, wrapped);
 

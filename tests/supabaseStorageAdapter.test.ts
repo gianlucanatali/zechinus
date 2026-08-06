@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { supabaseStorageAdapter } from "../adapters/supabaseStorageAdapter.ts";
+import { supabaseStorageAdapter } from "../adapters/storage/supabaseStorageAdapter.ts";
 
 type Row = Record<string, unknown>;
 

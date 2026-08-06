@@ -13,7 +13,7 @@
  */
 import { useEffect } from "react";
 import { asRawDekBytes, type KeyHandle } from "../core/keyDerivation.ts";
-import type { PasskeyDekController } from "../adapters/passkeyDekController.ts";
+import type { PasskeyDekController } from "../adapters/controllers/passkeyDekController.ts";
 
 // SEC-15: `enabled` is a runtime prop, so a bundler can never dead-code-eliminate
 // this hook's body from it alone — `if (someRuntimeBoolean) {...}` isn't the same

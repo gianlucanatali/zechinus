@@ -16,7 +16,7 @@
  * time instead of a real user's idle session — see `tests/tanstackAdapter.test.ts`.
  */
 import type { QueryClient } from "@tanstack/react-query";
-import type { CacheAdapter } from "../core/types.ts";
+import type { CacheAdapter } from "../../core/types.ts";
 
 export function tanstackAdapter(queryClient: QueryClient): CacheAdapter {
   const gcTime = queryClient.getDefaultOptions().queries?.gcTime;

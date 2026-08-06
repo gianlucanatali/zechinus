@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { webauthnKeyProvider } from "../adapters/webauthnKeyProvider.ts";
+import { webauthnKeyProvider } from "../adapters/keyproviders/webauthnKeyProvider.ts";
 
 function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
   const out = new Uint8Array(len);

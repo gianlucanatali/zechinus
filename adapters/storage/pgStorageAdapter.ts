@@ -13,7 +13,7 @@
  * The consumer supplies their own client, same pattern as `supabaseStorageAdapter(getClient)`.
  */
 
-import type { StorageAdapter, BlobRecord } from "../core/types.ts";
+import type { StorageAdapter, BlobRecord } from "../../core/types.ts";
 
 export interface PgClient {
   query<T extends Record<string, unknown> = Record<string, unknown>>(

@@ -15,8 +15,8 @@ import type {
   KeyHandle,
   WrappedKey,
   RawDekBytes,
-} from "../core/keyDerivation.ts";
-import type { FieldAAD, EncryptedField } from "../core/types.ts";
+} from "../../core/keyDerivation.ts";
+import type { FieldAAD, EncryptedField } from "../../core/types.ts";
 
 export interface WorkerLike {
   postMessage(data: unknown): void;

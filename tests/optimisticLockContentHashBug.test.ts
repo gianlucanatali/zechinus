@@ -34,7 +34,7 @@ import {
 import {
   pgStorageAdapter,
   type PgClient,
-} from "../adapters/pgStorageAdapter.ts";
+} from "../adapters/storage/pgStorageAdapter.ts";
 
 /**
  * A one-row-per-key fake Postgres: `query()` pattern-matches the query text shape

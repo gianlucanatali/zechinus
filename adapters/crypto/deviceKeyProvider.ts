@@ -39,8 +39,8 @@ import {
   unwrapKey,
   bytesToBase64,
   base64ToBytes,
-} from "../core/keyDerivation.ts";
-import type { WrappedKey } from "../core/keyDerivation.ts";
+} from "../../core/keyDerivation.ts";
+import type { WrappedKey } from "../../core/keyDerivation.ts";
 
 /** IMMUTABLE once any device public key has been derived/registered — changing it makes every derived device key different, permanently (same rationale as `webauthnKeyProvider`'s salts). */
 const DEVICE_KEY_SALT = new TextEncoder().encode("zechinus-device-key-v1");

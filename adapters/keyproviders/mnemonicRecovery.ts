@@ -15,7 +15,7 @@ import {
   mnemonicToEntropy,
   validateMnemonic,
 } from "@scure/bip39";
-import { deriveKey } from "../core/keyDerivation.ts";
+import { deriveKey } from "../../core/keyDerivation.ts";
 
 export interface MnemonicRecoveryConfig {
   /** Entropy bits — 256 = 24 words (matches AES-256 key strength), 128 = 12 words. */

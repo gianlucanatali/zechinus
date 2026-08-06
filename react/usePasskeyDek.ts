@@ -12,7 +12,7 @@ import type {
   PendingPasskeySetup,
   PendingRecoveryRegeneration,
   UnlockMethod,
-} from "../adapters/passkeyDekController.ts";
+} from "../adapters/controllers/passkeyDekController.ts";
 import type { KeyHandle, RawDekBytes } from "../core/keyDerivation.ts";
 
 export interface UsePasskeyDekResult {

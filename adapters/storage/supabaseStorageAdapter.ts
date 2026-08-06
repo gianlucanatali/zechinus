@@ -7,7 +7,7 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { StorageAdapter, BlobRecord, KeyColumn } from "../core/types.ts";
+import type { StorageAdapter, BlobRecord, KeyColumn } from "../../core/types.ts";
 
 async function selectRow(
   client: SupabaseClient,

@@ -22,16 +22,16 @@
  * hook, a Vue `ref` + watcher, a Svelte store, or a vanilla JS event listener — see
  * `zechinus/react/usePasskeyDek.ts` for the (thin) React binding.
  */
-import { unwrapKey, wrapKey, type KeyHandle } from "../core/keyDerivation.ts";
-import { asRawDekBytes, type RawDekBytes } from "../core/keyDerivation.ts";
+import { unwrapKey, wrapKey, type KeyHandle } from "../../core/keyDerivation.ts";
+import { asRawDekBytes, type RawDekBytes } from "../../core/keyDerivation.ts";
 import { clean, randomBytes } from "@noble/ciphers/utils.js";
-import type { WebauthnKeyProvider } from "./webauthnKeyProvider.ts";
-import type { MnemonicRecovery } from "./mnemonicRecovery.ts";
+import type { WebauthnKeyProvider } from "../keyproviders/webauthnKeyProvider.ts";
+import type { MnemonicRecovery } from "../keyproviders/mnemonicRecovery.ts";
 import {
   deriveDevicePublicKey,
   unwrapWithDeviceKey,
   type DeviceWrappedKey,
-} from "./deviceKeyProvider.ts";
+} from "../crypto/deviceKeyProvider.ts";
 
 export type WrappedKeyRow = { ciphertext: string; nonce: string };
 
