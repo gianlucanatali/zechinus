@@ -116,6 +116,7 @@ export {
   createKeyHandle,
   asRawDekBytes,
   bindKeyHandleFactory,
+  toCryptoHandle,
   type KeyHandle,
   type WrappedKey,
   type RawDekBytes,

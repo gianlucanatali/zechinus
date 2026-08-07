@@ -123,6 +123,28 @@ export interface KeyHandle extends CryptoHandle {
 }
 
 /**
+ * Narrows a `KeyHandle` down to the `CryptoHandle` shape at RUNTIME, not just at the
+ * type level — the returned object physically lacks `wrapWithKek`/`wrapForDevice`/
+ * `encryptField`/`decryptField`/`destroy`, so a cast (`as KeyHandle`) cannot recover
+ * them. Use this for any accessor whose callers only need read/write access to
+ * encrypted fields, never the ability to re-wrap the DEK under an attacker-chosen
+ * key/device public key. A type-only restriction is NOT sufficient — TypeScript
+ * types erase at runtime, exactly like `RawDekBytes`'s own doc comment already
+ * warns for a different value. See `docs/DECISIONS.md` for the incident this
+ * closes and why a type-only narrowing was tried first and rejected.
+ */
+export function toCryptoHandle(handle: KeyHandle): CryptoHandle {
+  return {
+    pid: handle.pid,
+    encryptJson: (value, aad) => handle.encryptJson(value, aad),
+    decryptJson: (enc, aad) => handle.decryptJson(enc, aad),
+    hashContent: handle.hashContent
+      ? (payload) => handle.hashContent!(payload)
+      : undefined,
+  };
+}
+
+/**
  * Branded raw key material — the actual DEK bytes, before being wrapped into a
  * `KeyHandle`. The brand is compile-time-only (erased at runtime — it does NOT stop
  * `console.log`, a debugger, or any other runtime inspection): its job is to make

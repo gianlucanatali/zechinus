@@ -23,6 +23,7 @@ import {
   asRawDekBytes,
   generateRawDekBytes,
   bindKeyHandleFactory,
+  toCryptoHandle,
 } from "../core/keyDerivation.ts";
 
 function bytesFromRange(len: number, fn: (i: number) => number): Uint8Array {
@@ -299,4 +300,49 @@ test("createKeyHandle: destroy() zeroes the internal key bytes", async () => {
   // documents destroy() doesn't throw and the handle remains inert afterwards, not a
   // literal read of internal state (deliberately not exposed).
   assert.equal(typeof handle.destroy, "function");
+});
+
+test("toCryptoHandle: strips wrapWithKek/wrapForDevice/encryptField/decryptField/destroy — physically, not just by type", () => {
+  const dek = generateRawDekBytes();
+  const handle = createKeyHandle(
+    dek,
+    bytesFromRange(16, (i) => i),
+    "test-pid-info",
+    {
+      wrapForDevice: async (key, devicePublicKeyB64) => ({
+        ciphertext: "x",
+        nonce: "y",
+        ephemeralPublicKeyB64: devicePublicKeyB64,
+      }),
+    },
+  );
+  const restricted = toCryptoHandle(handle);
+
+  assert.equal(restricted.pid, handle.pid);
+  assert.equal(typeof restricted.encryptJson, "function");
+  assert.equal(typeof restricted.decryptJson, "function");
+  assert.equal(typeof restricted.hashContent, "function");
+
+  // The point of this test: these must be ABSENT from the object itself, not just
+  // absent from its TypeScript type — `(restricted as any).wrapWithKek` proves a
+  // cast can't recover them, unlike a type-only restriction.
+  assert.equal((restricted as any).wrapWithKek, undefined);
+  assert.equal((restricted as any).wrapForDevice, undefined);
+  assert.equal((restricted as any).encryptField, undefined);
+  assert.equal((restricted as any).decryptField, undefined);
+  assert.equal((restricted as any).destroy, undefined);
+});
+
+test("toCryptoHandle: round-trips encryptJson/decryptJson through the restricted handle", async () => {
+  const dek = generateRawDekBytes();
+  const handle = createKeyHandle(
+    dek,
+    bytesFromRange(16, (i) => i),
+    "test-pid-info",
+  );
+  const restricted = toCryptoHandle(handle);
+  const aad = { userId: restricted.pid, table: "t", field: "f", rowId: "r" };
+  const enc = await restricted.encryptJson({ a: 1 }, aad);
+  const dec = await restricted.decryptJson<{ a: number }>(enc, aad);
+  assert.deepEqual(dec, { a: 1 });
 });
