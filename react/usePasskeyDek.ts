@@ -13,10 +13,14 @@ import type {
   PendingRecoveryRegeneration,
   UnlockMethod,
 } from "../adapters/controllers/passkeyDekController.ts";
-import type { KeyHandle, RawDekBytes } from "../core/keyDerivation.ts";
+import type { RawDekBytes } from "../core/keyDerivation.ts";
+import type { CryptoHandle } from "../core/types.ts";
 
 export interface UsePasskeyDekResult {
-  cryptoHandle: KeyHandle | null;
+  /** Deliberately `CryptoHandle`, not the full `KeyHandle` — no
+   * `wrapWithKek`/`wrapForDevice`. Flows that need wrap capability call
+   * `controller.getWrapCapableHandle()` directly, not through this hook. */
+  cryptoHandle: CryptoHandle | null;
   userId: string | null;
   setupStatus: PasskeySetupStatus;
   unlockMethod: UnlockMethod | null;

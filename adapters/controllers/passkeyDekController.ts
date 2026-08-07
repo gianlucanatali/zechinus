@@ -22,8 +22,14 @@
  * hook, a Vue `ref` + watcher, a Svelte store, or a vanilla JS event listener — see
  * `zechinus/react/usePasskeyDek.ts` for the (thin) React binding.
  */
-import { unwrapKey, wrapKey, type KeyHandle } from "../../core/keyDerivation.ts";
+import {
+  unwrapKey,
+  wrapKey,
+  toCryptoHandle,
+  type KeyHandle,
+} from "../../core/keyDerivation.ts";
 import { asRawDekBytes, type RawDekBytes } from "../../core/keyDerivation.ts";
+import type { CryptoHandle } from "../../core/types.ts";
 import { clean, randomBytes } from "@noble/ciphers/utils.js";
 import type { WebauthnKeyProvider } from "../keyproviders/webauthnKeyProvider.ts";
 import type { MnemonicRecovery } from "../keyproviders/mnemonicRecovery.ts";
@@ -170,8 +176,14 @@ export interface PendingRecoveryRegeneration {
 }
 
 export interface PasskeyDekController {
-  /** Matches the `KeyProvider` port shape — usable directly as one. */
-  getCryptoHandle(): KeyHandle | null;
+  /**
+   * Matches the `KeyProvider` port shape — usable directly as one. Deliberately
+   * narrower than the full `KeyHandle` (no `wrapWithKek`/`wrapForDevice`) — see
+   * `getWrapCapableHandle()` for the few flows that need wrap capability. See
+   * `docs/DECISIONS.md` for why this accessor used to return the full handle and
+   * what that exposed.
+   */
+  getCryptoHandle(): CryptoHandle | null;
   getUserId(): string | null;
   getSetupStatus(): PasskeySetupStatus;
   /** How the DEK was unlocked this session — `null` when locked. See `UnlockMethod`. */
@@ -200,7 +212,9 @@ export interface PasskeyDekController {
    * THIS session ever calls `beginRotation()`. Either writer's failure to produce
    * a previous handle leaves this `null`; `unlockWithPasskey()`'s decode failure
    * on that second row specifically never fails the unlock itself. */
-  getPreviousCryptoHandle(): KeyHandle | null;
+  /** Same runtime narrowing as `getCryptoHandle()` — read-fallback consumers during
+   * a rotation never need wrap capability on the previous-epoch handle. */
+  getPreviousCryptoHandle(): CryptoHandle | null;
   subscribe(callback: () => void): () => void;
 
   /** Activates a caller-supplied raw DEK directly — dev/test injection, or after a
@@ -308,19 +322,13 @@ export interface PasskeyDekController {
   completeRotationSession(): void;
 
   /**
-   * Wraps the currently-unlocked DEK for another device's ephemeral public key —
-   * used to fulfil a pending rotation handshake request (`dek_rotation_requests`)
-   * from a device that fell behind. Delegates to `KeyHandle.wrapForDevice` — raw
-   * DEK bytes never leave this call, unlike `wrapForDevicePublicKey` (which the
-   * rotation-driving device uses transiently in `beginRotation`, before this
-   * handle even exists). Requires `getCryptoHandle()` non-null; throws otherwise,
-   * and throws if the current handle was built without `wrapForDevice` support.
+   * The full `KeyHandle` (adds `wrapWithKek`/`wrapForDevice` back on top of
+   * `CryptoHandle`) — only for flows that must re-wrap the DEK under a new
+   * KEK/device key: adding a passkey, regenerating recovery words, the DEK
+   * rotation handshake, device-link. Prefer `getCryptoHandle()` for anything
+   * else — see `docs/DECISIONS.md`.
    */
-  wrapCurrentDekForDevice(devicePublicKeyB64: string): Promise<{
-    ciphertext: string;
-    nonce: string;
-    ephemeralPublicKeyB64: string;
-  }>;
+  getWrapCapableHandle(): KeyHandle | null;
 
   /**
    * Re-derives this device's KEK via a fresh WebAuthn PRF prompt on the SAME
@@ -393,6 +401,28 @@ export function createPasskeyDekController(
 
   let cryptoHandle: KeyHandle | null = null;
   let previousCryptoHandle: KeyHandle | null = null;
+
+  // toCryptoHandle() builds a NEW object every call — calling it fresh inside the
+  // accessor below would make getCryptoHandle() return a different reference on
+  // every invocation even when the underlying handle hasn't changed, which breaks
+  // React's useSyncExternalStore contract (getSnapshot must be reference-stable
+  // between state changes, or it re-renders in an infinite loop) — and broke the
+  // reference-equality assertions already in this file's own test suite, including
+  // one that expects the SAME KeyHandle to map to the SAME restricted object whether
+  // it's currently reachable via getCryptoHandle() or, after a rotation promotes a
+  // new handle to current, via getPreviousCryptoHandle() — a single cache keyed by
+  // current/previous slot would violate that. Keyed by the underlying KeyHandle
+  // itself (WeakMap — entries drop once a handle is no longer referenced anywhere,
+  // e.g. after destroy()), not by slot, so identity is preserved across the rotation.
+  const restrictedHandleCache = new WeakMap<KeyHandle, CryptoHandle>();
+  function toCachedCryptoHandle(handle: KeyHandle): CryptoHandle {
+    let restricted = restrictedHandleCache.get(handle);
+    if (!restricted) {
+      restricted = toCryptoHandle(handle);
+      restrictedHandleCache.set(handle, restricted);
+    }
+    return restricted;
+  }
   let userId: string | null = null;
   let setupStatus: PasskeySetupStatus = "pending";
   let unlockMethod: UnlockMethod | null = null;
@@ -452,13 +482,16 @@ export function createPasskeyDekController(
   }
 
   return {
-    getCryptoHandle: () => cryptoHandle,
+    getCryptoHandle: () =>
+      cryptoHandle ? toCachedCryptoHandle(cryptoHandle) : null,
     getUserId: () => userId,
     getSetupStatus: () => setupStatus,
     getUnlockMethod: () => unlockMethod,
     getUnlockCredentialId: () => unlockCredentialId,
     getDevicePublicKey: () => devicePublicKey,
-    getPreviousCryptoHandle: () => previousCryptoHandle,
+    getPreviousCryptoHandle: () =>
+      previousCryptoHandle ? toCachedCryptoHandle(previousCryptoHandle) : null,
+    getWrapCapableHandle: () => cryptoHandle,
     subscribe(callback) {
       listeners.add(callback);
       return () => listeners.delete(callback);
@@ -709,20 +742,6 @@ export function createPasskeyDekController(
         previousCryptoHandle = null;
         notify();
       }
-    },
-
-    async wrapCurrentDekForDevice(devicePublicKeyB64) {
-      if (!cryptoHandle) {
-        throw new Error(
-          "passkeyDekController.wrapCurrentDekForDevice: no crypto handle currently unlocked — unlock first.",
-        );
-      }
-      if (!cryptoHandle.wrapForDevice) {
-        throw new Error(
-          "passkeyDekController.wrapCurrentDekForDevice: current handle was not built with wrapForDevice support.",
-        );
-      }
-      return cryptoHandle.wrapForDevice(devicePublicKeyB64);
     },
 
     async rewrapCurrentCredentialAtEpoch(newEpoch) {

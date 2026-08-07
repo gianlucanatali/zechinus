@@ -41,6 +41,7 @@ function fakeController(): PasskeyDekController & {
     getUnlockCredentialId: () => null,
     getDevicePublicKey: () => null,
     getPreviousCryptoHandle: () => null,
+    getWrapCapableHandle: () => null,
     subscribe: () => () => {},
     setDek: async (userId, rawBytes, credentialId) => {
       setDekCalls.push({
@@ -69,9 +70,6 @@ function fakeController(): PasskeyDekController & {
       throw new Error("not used in this test");
     },
     completeRotationSession: () => {},
-    wrapCurrentDekForDevice: async () => {
-      throw new Error("not used in this test");
-    },
     rewrapCurrentCredentialAtEpoch: async () => {
       throw new Error("not used in this test");
     },

@@ -851,7 +851,7 @@ test("checkSetupNeeded: a different uid must never reuse a handle unlocked for s
 });
 
 // --- Task 1: passkey_key_wraps epoch coexistence (unlockWithPasskey rebuilds
-// getPreviousCryptoHandle() from DB) + wrapCurrentDekForDevice
+// getPreviousCryptoHandle() from DB)
 
 test("unlockWithPasskey: a single row for the credential behaves exactly as before — getPreviousCryptoHandle() stays null", async () => {
   const storage = memoryWrapStorage();
@@ -993,52 +993,49 @@ test("memoryWrapStorage double: savePasskeyWrap with different dekEpoch for the 
   assert.deepEqual(rows.map((r) => r.dekEpoch).sort(), [1, 2]);
 });
 
-test("wrapCurrentDekForDevice: throws when locked (no crypto handle unlocked)", async () => {
+test("getCryptoHandle() returns a runtime-restricted object, not the full KeyHandle", async () => {
   const controller = createPasskeyDekController({
     provider: fakeWebauthnProvider(),
     recovery: fakeMnemonicRecovery(),
     storage: memoryWrapStorage(),
     createHandle: testCreateHandle,
   });
-  await assert.rejects(() =>
-    controller.wrapCurrentDekForDevice("some-device-pubkey-b64"),
+  await controller.setDek(
+    "user-1",
+    asRawDekBytes(bytesFromRange(32, (i) => i)),
   );
+
+  const handle = controller.getCryptoHandle();
+  assert.ok(handle);
+  assert.equal((handle as any).wrapWithKek, undefined);
+  assert.equal((handle as any).wrapForDevice, undefined);
 });
 
-test("wrapCurrentDekForDevice: unlocked with wrapForDevice support delegates to the handle and returns its shape", async () => {
-  let calledWith: string | undefined;
-  const createHandleWithWrapForDevice = (
-    rawBytes: ReturnType<typeof asRawDekBytes>,
-  ) =>
-    createKeyHandle(rawBytes, TEST_PID_SALT, "test-pid-info", {
-      wrapForDevice: async (_key, devicePublicKeyB64) => {
-        calledWith = devicePublicKeyB64;
-        return {
-          ciphertext: "fake-ciphertext",
-          nonce: "fake-nonce",
-          ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
-        };
-      },
-    });
+test("getWrapCapableHandle() still returns the full KeyHandle with wrapWithKek", async () => {
   const controller = createPasskeyDekController({
     provider: fakeWebauthnProvider(),
     recovery: fakeMnemonicRecovery(),
     storage: memoryWrapStorage(),
-    createHandle: createHandleWithWrapForDevice,
+    createHandle: testCreateHandle,
   });
   await controller.setDek(
     "user-1",
     asRawDekBytes(bytesFromRange(32, (i) => i)),
   );
 
-  const result = await controller.wrapCurrentDekForDevice("device-pubkey-b64");
+  const handle = controller.getWrapCapableHandle();
+  assert.ok(handle);
+  assert.equal(typeof handle!.wrapWithKek, "function");
+});
 
-  assert.equal(calledWith, "device-pubkey-b64");
-  assert.deepEqual(result, {
-    ciphertext: "fake-ciphertext",
-    nonce: "fake-nonce",
-    ephemeralPublicKeyB64: "fake-ephemeral-pubkey",
+test("wrapCurrentDekForDevice no longer exists on the controller", async () => {
+  const controller = createPasskeyDekController({
+    provider: fakeWebauthnProvider(),
+    recovery: fakeMnemonicRecovery(),
+    storage: memoryWrapStorage(),
+    createHandle: testCreateHandle,
   });
+  assert.equal((controller as any).wrapCurrentDekForDevice, undefined);
 });
 
 // --- Task 3: rewrapCurrentCredentialAtEpoch — rotation-driving device re-wraps
@@ -1709,7 +1706,9 @@ test("tryZeroTapRestore: epoch matches — adopts the restored handle, no ceremo
   });
 
   assert.equal(await controller.tryZeroTapRestore("user-1"), true);
-  assert.equal(controller.getCryptoHandle(), restored);
+  // getCryptoHandle() is now always the restricted CryptoHandle (Task 2) — the
+  // full raw handle is only reachable via getWrapCapableHandle().
+  assert.equal(controller.getWrapCapableHandle(), restored);
   assert.equal(controller.getUnlockCredentialId(), "cred-1");
 });
 
@@ -1760,7 +1759,7 @@ test("tryZeroTapRestore: getCurrentEpoch throws (offline) — fails open, adopts
   });
 
   assert.equal(await controller.tryZeroTapRestore("user-1"), true);
-  assert.equal(controller.getCryptoHandle(), restored);
+  assert.equal(controller.getWrapCapableHandle(), restored);
 });
 
 test("unlockWithPasskey({silent:true}): uses the provider's silent ceremony variant when available, never the regular one", async () => {
