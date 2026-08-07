@@ -5,7 +5,7 @@ import Security
 /// `ExpoZechinusCryptoModule`'s `AsyncFunction` closures into a plain type for the same
 /// reason `CryptoKeyRef` is a plain type and not the `Module` itself (see that file's own
 /// doc comment): a `Module` isn't comfortably instantiable in XCTest, and this type is what
-/// Task A9 Step 3's gate needs to test directly.
+/// `ZeroTapKeychainStoreTests.swift` needs to test directly.
 enum ZeroTapKeychainStore {
   private static func account(_ userId: String) -> String { "zechinus.zero-tap-dek.v1.\(userId)" }
 

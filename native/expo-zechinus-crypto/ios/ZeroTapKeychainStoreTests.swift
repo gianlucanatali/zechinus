@@ -2,9 +2,10 @@ import XCTest
 @testable import ExpoZechinusCrypto
 
 final class ZeroTapKeychainStoreTests: XCTestCase {
-  // Real device/biometric behavior is NOT simulable — see Task C3, its only real
-  // verification. What IS testable here: the failure paths never crash and never leak
-  // key material through an unexpected code path.
+  // Real device/biometric behavior is NOT simulable — a physical device with an
+  // enrolled biometric is its only real verification. What IS testable here: the
+  // failure paths never crash and never leak key material through an unexpected
+  // code path.
 
   func testTryRestoreReturnsNilWhenNothingCached() {
     let userId = "zero-tap-test-user-\(UUID().uuidString)"

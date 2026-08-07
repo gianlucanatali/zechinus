@@ -146,3 +146,43 @@ symlink a real consumer would use) right up until the package is extracted and
 published standalone, at which point it becomes a circular dependency on itself. Catching
 it at typecheck time, before extraction, is what made this actual extraction
 (this repository) a rename-and-push instead of a hunt for hidden coupling.
+
+## Native-module DEK isolation (mobile): a per-instance Expo class, not a global key
+
+React Native has no Web Workers — the mechanism `workerKeyHandle.ts` uses to keep a
+DEK's raw bytes out of the main JS heap on web. The closest real analogue on iOS/Android
+is a native module with a genuine per-instance object, not a singleton holding one
+global key: `nativeModuleKeyHandle.ts` builds each `KeyHandle` around a distinct native
+`CryptoKey` instance (Swift `CryptoKeyRef`/CryptoKit, Kotlin `CryptoKeyRef`/`javax.crypto`
++ Tink for HKDF), exposed via Expo's `Class`/`SharedObject` binding — confirmed to exist
+in the Expo Modules API before any native code was written, not assumed. A DEK rotation
+keeps two handles alive at once (the current and previous epoch); destroying one must
+never affect the other, the same invariant `new Worker()` guarantees on web.
+
+**What this does not claim.** Native memory is not sandboxed — the native object lives
+in the same process and address space as the rest of the app, not behind a hardware or
+OS process boundary. It closes off casual/JS-level extraction of raw key bytes, not
+code-execution-level compromise. JS can still use the key as an oracle (call
+encrypt/decrypt/hash through it) for as long as the handle is alive; it just can never
+read the bytes back out.
+
+**Rejected: iOS Secure Enclave.** The Enclave only generates/imports asymmetric P-256
+keys — it cannot hold an arbitrary AES key, and this DEK is derived from a passkey PRF
+output or an unwrap, not born inside the Enclave.
+
+**Rejected (for now): Android Keystore with real key import**, which would be a genuine
+hardware-backed boundary unlike the process-memory isolation actually shipped. Rejected
+because it would only exist on one platform (iOS has no equivalent for an arbitrary AES
+key) and because Android Keystore doesn't expose HKDF/HMAC on an imported key the same
+way this design needs — worth reconsidering as Android-only follow-up work if the
+platform asymmetry becomes a practical problem.
+
+**A real, undecided asymmetry**: an OS-level biometric ACL on the cached zero-tap entry
+gates iOS's Keychain read only (`SecItemCopyMatching`) — writing a `.biometryCurrentSet`
+item doesn't require a live ceremony, since the caller already holds the plaintext. A
+symmetric AndroidKeyStore key with `setUserAuthenticationRequired(true)` gates both
+directions identically, so caching a key right after unlock shows a second live
+biometric prompt on Android that iOS never shows. The standard fix (an asymmetric
+Android key: encrypt with the public key freely, decrypt with the gated private key) is
+deferred to verification on a real device, not decided without hardware to confirm it
+against.

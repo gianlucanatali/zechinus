@@ -54,8 +54,9 @@ function bytesToUUIDLocal(bytes: Uint8Array): string {
 
 /**
  * Builds a `KeyHandle` around a key the native module already holds. Used by the OS-gated
- * zero-tap cache (Task A9), where the key is restored inside the boundary and no raw bytes
- * exist on the JS side at any point — not even as an argument.
+ * zero-tap cache (`ZeroTapKeychainStore`/`ZeroTapKeystoreStore`), where the key is
+ * restored inside the boundary and no raw bytes exist on the JS side at any point — not
+ * even as an argument.
  */
 export async function createNativeModuleKeyHandleForLoadedKey(
   nativeKey: NativeCryptoKey,
@@ -67,7 +68,8 @@ export async function createNativeModuleKeyHandleForLoadedKey(
   // Same derivation as `createKeyHandle`: HKDF(dek, ZECHINUS_MAC_SALT,
   // "zechinus/content-hash-v1", 32). It must match byte for byte, or the `content_hash`
   // mobile computes for a given content won't match web's, and every skip-write /
-  // optimistic-lock comparison between the two clients diverges. Verified in Task A6.
+  // optimistic-lock comparison between the two clients diverges — verified against the
+  // JS reference implementation in InteropVectorTests.swift/InteropVectorTest.kt.
   const macKey = await nativeKey.hkdfDerive(ZECHINUS_MAC_SALT, "zechinus/content-hash-v1", 32);
   try {
     await nativeKey.initMacKey(macKey);

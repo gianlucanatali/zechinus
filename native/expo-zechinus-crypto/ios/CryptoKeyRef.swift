@@ -99,8 +99,8 @@ public final class CryptoKeyRef: SharedObject {
     guard ciphertext.count > 16 else { throw ZechinusCryptoError.ciphertextTooShort(ciphertext.count) }
     // `Data(...)` around each slice is REQUIRED: a Data slice keeps the parent's index
     // base, so slicing an already-sliced Data reads from the wrong offset. Re-wrapping
-    // rebases to 0. Task A6 exercises this path through this method, not through raw
-    // CryptoKit — which is the only way the bug would have been caught.
+    // rebases to 0. `InteropVectorTests.swift` exercises this path through this method,
+    // not through raw CryptoKit — which is the only way the bug would have been caught.
     let body = Data(ciphertext.prefix(ciphertext.count - 16))
     let tag = Data(ciphertext.suffix(16))
     let sealed = try AES.GCM.SealedBox(

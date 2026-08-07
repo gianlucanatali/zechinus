@@ -4,10 +4,11 @@ public class ExpoZechinusCryptoModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExpoZechinusCrypto")
 
-    // Explicit "CryptoKey" name: the Swift type is `CryptoKeyRef` (to avoid any name
-    // collision with CryptoKit's own types), but `adapters/keyhandles/nativeModuleKeyHandle.ts`'s
-    // `NativeCryptoModule` interface expects `CryptoKey` on the JS side — this is the
-    // verification Task A3 Step 1 asked for, resolved here rather than left implicit.
+    // The Swift type is named `CryptoKeyRef` (the "Ref" marks it as a native reference
+    // object, not the abstract key concept), registered here under the explicit JS name
+    // "CryptoKey" — matching the Web Crypto API's own `CryptoKey` interface, and
+    // `adapters/keyhandles/nativeModuleKeyHandle.ts`'s `NativeCryptoModule.CryptoKey`
+    // field, which is what actually constructs it from JS.
     Class("CryptoKey", CryptoKeyRef.self) {
       Constructor { (rawBytes: Data) -> CryptoKeyRef in try CryptoKeyRef(rawBytes: rawBytes) }
 

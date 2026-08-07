@@ -26,7 +26,7 @@ import kotlin.coroutines.resume
  * so an attacker who adds their own biometric to an unlocked device cannot reach the
  * cached DEK.
  *
- * **Real platform asymmetry vs iOS, not yet resolved by device testing (Task C2/C3):**
+ * **Real platform asymmetry vs iOS, not yet resolved by real-device testing:**
  * iOS's Keychain ACL only gates READS (`SecItemCopyMatching`) — writing a
  * `.biometryCurrentSet` item (`SecItemAdd`) needs no live ceremony, since the caller
  * already has the plaintext in hand. A single symmetric AndroidKeyStore AES key with
