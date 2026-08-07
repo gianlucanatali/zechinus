@@ -12,7 +12,8 @@
  * mount if no real dek is active yet.
  */
 import { useEffect } from "react";
-import { asRawDekBytes, type KeyHandle } from "../core/keyDerivation.ts";
+import { asRawDekBytes } from "../core/keyDerivation.ts";
+import type { CryptoHandle } from "../core/types.ts";
 import type { PasskeyDekController } from "../adapters/controllers/passkeyDekController.ts";
 
 // SEC-15: `enabled` is a runtime prop, so a bundler can never dead-code-eliminate
@@ -62,7 +63,7 @@ function hexToBytes(hex: string): Uint8Array {
 export function useDevDekInjection(
   controller: PasskeyDekController,
   userId: string | null,
-  cryptoHandle: KeyHandle | null,
+  cryptoHandle: CryptoHandle | null,
   {
     enabled = false,
     setName = "__setTestDek",
@@ -135,7 +136,7 @@ export interface DevDekInjectionBridgeProps extends Omit<
 > {
   controller: PasskeyDekController;
   userId: string | null;
-  cryptoHandle: KeyHandle | null;
+  cryptoHandle: CryptoHandle | null;
 }
 
 /**
