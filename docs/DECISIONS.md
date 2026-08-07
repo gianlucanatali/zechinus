@@ -186,3 +186,98 @@ biometric prompt on Android that iOS never shows. The standard fix (an asymmetri
 Android key: encrypt with the public key freely, decrypt with the gated private key) is
 deferred to verification on a real device, not decided without hardware to confirm it
 against.
+
+## 2026-08-07 — Restricting wrap capability at the accessor boundary
+
+**Problem:** `PasskeyDekController.getCryptoHandle()`/`getPreviousCryptoHandle()`
+returned the full `KeyHandle` (including `wrapWithKek`/`wrapForDevice`) to every
+consumer, even though the overwhelming majority (stores, aggregations, every React
+hook) only ever use the `CryptoHandle` shape (`pid`/`encryptJson`/`decryptJson`/
+`hashContent`). Any JS code in the same bundle that could reach `getCryptoHandle()`
+could call `wrapWithKek`/`wrapForDevice` with an attacker-chosen KEK/device public
+key and recover the raw DEK — no secret of zechinus's own needs to be broken, since
+the caller already knows the key it supplied.
+
+A second, independent oracle was found during this investigation:
+`PasskeyDekController.wrapCurrentDekForDevice(devicePublicKeyB64)` — a public method
+on the controller itself (not reachable via `getCryptoHandle()` at all), taking an
+unvalidated device public key directly from the caller. Verified as having zero call
+sites anywhere in the consuming app (EasyWealth) — including its own intended
+internal caller (`fulfillPendingRotationRequests` in `dekRotationCoordinator.ts`
+calls `wrapForDevicePublicKey` directly with a raw DEK parameter, never through this
+method). Removed entirely rather than "fixed" — see the rejected-alternative below
+for why.
+
+**Decision:** `getCryptoHandle()`/`getPreviousCryptoHandle()` now return a runtime-
+restricted object (`toCryptoHandle()`, `core/keyDerivation.ts`) that physically lacks
+`wrapWithKek`/`wrapForDevice`/`encryptField`/`decryptField`/`destroy` — not a type-
+only restriction, which a cast would bypass. A new `getWrapCapableHandle()` returns
+the full `KeyHandle`, for the one legitimate external consumer (EasyWealth's
+device-link flow). `wrapCurrentDekForDevice` was deleted from the interface.
+
+**Rejected alternative — an authenticity tag on the KEK.** Considered validating
+that a `kek` passed to `wrapWithKek` actually came from `deriveKEKFromPRF`/
+`mnemonicRecovery().deriveKEK` (e.g. an HMAC tag appended by those functions,
+checked by `wrapKey`). Rejected: both derivation functions are pure and callable
+with ANY caller-chosen input — an attacker can call them directly with bytes/words
+of their own choosing, get back a validly "tagged" KEK, and still knows every bit
+of it. The tag would prove "this passed through the right function," not "the
+input was genuine" — which is the only thing that matters. Security theater, adds
+complexity, closes nothing.
+
+**Deviation found during implementation, not anticipated in the original plan:**
+`toCryptoHandle()` builds a NEW object literal on every call. A naive accessor
+(`() => cryptoHandle ? toCryptoHandle(cryptoHandle) : null`) breaks two things that
+weren't visible until actually running the test suite: (1) React's
+`useSyncExternalStore` contract — `getSnapshot` must return a reference-stable value
+between actual state changes, or components using `usePasskeyDek()` would re-render
+in an infinite loop in production; (2) reference-equality assertions already present
+in `tests/passkeyDekController.test.ts` (one of which expects the SAME restricted
+object whether a handle is reached via `getCryptoHandle()` before a rotation or
+`getPreviousCryptoHandle()` after — a single cache keyed by "current" vs "previous"
+slot, tried first, does not satisfy this). Fixed with a `WeakMap<KeyHandle,
+CryptoHandle>` keyed by the underlying handle itself, not by slot — entries drop
+once a handle is no longer referenced anywhere (e.g. after `destroy()`). The same
+issue and fix were applied to `react/useDevDekInjection.ts`
+(`DevDekInjectionBridge`), which also typed its `cryptoHandle` prop as the full
+`KeyHandle` despite only ever using it as a truthiness check — found while wiring up
+EasyWealth's `PasskeyContext.tsx`, which passes `usePasskeyDek()`'s now-restricted
+handle into it.
+
+**Structural risks this fix does NOT close — stated plainly, not deferred:**
+
+1. **Full closure of the passkey-PRF oracle is impossible for a web app**, not
+   merely expensive. `credential.getClientExtensionResults().prf.results.first` is
+   delivered to page JS as a plain, readable `ArrayBuffer` by the WebAuthn Level 3
+   PRF extension's own contract — there is no browser API that seals it into a
+   non-extractable `CryptoKey` before JS ever sees the raw bytes. Any JS executing
+   in that context at that moment — including a compromised dependency in the same
+   bundle — can read it, independently of anything in this fix.
+2. **Monkey-patching `navigator.credentials.get`/`.create`.** Neither frozen nor
+   protected by Trusted Types in this app today. A compromised dependency can
+   intercept the WebAuthn ceremony before it reaches zechinus at all, bypassing
+   this entire fix (and any conceivable fix inside zechinus/EasyWealth) — this is a
+   supply-chain risk (dependency pinning/auditing), out of scope for a code change
+   here.
+3. **`dek_rotation_requests` RLS permits the authenticated user to write their own
+   rows** (`auth.uid() = user_id`, no additional gate). Under the "malicious
+   same-session JS" threat model, a defensive check inside a future
+   `fulfillPendingRotationRequests` caller (verify the request is "legitimate")
+   would not help — the same compromised session can write its own "legitimate-
+   looking" request row first. Closing this for real needs an out-of-band
+   confirmation channel (e.g. explicit approval from an already-trusted second
+   device) that does not exist today — deliberately not built here, since the
+   multi-device rotation UI itself (key-custody roadmap Fase 2.3) is still
+   unbuilt; whoever builds it must design that channel as part of the feature,
+   not retrofit it.
+
+**What this fix DOES achieve:** it removes a large, easily-reachable surface
+(essentially every store/hook/aggregation in the app) that had no reason to be able
+to reach wrap capability at all, and deletes a live-but-unused oracle
+(`wrapCurrentDekForDevice`) with zero product cost. It protects against accidental
+future exposure (a well-meaning future change importing `getCryptoHandle()`
+somewhere new) and narrows what a code review needs to scrutinize. It does not, and
+cannot, protect against a fully compromised dependency executing in the same
+browser tab as an unlocked session — no client-side E2E encryption scheme can,
+without hardware-backed non-extractable keys the Web platform does not currently
+expose for this exact use case.
